@@ -83,7 +83,7 @@ public static class Constants
     /// It currently equals <see cref="MinBTCPayServerVersion"/>, which is the safe state, not a redundancy: the two
     /// stay separate constants so a submodule bump can move this one without silently moving the floor.
     /// </remarks>
-    public const string BuiltAgainstBTCPayServerVersion = "2.4.1";
+    public const string BuiltAgainstBTCPayServerVersion = "2.4.2";
 
     /// <summary>
     /// The <c>type=</c> discriminator of our Lightning connection string.
