@@ -105,7 +105,8 @@ public sealed class PostgresTestDatabase : IAsyncLifetime
                  "{Constants.DatabaseSchema}"."InvoiceRecords",
                  "{Constants.DatabaseSchema}"."OutgoingPayments",
                  "{Constants.DatabaseSchema}"."StablecoinQuotes",
-                 "{Constants.DatabaseSchema}"."SweepRecords";
+                 "{Constants.DatabaseSchema}"."SweepRecords",
+                 "{Constants.DatabaseSchema}"."UnilateralExitRecords";
              """);
         return factory;
     }

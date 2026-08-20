@@ -3,6 +3,7 @@ using System;
 using BTCPayServer.Plugins.Flint.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,41 +12,19 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace BTCPayServer.Plugins.Flint.Migrations
 {
     [DbContext(typeof(SparkPluginDbContext))]
-    partial class SparkPluginDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260820175701_UnilateralExitRecords")]
+    partial class UnilateralExitRecords
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
                 .HasDefaultSchema("BTCPayServer.Plugins.Flint")
-                .HasAnnotation("ProductVersion", "10.0.11")
+                .HasAnnotation("ProductVersion", "10.0.10")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
-
-            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.InvoicePaymentHash", b =>
-                {
-                    b.Property<string>("PaymentHash")
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("FirstSeenAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("InvoiceId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("PaymentMethodId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("PaymentHash");
-
-                    b.HasIndex("FirstSeenAt")
-                        .HasDatabaseName("IX_InvoicePaymentHashes_FirstSeenAt");
-
-                    b.ToTable("InvoicePaymentHashes", "BTCPayServer.Plugins.Flint");
-                });
 
             modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.InvoiceRecord", b =>
                 {
@@ -63,12 +42,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("CreditAbandonedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("CreditedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
@@ -96,13 +69,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.HasKey("PaymentHash");
 
                     b.HasIndex("StoreId", "CreatedAt");
-
-                    b.HasIndex("StoreId", "ExpiresAt")
-                        .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
-                        .HasFilter("\"Status\" <> 1");
-
-                    b.HasIndex("StoreId", "SettledAt")
-                        .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
 
                     b.HasIndex("StoreId", "Status");
 
@@ -139,129 +105,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.HasIndex("StoreId", "FirstAttemptAt");
 
                     b.ToTable("OutgoingPayments", "BTCPayServer.Plugins.Flint");
-                });
-
-            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.StablecoinQuote", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("text");
-
-                    b.Property<string>("AskedBaseUnits")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Asset")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Chain")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("ChainId")
-                        .HasColumnType("text");
-
-                    b.Property<string>("ContractAddress")
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("CreditedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("Decimals")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("DeliveredBaseUnits")
-                        .HasColumnType("text");
-
-                    b.Property<string>("DepositAddress")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("DepositBaseUnits")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("DestinationAsset")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<decimal>("DueAmount")
-                        .HasPrecision(38, 18)
-                        .HasColumnType("numeric(38,18)");
-
-                    b.Property<string>("ExpectedReceivedBaseUnits")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ExternalTxHash")
-                        .HasColumnType("text");
-
-                    b.Property<decimal>("FeeAmount")
-                        .HasPrecision(38, 18)
-                        .HasColumnType("numeric(38,18)");
-
-                    b.Property<string>("InvoiceId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("PaidBaseUnits")
-                        .HasColumnType("text");
-
-                    b.Property<string>("PaymentMethodId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("PaymentRequest")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("ProviderOrderId")
-                        .HasColumnType("text");
-
-                    b.Property<string>("ProviderQuoteId")
-                        .HasColumnType("text");
-
-                    b.Property<string>("SdkPaymentId")
-                        .HasColumnType("text");
-
-                    b.Property<string>("ServiceFeeAsset")
-                        .HasColumnType("text");
-
-                    b.Property<string>("ServiceFeeBaseUnits")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset?>("SettledAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("StoreId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("InvoiceId");
-
-                    b.HasIndex("SdkPaymentId")
-                        .IsUnique()
-                        .HasDatabaseName("IX_StablecoinQuotes_SdkPaymentId")
-                        .HasFilter("\"SdkPaymentId\" IS NOT NULL");
-
-                    b.HasIndex("StoreId", "ExpiresAt")
-                        .HasDatabaseName("IX_StablecoinQuotes_StoreId_ExpiresAt_Open")
-                        .HasFilter("\"SdkPaymentId\" IS NULL");
-
-                    b.HasIndex("StoreId", "SettledAt")
-                        .HasDatabaseName("IX_StablecoinQuotes_StoreId_SettledAt_Uncredited")
-                        .HasFilter("\"SdkPaymentId\" IS NOT NULL AND \"CreditedAt\" IS NULL");
-
-                    b.ToTable("StablecoinQuotes", "BTCPayServer.Plugins.Flint");
                 });
 
             modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.SweepRecord", b =>
