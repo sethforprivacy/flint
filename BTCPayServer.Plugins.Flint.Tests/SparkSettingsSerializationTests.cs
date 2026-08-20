@@ -1,3 +1,4 @@
+using System.Reflection;
 using Newtonsoft.Json;
 using Xunit;
 
@@ -48,6 +49,11 @@ public class SparkSettingsSerializationTests
                 DrainWhenSweeping = false,
                 DestinationMode = SweepDestinationMode.StaticAddress,
                 StaticAddress = "bcrt1qtxwcjjvf4ny9wsw9emgnpazey2vde3xhnyqpw0"
+            },
+            UnilateralExit = new UnilateralExitSettings
+            {
+                DisclosureAcknowledged = true,
+                EsploraApiUrl = "http://localhost:3002/api"
             }
         };
 
@@ -67,6 +73,8 @@ public class SparkSettingsSerializationTests
         Assert.False(read.Sweep.DrainWhenSweeping);
         Assert.Equal(SweepDestinationMode.StaticAddress, read.Sweep.DestinationMode);
         Assert.Equal("bcrt1qtxwcjjvf4ny9wsw9emgnpazey2vde3xhnyqpw0", read.Sweep.StaticAddress);
+        Assert.True(read.UnilateralExit.DisclosureAcknowledged);
+        Assert.Equal("http://localhost:3002/api", read.UnilateralExit.EsploraApiUrl);
     }
 
     [Fact]
@@ -150,6 +158,91 @@ public class SparkSettingsSerializationTests
         // What "this store has not configured Spark" looks like on the wire. It must not become an empty-but-present
         // configuration, which the engine would treat as a store to consider sweeping.
         Assert.Null(Deserialize<SparkSettings>("null"));
+    }
+
+    [Fact]
+    public void A_blob_with_no_unilateral_exit_section_gets_an_unacknowledged_default()
+    {
+        // Every blob written before this section existed looks like this, and there are a lot of them. The default
+        // that matters is DisclosureAcknowledged: it must read false, because a store that never saw the disclosure
+        // has not accepted it, and it is the server-side gate on producing signed exit transactions.
+        var read = Deserialize<SparkSettings>(
+            """{"ProtectedMnemonic":"protected-blob","PaymentKey":"key","Sweep":{"Enabled":true}}""")!;
+
+        Assert.NotNull(read.UnilateralExit);
+        Assert.False(read.UnilateralExit.DisclosureAcknowledged);
+        Assert.Null(read.UnilateralExit.EsploraApiUrl);
+    }
+
+    [Fact]
+    public void An_explicit_null_unilateral_exit_section_deserialises_to_null_despite_the_initialiser()
+    {
+        // The same language behaviour that produced the NullReferenceException out of a scheduler pass, pinned for
+        // the new section too: an explicit null beats a property initialiser, so every reader coalesces. A reader
+        // that dereferenced this unguarded would throw on the exit page rather than showing an unacknowledged one.
+        var read = Deserialize<SparkSettings>(
+            """{"ProtectedMnemonic":"protected-blob","UnilateralExit":null}""")!;
+
+        Assert.Null(read.UnilateralExit);
+    }
+
+    [Fact]
+    public void A_null_unilateral_exit_section_clones_into_an_unacknowledged_one()
+    {
+        // Clone() is on the path a store's settings take out of the service's cache, so it has to survive the blob
+        // above rather than propagating the null — and it must not invent an acknowledgement while doing so.
+        var clone = Deserialize<SparkSettings>("""{"UnilateralExit":null}""")!.Clone();
+
+        Assert.NotNull(clone.UnilateralExit);
+        Assert.False(clone.UnilateralExit.DisclosureAcknowledged);
+    }
+
+    [Fact]
+    public void Cloning_carries_the_unilateral_exit_section_and_leaves_the_original_alone()
+    {
+        // The reason the parent Clone() is deep: an aliased section would make an edit to the copy silently edit the
+        // cached settings, and for DisclosureAcknowledged that means an acknowledgement appearing on a store whose
+        // operator never gave one — or disappearing from one who did, when a save is rolled back.
+        var source = new SparkSettings
+        {
+            UnilateralExit = new UnilateralExitSettings
+            {
+                DisclosureAcknowledged = true,
+                EsploraApiUrl = "http://esplora.internal/api"
+            }
+        };
+
+        var clone = source.Clone();
+
+        Assert.True(clone.UnilateralExit.DisclosureAcknowledged);
+        Assert.Equal("http://esplora.internal/api", clone.UnilateralExit.EsploraApiUrl);
+        Assert.NotSame(source.UnilateralExit, clone.UnilateralExit);
+
+        clone.UnilateralExit.DisclosureAcknowledged = false;
+        clone.UnilateralExit.EsploraApiUrl = "http://elsewhere/api";
+
+        Assert.True(source.UnilateralExit.DisclosureAcknowledged);
+        Assert.Equal("http://esplora.internal/api", source.UnilateralExit.EsploraApiUrl);
+    }
+
+    [Fact]
+    public void The_unilateral_exit_section_has_exactly_the_properties_this_file_covers()
+    {
+        // A tripwire, not a tautology. The asserts above are hand-written, so a property added later would round-trip
+        // and clone untested — and a section property missed by Clone() is a setting that silently reverts on the
+        // next read out of the settings cache. Adding one has to mean coming here, which is the point.
+        Assert.Equal(
+            new[]
+            {
+                nameof(UnilateralExitSettings.DisclosureAcknowledged),
+                nameof(UnilateralExitSettings.EsploraApiUrl)
+            },
+            typeof(UnilateralExitSettings)
+                .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.CanRead)
+                .Select(p => p.Name)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToArray());
     }
 
     [Fact]
