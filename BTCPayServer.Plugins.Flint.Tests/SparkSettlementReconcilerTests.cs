@@ -1060,6 +1060,26 @@ public class SparkSettlementReconcilerTests
             CancellationToken cancellationToken = default) =>
             _inner.ReceiveCrossChainAsync(route, amount, maxSlippageBps, cancellationToken);
 
+        public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+            ulong feeRateSatPerVbyte,
+            string destinationAddress,
+            IReadOnlyList<string>? leafIds,
+            CancellationToken cancellationToken = default) =>
+            _inner.PrepareUnilateralExitAsync(
+                feeRateSatPerVbyte, destinationAddress, leafIds, cancellationToken);
+
+        public Task<SparkExitResult> UnilateralExitAsync(
+            ulong feeRateSatPerVbyte,
+            string destinationAddress,
+            IReadOnlyList<string>? leafIds,
+            IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+            byte[] fundingSecretKey,
+            Func<SparkExitQuote, string?> approveQuote,
+            CancellationToken cancellationToken = default) =>
+            _inner.UnilateralExitAsync(
+                feeRateSatPerVbyte, destinationAddress, leafIds, fundingUtxos, fundingSecretKey, approveQuote,
+                cancellationToken);
+
         public Task DisconnectAsync() => _inner.DisconnectAsync();
 
         public void Dispose() => _inner.Dispose();
