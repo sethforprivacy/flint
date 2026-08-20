@@ -142,7 +142,7 @@ public class GreenfieldSparkProvisioningTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("wibble")]
-    // Named on purpose: there is no unilateral-exit path anywhere in this plugin, so asking for one is simply an
+    // Named on purpose: the API offers no unilateral-exit path, so asking for one is simply an
     // unrecognised seed source rather than something the API quietly interprets.
     [InlineData("unilateral-exit")]
     public async Task An_unrecognised_seed_source_is_refused_with_the_plugins_own_message(string? value)

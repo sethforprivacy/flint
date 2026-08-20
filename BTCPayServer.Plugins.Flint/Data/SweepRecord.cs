@@ -18,7 +18,8 @@ namespace BTCPayServer.Plugins.Flint.Data;
 /// behaviour is not documented by the SDK; it was verified against coop exits on a funded regtest run.
 /// </para>
 /// <para>
-/// Every sweep this records is a <b>cooperative exit</b>. There is no unilateral-exit path in this plugin.
+/// Every sweep this records is a <b>cooperative exit</b>. A unilateral exit is never recorded here — the
+/// experimental unilateral-exit flow keeps its own records (<c>UnilateralExitRecord</c>).
 /// </para>
 /// <para>
 /// The row is also the merchant's explanation of a sweep that did <em>not</em> happen: a refusal writes a
