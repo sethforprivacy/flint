@@ -87,6 +87,26 @@
             Deposit address and unclaimed deposits
         </a>
 
+        @if (Constants.UnilateralExitEnabled)
+        {
+            @*
+                Rendered only behind the server-side switch, and the switch is what makes the whole feature
+                exist: with it off there is no section, no link, and the page it points at answers "not found".
+                A merchant on a normal server never learns this is here, which is the intent — it is an
+                experiment, and an experiment that can spend their own on-chain money.
+            *@
+            <h3 class="mt-5 mb-3">Unilateral exit</h3>
+            <p class="text-secondary">
+                <strong>Experimental, and a last resort.</strong> Forces this store's balance on-chain without
+                Spark's cooperation, funded by your own Bitcoin and broadcast by you, over days of timelocks. A
+                normal sweep is the way to get funds out; this is for when that has stopped working.
+            </p>
+            <a class="btn btn-outline-danger" asp-action="Exit" asp-route-storeId="@Model.StoreId"
+               id="SparkUnilateralExitLink">
+                Unilateral exit
+            </a>
+        }
+
         <form method="post" asp-action="AdvancedSweep" asp-route-storeId="@Model.StoreId"
               permission="@Policies.CanModifyStoreSettings">
             <h3 class="mt-5 mb-3">Sweep tuning</h3>
