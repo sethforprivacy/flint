@@ -15,7 +15,8 @@ the swept amount") live on the **Advanced** page, because their defaults — no 
 the swept amount — are right for almost every store.
 
 **Every sweep is a cooperative exit** — the plugin asks Spark's service providers to build and broadcast a
-Bitcoin transaction. There is no unilateral-exit path in this plugin, in its UI, or anywhere in its code.
+Bitcoin transaction. Sweeping never performs a unilateral exit — the only unilateral path in the plugin is
+the experimental, environment-gated flow on the Advanced page, which nothing here can reach or trigger.
 "Take the exit fee out of the swept amount" is the SDK's `FeesIncluded` fee policy on a cooperative exit
 and nothing more.
 

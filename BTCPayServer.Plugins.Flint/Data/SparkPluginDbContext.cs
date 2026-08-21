@@ -13,6 +13,18 @@ public class SparkPluginDbContext : DbContext
     public DbSet<InvoiceRecord> InvoiceRecords { get; set; } = null!;
     public DbSet<OutgoingPaymentRecord> OutgoingPayments { get; set; } = null!;
     public DbSet<SweepRecord> SweepRecords { get; set; } = null!;
+    public DbSet<UnilateralExitRecord> UnilateralExitRecords { get; set; } = null!;
+
+    /// <summary>
+    /// Name of the partial unique index that enforces one active unilateral exit per store.
+    /// </summary>
+    /// <remarks>
+    /// Named explicitly rather than left to EF's convention because
+    /// <see cref="EfUnilateralExitRecordStore"/> matches Postgres's unique-violation by constraint name: the
+    /// primary key raises the same SQLSTATE and means something entirely different. Renaming this index without
+    /// renaming it there turns an ordinary race into an unhandled exception on a money-moving page.
+    /// </remarks>
+    public const string ActiveUnilateralExitIndexName = "UX_UnilateralExitRecords_ActiveStore";
 
     public SparkPluginDbContext(DbContextOptions<SparkPluginDbContext> options) : base(options)
     {
@@ -56,6 +68,33 @@ public class SparkPluginDbContext : DbContext
             entity.HasIndex(record => new { record.StoreId, record.CreatedAt });
             // Every pass of the sweep engine opens by looking for this store's in-flight rows.
             entity.HasIndex(record => new { record.StoreId, record.Status });
+        });
+
+        modelBuilder.Entity<UnilateralExitRecord>(entity =>
+        {
+            // The plugin-generated UUID is the primary key. Unlike the sweep table's, it is not an SDK
+            // idempotency key and guarantees nothing beyond uniqueness — a unilateral exit has no SDK-side
+            // identity to be idempotent on, because the SDK never broadcasts it.
+            entity.HasKey(record => record.Id);
+            // The exit page reads the store's history newest-first. Store-leading, so it also serves the plain
+            // "this store's exits" scan — including the MAX(FundingKeyIndex) a new quote allocates from —
+            // without a second single-column index.
+            entity.HasIndex(record => new { record.StoreId, record.CreatedUtc });
+            // Every entry to the page opens by looking for the store's one active exit, which is the
+            // single-flight guard on quoting.
+            entity.HasIndex(record => new { record.StoreId, record.Status });
+            // And that guard is enforced here rather than only in the service. The service's "does this store
+            // already have an active exit?" read and the insert that follows it are two statements, so a second
+            // server — or a request that slipped past the in-process gate — could pass the check and still
+            // insert. Two active exits would compete for the same leaves, so the database refuses the second.
+            //
+            // The filter names the two non-terminal statuses by their persisted numbers (AwaitingFunding = 0,
+            // Built = 1) because it is raw SQL and cannot see the enum. Adding a status means changing this, the
+            // store's queries and UnilateralExitRecord.IsActive together.
+            entity.HasIndex(record => record.StoreId)
+                .HasDatabaseName(ActiveUnilateralExitIndexName)
+                .IsUnique()
+                .HasFilter("\"Status\" IN (0, 1)");
         });
     }
 }

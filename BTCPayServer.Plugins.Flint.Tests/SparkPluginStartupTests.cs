@@ -171,10 +171,13 @@ public class SparkPluginStartupTests
                      typeof(SparkSweepSettingsService),
                      typeof(SweepDestinationResolver),
                      typeof(ISweepAddressSource),
-                     // Reaches core's graph for IHttpClientFactory, and is the only thing in the plugin that
-                     // does. It is registered alongside its own named client, so this fails if that registration
+                     // Reaches core's graph for IHttpClientFactory (as does SparkExitFundingExplorer below).
+                     // It is registered alongside its own named client, so this fails if that registration
                      // is ever dropped in favour of assuming core made one.
                      typeof(CrossChainCatalog),
+                     typeof(IUnilateralExitRecordStore),
+                     typeof(SparkExitFundingExplorer),
+                     typeof(ISparkUnilateralExitService),
                      typeof(SparkReconciliationTask),
                      typeof(SweepTask),
                      typeof(SparkConnectionStringHandler),

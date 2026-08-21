@@ -209,7 +209,20 @@ public sealed class SparkStoreProvisioner
             // asked.
             StableBalance = existing?.StableBalance is { } previousStable
                 ? previousStable.Clone()
-                : new StableBalanceSettings()
+                : new StableBalanceSettings(),
+
+            // Carried across like the rest, and both halves earn it. The explorer override is a piece of
+            // infrastructure configuration that has nothing to do with which seed the store runs on, and losing
+            // it on a regtest server means the next exit refuses with "no block explorer is configured". The
+            // acknowledgement is the operator's statement that they have read what a unilateral exit costs them,
+            // which a seed change does not un-read.
+            //
+            // Note what this does not carry: any exit already recorded. Those rows name a funding address
+            // derived from the *old* seed, and the build re-derives and refuses when the two disagree — which is
+            // the honest outcome, because the plugin can no longer sign for what was sent there.
+            UnilateralExit = existing?.UnilateralExit is { } previousExit
+                ? previousExit.Clone()
+                : new UnilateralExitSettings()
         };
 
         SparkSettingsApplied applied;

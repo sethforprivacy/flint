@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
@@ -10,10 +11,12 @@ using BTCPayServer.Data;
 using BTCPayServer.Models.StoreViewModels;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
+using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using NBitcoin;
 
 namespace BTCPayServer.Plugins.Flint.Controllers;
 
@@ -78,6 +81,7 @@ public class SparkController : Controller
     private readonly SparkSweepSettingsService _sweepSettings;
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
+    private readonly ISparkUnilateralExitService _unilateralExit;
     private readonly CrossChainCatalog _crossChainCatalog;
     private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<SparkController> _logger;
@@ -92,6 +96,7 @@ public class SparkController : Controller
         SparkSweepSettingsService sweepSettings,
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
+        ISparkUnilateralExitService unilateralExit,
         CrossChainCatalog crossChainCatalog,
         IAuthorizationService authorizationService,
         ILogger<SparkController> logger)
@@ -105,6 +110,7 @@ public class SparkController : Controller
         _sweepSettings = sweepSettings;
         _deposits = deposits;
         _stableBalance = stableBalance;
+        _unilateralExit = unilateralExit;
         _crossChainCatalog = crossChainCatalog;
         _authorizationService = authorizationService;
         _logger = logger;
@@ -748,6 +754,330 @@ public class SparkController : Controller
             outcome.Message;
 
         return RedirectToAction(nameof(Deposit), new { storeId });
+    }
+
+    #endregion
+
+    #region Unilateral exit
+
+    /// <summary>
+    /// Forcing this store's Spark balance on-chain without the operators' cooperation: the disclosure, the
+    /// quote, the funding instructions, and the signed transactions the merchant broadcasts by hand.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every action in this region begins by pretending the feature does not exist.</b>
+    /// <see cref="Constants.UnilateralExitEnabled"/> is off by default, so each action answers
+    /// <c>NotFound</c> rather than a 403 or a validation error that would confirm the route is wired up —
+    /// the GET included, because a probe of the page answers as much as a probe of the write.
+    /// </para>
+    /// <para>
+    /// <b>What that hides, and what it does not.</b> The gate runs inside the action, so the filters in front
+    /// of it still answer first: an anonymous or under-privileged caller gets the pipeline's 401/403 and a
+    /// POST without a valid antiforgery token gets its 400, on a disabled feature exactly as on an enabled
+    /// one. Those answers are indistinguishable from any other route under this controller's
+    /// <c>CanViewStoreSettings</c> gate, which is the point — the thing kept from leaking is that
+    /// <em>this store's exit flow</em> exists to a caller who is otherwise entitled to be here, not the
+    /// existence of a route prefix. The service repeats the gate as the enforcement; this one keeps the page
+    /// and its writes from doing anything.
+    /// </para>
+    /// <para>
+    /// Beyond that gate these actions decide nothing at all. They read, they relay the service's own refusal
+    /// into the status banner, and they redirect back to the page — the same shape as
+    /// <see cref="SweepNow"/>. The fee-rate bounds, the disclosure gate, the single-exit-per-store rule, the
+    /// funding-sufficiency check and the explorer URL's validation all live in
+    /// <see cref="ISparkUnilateralExitService"/>, so nothing a form can carry changes what is allowed.
+    /// </para>
+    /// </remarks>
+    [HttpGet("exit")]
+    public async Task<IActionResult> Exit([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        return View(BuildExitViewModel(storeId, page, settings));
+    }
+
+    /// <summary>
+    /// Records the operator's acceptance of the disclosure, which is what unlocks quoting.
+    /// </summary>
+    /// <remarks>
+    /// A POST to its own route rather than a checkbox on the quote form, so the acceptance is a stored fact
+    /// with its own moment — the Stable Balance pattern. A merchant who has read the warnings once is not asked
+    /// again on every quote, and a quote that arrives without this having happened is refused server-side
+    /// whatever any form said.
+    /// </remarks>
+    [HttpPost("exit/acknowledge")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> AcknowledgeExit([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .AcknowledgeDisclosureAsync(storeId, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(result, "Acknowledged. You can now quote a unilateral exit for this store.");
+        return RedirectToAction(nameof(Exit), new { storeId });
+    }
+
+    /// <summary>
+    /// Quotes an exit at the requested fee rate and destination, creating the record the operator then funds.
+    /// </summary>
+    /// <remarks>
+    /// The two posted values are handed to the service unexamined. It is the service that decides whether the
+    /// rate is sane, whether the address belongs to this server's network, whether anything is worth exiting at
+    /// that rate, and whether this store already has an exit in flight — and it says so in words this action
+    /// only forwards.
+    /// </remarks>
+    [HttpPost("exit/quote")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> QuoteExit(
+        [FromRoute] string storeId,
+        SparkExitViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .QuoteAsync(storeId, vm.FeeRateSatPerVbyte, vm.DestinationAddress ?? string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(
+            result,
+            "Exit quoted. Nothing has been signed and nothing has moved — send the funding shown below, then "
+            + "build.");
+        return RedirectToAction(nameof(Exit), new { storeId });
+    }
+
+    /// <summary>
+    /// Builds and signs the exit against the funding that has arrived. Broadcasts nothing.
+    /// </summary>
+    /// <remarks>
+    /// Safe to post again after a failure, and the page says so: the service re-discovers the funding UTXOs and
+    /// re-quotes the record's own leaves each time, so a build that failed for want of funding succeeds once
+    /// more has been sent, and steps already confirmed on-chain are skipped rather than rebuilt.
+    /// </remarks>
+    [HttpPost("exit/build")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> BuildExit(
+        [FromRoute] string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .BuildAsync(storeId, recordId, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(
+            result,
+            "The exit is built and signed. Nothing has been broadcast — the transactions below are yours to "
+            + "submit, in the order shown.");
+        return RedirectToAction(nameof(Exit), new { storeId });
+    }
+
+    /// <summary>
+    /// Abandons the record so the store can quote again.
+    /// </summary>
+    /// <remarks>
+    /// Moves no money and cancels nothing on-chain: anything already broadcast stays valid and will still
+    /// confirm. The page carries that sentence next to the button, because "abandon" is the word a merchant
+    /// reaches for when they want to undo a broadcast, and this is not that.
+    /// </remarks>
+    [HttpPost("exit/abandon")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> AbandonExit(
+        [FromRoute] string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .AbandonAsync(storeId, recordId, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(
+            result,
+            "This exit was abandoned. Anything already broadcast is unaffected and will still confirm.");
+        return RedirectToAction(nameof(Exit), new { storeId });
+    }
+
+    /// <summary>
+    /// Records the operator's own statement that they broadcast the set and the sweep confirmed.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here watches the chain in Phase 0, so this button is a note, not a verification — and it moves
+    /// no money either way. It exists because without it the only way a finished exit leaves the active state
+    /// is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page teaches
+    /// somebody to distrust it.
+    /// </remarks>
+    [HttpPost("exit/complete")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> CompleteExit(
+        [FromRoute] string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .MarkCompletedAsync(storeId, recordId, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(
+            result,
+            "Recorded as completed. Nothing was broadcast or moved by this — it is your confirmation that the "
+            + "sweep confirmed, and it frees this store to quote another exit.");
+        return RedirectToAction(nameof(Exit), new { storeId });
+    }
+
+    /// <summary>
+    /// Points funding discovery at a different esplora instance, or clears the override.
+    /// </summary>
+    /// <remarks>
+    /// The one piece of real configuration this feature has, and it is settable from the page that reports it
+    /// missing: off mainnet there is no sensible default, so an operator who lands on "the explorer could not
+    /// be reached" would otherwise have to go looking for a settings screen that does not exist. A blank value
+    /// clears the override; whether the string is an acceptable URL is the service's judgement, not this
+    /// action's.
+    /// </remarks>
+    [HttpPost("exit/explorer")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> SetExitExplorer(
+        [FromRoute] string storeId,
+        string? esploraApiUrl,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .SetExplorerUrlAsync(storeId, esploraApiUrl, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(
+            result,
+            string.IsNullOrWhiteSpace(esploraApiUrl)
+                ? "Explorer override cleared. Funding discovery falls back to the default for this network, "
+                  + "which off mainnet means no discovery at all."
+                : "Explorer saved. Funding discovery will use it from the next read of this page.");
+        return RedirectToAction(nameof(Exit), new { storeId });
+    }
+
+    /// <summary>
+    /// Puts the service's own outcome in the status banner: its refusal verbatim, or this action's success copy.
+    /// </summary>
+    /// <remarks>
+    /// The result type carries an error but no success message, deliberately — a refusal is the service's
+    /// sentence to write, while "what just worked" is a fact about which button was pressed and belongs to the
+    /// caller. The fallback exists only so a service that fails without saying why still produces a banner
+    /// rather than a silent redirect that looks like success.
+    /// </remarks>
+    private void RelayExitResult(UnilateralExitOpResult result, string success)
+    {
+        if (result.Success)
+        {
+            TempData[WellKnownTempData.SuccessMessage] = success;
+            return;
+        }
+
+        TempData[WellKnownTempData.ErrorMessage] =
+            result.Error ?? "The unilateral exit could not be updated. Check the server logs for the reason.";
+    }
+
+    /// <summary>
+    /// Projects one service read onto the page. Copies fields; reads nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>No deserialisation happens here any more, deliberately.</b> The record's JSON columns are written by
+    /// <see cref="ISparkUnilateralExitService"/> and now read back by it too, which is why
+    /// <see cref="UnilateralExitPageData"/> arrives typed. A second reader in this class meant two sets of
+    /// serialiser options for one format, and the failure mode of them drifting apart was not an exception —
+    /// it was an empty transaction table for an exit worth a store's whole balance.
+    /// </para>
+    /// <para>
+    /// The two form fields are pre-filled from the active record so the page shows what was quoted rather than
+    /// an empty form beside a live exit. The explorer URL comes off the store's settings instead of the page
+    /// data: it is the input's current value, and posting the explorer form with a blank box is how the
+    /// override is cleared — so a box that rendered empty while an override was set would clear it by
+    /// accident.
+    /// </para>
+    /// </remarks>
+    private SparkExitViewModel BuildExitViewModel(
+        string storeId, UnilateralExitPageData page, SparkSettings? settings)
+    {
+        var model = new SparkExitViewModel
+        {
+            StoreId = storeId,
+            WalletRunning = page.WalletRunning,
+            DisclosureAcknowledged = page.DisclosureAcknowledged,
+            BalanceSats = page.BalanceSats,
+            ActiveRecord = page.ActiveRecord,
+            History = page.History,
+            FundingReceivedSat = page.FundingReceivedSat,
+            FundingLargestOutputSat = page.FundingLargestOutputSat,
+            LeafCount = page.LeafCount,
+            FundingKeyPath = page.FundingKeyPath,
+            Transactions = page.Transactions ?? [],
+            TransactionsUnreadable = page.TransactionsUnreadable,
+            EsploraApiUrl = settings?.UnilateralExit.EsploraApiUrl,
+            NetworkName = _sweepSettings.Network.ChainName.ToString(),
+            IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
+        };
+
+        if (page.ActiveRecord is not { } record)
+            return model;
+
+        model.FeeRateSatPerVbyte = record.FeeRateSatPerVbyte;
+        model.DestinationAddress = record.DestinationAddress;
+
+        return model;
     }
 
     #endregion

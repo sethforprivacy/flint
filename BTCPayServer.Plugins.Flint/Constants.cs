@@ -173,6 +173,77 @@ public static class Constants
     /// <summary>Rows per page on the sweep history table.</summary>
     public const int SweepHistoryPageSize = 25;
 
+    #region Unilateral exit
+
+    /// <summary>
+    /// Whether the experimental unilateral-exit flow exists on this host at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Off unless the operator sets <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT=1</c> (or <c>true</c>) in the BTCPay
+    /// process's environment. With it unset the Advanced page renders no link and every exit route returns
+    /// <c>NotFound</c>: not disabled-looking, <em>absent</em>. A merchant who cannot tell a feature from a
+    /// broken one will try the broken one, and this particular one produces signed transactions they then have
+    /// to broadcast themselves.
+    /// </para>
+    /// <para>
+    /// <b>Environment rather than a store setting</b>, because the decision is not the merchant's: on the
+    /// pinned SDK the flow needs the operators reachable to even quote, needs an on-chain UTXO the operator
+    /// funds by hand, and settles over multi-day CSV timelocks. That is a whole-deployment judgement by whoever
+    /// runs the server, and it must be revocable without touching any store's settings blob — unsetting the
+    /// variable takes the feature away from every store at once, leaving the acknowledgements in place for if it
+    /// comes back.
+    /// </para>
+    /// <para>
+    /// <b>A property, not a <c>const</c> or a <c>static readonly</c>.</b> It is read on every request so a
+    /// change takes effect on process restart rather than on rebuild, and so a test can set the variable and
+    /// exercise both sides of the gate in one run — a cached <c>static readonly</c> would freeze whichever
+    /// value the first test to touch this class happened to see, which is exactly the kind of ordering-dependent
+    /// green suite that hides a gate that does not gate.
+    /// </para>
+    /// </remarks>
+    internal static bool UnilateralExitEnabled =>
+        Environment.GetEnvironmentVariable("FLINT_EXPERIMENTAL_UNILATERAL_EXIT") is "1" or "true";
+
+    /// <summary>
+    /// BIP32 hardened account index for the on-chain key that funds a unilateral exit —
+    /// <c>m/84'/{coin}'/4607060'/0/{index}</c>, with <c>coin</c> 0 on mainnet and 1 on regtest, and
+    /// <c>index</c> allocated per exit (see <see cref="Data.UnilateralExitRecord.FundingKeyIndex"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 4,607,060 is <c>0x464C54</c>, the ASCII bytes of <c>FLT</c>. The number is not the point; being nowhere
+    /// near anybody else's account index is.
+    /// </para>
+    /// <para>
+    /// <b>Why an odd account at all.</b> The exit's tree transactions cannot pay their own fees, so they are
+    /// bumped by CPFP from an ordinary on-chain UTXO, and the plugin has to hold the key to that UTXO to sign
+    /// the child. The only seed it has is the store's Spark mnemonic — which, for a store set up with
+    /// <see cref="SeedSource.HotWallet"/>, is <em>also</em> BTCPay's own hot-wallet seed. Deriving the funding
+    /// key at BIP84 account 0 there would put the plugin's addresses inside the store's own wallet: NBXplorer
+    /// would track them, an operator's coin selection could spend the funding UTXO out from under a
+    /// half-broadcast exit, and a plugin-generated change output could appear in the merchant's balance from a
+    /// wallet they never told about it. A hardened account index no wallet software generates on its own makes
+    /// that collision impossible rather than unlikely.
+    /// </para>
+    /// <para>
+    /// <b>BIP84 purpose (<c>84'</c>) rather than something exotic</b>, because the funding output has to be
+    /// native SegWit: Phase 0 supports exactly one CPFP funding kind, P2WPKH, so a Taproot or legacy funding
+    /// address is not a stylistic difference, it is an exit that cannot be built. Depth and layout follow BIP84
+    /// so the path is recoverable in any standard wallet — an operator who needs to reclaim leftover funding
+    /// sats after an exit, or after abandoning one, can import the mnemonic elsewhere and find them at a path
+    /// they can read off this comment.
+    /// </para>
+    /// <para>
+    /// Fixed forever, like every other derivation constant: change it and the funding UTXOs of every exit
+    /// already in flight are at an address the plugin no longer looks at. Spark's own keys are unaffected
+    /// either way — the SDK derives at a hardened <c>m/8797555'/…</c>, disjoint from this and from BIP84/86.
+    /// </para>
+    /// </remarks>
+    public const uint UnilateralExitFundingAccount = 4607060;
+
+    #endregion
+
     /// <summary>
     /// Default ceiling on a Lightning send fee, as a percentage of the amount, when the caller sets none.
     /// </summary>

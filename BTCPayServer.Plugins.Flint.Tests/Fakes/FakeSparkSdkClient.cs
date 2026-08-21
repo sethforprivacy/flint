@@ -987,6 +987,190 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
 
     #endregion
 
+    #region Unilateral exit
+
+    /// <summary>
+    /// The leaves an automatic selection would pick, and their values.
+    /// </summary>
+    /// <remarks>
+    /// Empty by default is <b>not</b> laziness. A unilateral-exit quote with <c>Auto</c> selection returns no
+    /// leaves whenever nothing clears the requested fee rate, and that is a normal answer the caller has to
+    /// report as "nothing worth exiting" rather than as a fault — so the fake's default state is the one that
+    /// catches a caller treating an empty quote as success.
+    /// </remarks>
+    public List<SparkExitLeaf> ExitLeaves { get; } = [];
+
+    /// <summary>Total fee the quote reports, in satoshi.</summary>
+    public long ExitTotalFeeSat { get; set; } = 3_000;
+
+    /// <summary>The fan-out's share of <see cref="ExitTotalFeeSat"/>.</summary>
+    public long ExitFanoutFeeSat { get; set; } = 500;
+
+    /// <summary>
+    /// The single confirmed output the exit must be funded with, in satoshi.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately larger than <see cref="ExitTotalFeeSat"/>, as the real quote's is: the funding UTXO has to
+    /// cover every fee plus the fan-out's own outputs, so a caller that funds against the fee total alone is
+    /// under-funded and this default is what catches it.
+    /// </remarks>
+    public long ExitSingleUtxoFundingSat { get; set; } = 4_200;
+
+    /// <summary>Every prepare this fake has been asked for, in order.</summary>
+    public List<ExitQuoteCall> ExitQuoteCalls { get; } = [];
+
+    /// <summary>Every build this fake has been asked for, in order.</summary>
+    public List<ExitBuildCall> ExitBuildCalls { get; } = [];
+
+    /// <summary>Thrown by a prepare when set, before any quote is produced.</summary>
+    public Exception? FailExitQuoteWith { get; set; }
+
+    /// <summary>Thrown by a build when set, <em>after</em> the quote has been approved.</summary>
+    public Exception? FailExitBuildWith { get; set; }
+
+    /// <summary>
+    /// Run after each prepare, so a test can move the wallet's tree between the quote a page showed and the
+    /// quote a build commits to.
+    /// </summary>
+    /// <remarks>
+    /// The hazard this exists for is the sharpest one on the exit surface, and it is <em>not</em> the
+    /// cooperative-exit one. A unilateral-exit quote never expires and carries no id, so a stale one is not
+    /// rejected by anything — it simply describes a different set of leaves than the wallet now has, and a build
+    /// against it commits to leaves the operator did not fund for. Mutating <see cref="ExitLeaves"/> from here
+    /// is how a test proves the caller re-quotes inside the build.
+    /// </remarks>
+    public Action? WhenExitQuoted { get; set; }
+
+    public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
+
+        if (FailExitQuoteWith is not null)
+            throw FailExitQuoteWith;
+
+        var quote = BuildExitQuote(feeRateSatPerVbyte, destinationAddress, leafIds);
+        WhenExitQuoted?.Invoke();
+        return Task.FromResult(quote);
+    }
+
+    public Task<SparkExitResult> UnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ArgumentNullException.ThrowIfNull(fundingUtxos);
+        ArgumentNullException.ThrowIfNull(approveQuote);
+
+        // Quoted inside the build, exactly as the real client does, so the veto sees the fresh quote rather than
+        // whatever the caller last looked at.
+        ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
+        if (FailExitQuoteWith is not null)
+            throw FailExitQuoteWith;
+
+        var quote = BuildExitQuote(feeRateSatPerVbyte, destinationAddress, leafIds);
+        WhenExitQuoted?.Invoke();
+
+        var rejection = approveQuote(quote);
+        ExitBuildCalls.Add(new ExitBuildCall(
+            feeRateSatPerVbyte,
+            destinationAddress,
+            leafIds?.ToList(),
+            fundingUtxos.ToList(),
+            fundingSecretKey?.Length ?? 0,
+            rejection));
+
+        if (rejection is not null)
+            throw new SparkExitRefusedException(rejection);
+
+        if (FailExitBuildWith is not null)
+            throw FailExitBuildWith;
+
+        // The funding check the real SDK makes, reproduced rather than stipulated: the shortfall is discovered at
+        // build time and names the amount that would have worked.
+        var funded = fundingUtxos.Sum(utxo => utxo.ValueSat);
+        if (funded < ExitSingleUtxoFundingSat)
+            throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
+
+        // Signed and inert. Nothing in this fake, and nothing in the real SDK, broadcasts any of it.
+        var sweepDependsOn = quote.Leaves.Select(leaf => $"txid:node:{leaf.LeafId}").ToList();
+        var transactions = new List<SparkExitTransaction>
+        {
+            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [],
+                SparkExitTxStatus.Unconfirmed)
+        };
+
+        transactions.AddRange(quote.Leaves.Select(leaf => new SparkExitTransaction(
+            SparkExitTxKind.TreeNode,
+            $"node:{leaf.LeafId}",
+            $"txid:node:{leaf.LeafId}",
+            $"0200node{leaf.LeafId}",
+            // A CPFP child, because a tree node pays no fee of its own and must go out as a package. A fake
+            // that left this null would let a caller ship single-transaction broadcast instructions.
+            $"0200cpfp{leaf.LeafId}",
+            1_008,
+            ["txid:fanout"],
+            SparkExitTxStatus.Unconfirmed)));
+
+        transactions.Add(new SparkExitTransaction(
+            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn,
+            SparkExitTxStatus.Unconfirmed));
+
+        return Task.FromResult(new SparkExitResult(
+            quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
+    }
+
+    /// <remarks>
+    /// A pinned selection is honoured by filtering, and an id that is no longer in the tree simply does not come
+    /// back — which is how a test reproduces the case a resume has to survive: the operator funded for a leaf
+    /// set that has since changed under them.
+    /// </remarks>
+    private SparkExitQuote BuildExitQuote(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds)
+    {
+        var selected = leafIds is null || leafIds.Count == 0
+            ? ExitLeaves.ToList()
+            : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)).ToList();
+
+        return new SparkExitQuote(
+            selected.Sum(leaf => leaf.ValueSat),
+            selected.Count == 0 ? 0 : ExitTotalFeeSat,
+            selected.Count == 0 ? 0 : ExitSingleUtxoFundingSat,
+            selected,
+            selected.Count == 0 ? 0 : ExitFanoutFeeSat,
+            selected
+                .Select(leaf => new SparkExitBranchFunding(leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
+                .ToList(),
+            feeRateSatPerVbyte,
+            destinationAddress);
+    }
+
+    public sealed record ExitQuoteCall(
+        ulong FeeRateSatPerVbyte,
+        string DestinationAddress,
+        List<string>? LeafIds);
+
+    public sealed record ExitBuildCall(
+        ulong FeeRateSatPerVbyte,
+        string DestinationAddress,
+        List<string>? LeafIds,
+        List<SparkExitFundingUtxo> FundingUtxos,
+        int FundingSecretKeyLength,
+        string? Rejection);
+
+    #endregion
+
     public Task DisconnectAsync()
     {
         Disconnected = true;

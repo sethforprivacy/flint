@@ -65,6 +65,20 @@ public class SparkSettings
     public StableBalanceSettings StableBalance { get; set; } = new();
 
     /// <summary>
+    /// Experimental unilateral-exit configuration. Inert on any host that has not set
+    /// <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c> (<see cref="Constants.UnilateralExitEnabled"/>). Coalesce
+    /// before use, as with <see cref="Sweep"/>.
+    /// </summary>
+    /// <remarks>
+    /// Present on every settings blob written from this version on, whether or not the host has the gate set,
+    /// because the alternative — writing the section only when the feature is enabled — would mean a store's
+    /// acknowledgement silently disappearing from the blob the first time an operator saved settings with the
+    /// gate off. The section existing is not the feature being available; see
+    /// <see cref="UnilateralExitSettings"/>.
+    /// </remarks>
+    public UnilateralExitSettings UnilateralExit { get; set; } = new();
+
+    /// <summary>
     /// An independent copy, nested settings included. Every property added to this class must be added here too.
     /// </summary>
     /// <remarks>
@@ -77,10 +91,11 @@ public class SparkSettings
     /// own.
     /// </para>
     /// <para>
-    /// Deep for the three nested objects, because a shallow copy would defeat the whole point: the edits that
-    /// matter all land on <see cref="Sweep"/>, <see cref="Deposits"/> or <see cref="StableBalance"/> rather
-    /// than on the scalars here. Each is coalesced, because an explicit <c>null</c> in a stored blob defeats
-    /// the property initialiser — the same hazard every reader of these three has to handle.
+    /// Deep for the four nested objects, because a shallow copy would defeat the whole point: the edits that
+    /// matter all land on <see cref="Sweep"/>, <see cref="Deposits"/>, <see cref="StableBalance"/> or
+    /// <see cref="UnilateralExit"/> rather than on the scalars here. Each is coalesced, because an explicit
+    /// <c>null</c> in a stored blob defeats the property initialiser — the same hazard every reader of these
+    /// four has to handle.
     /// </para>
     /// </remarks>
     public SparkSettings Clone() => new()
@@ -91,7 +106,8 @@ public class SparkSettings
         ApiKeyOverride = ApiKeyOverride,
         Sweep = (Sweep ?? new SweepSettings()).Clone(),
         Deposits = (Deposits ?? new SparkDepositSettings()).Clone(),
-        StableBalance = (StableBalance ?? new StableBalanceSettings()).Clone()
+        StableBalance = (StableBalance ?? new StableBalanceSettings()).Clone(),
+        UnilateralExit = (UnilateralExit ?? new UnilateralExitSettings()).Clone()
     };
 }
 
@@ -434,6 +450,94 @@ public class StableBalanceSettings
 }
 
 /// <summary>
+/// Experimental unilateral exit: recovering the store's Spark balance on-chain without the operators
+/// cooperating on an exit transaction.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Nothing in this section is reachable unless the host sets
+/// <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c></b> — see <see cref="Constants.UnilateralExitEnabled"/>. With the
+/// gate off the Advanced page shows no entry point and every controller action returns 404, so a blob carrying
+/// an acknowledgement is inert rather than dangerous. The section is still written and still cloned, because a
+/// setting that only exists while a feature flag is on is a setting that vanishes the first time somebody saves
+/// with the flag off.
+/// </para>
+/// <para>
+/// <b>What it is, stated plainly, because the word oversells it.</b> A cooperative exit — every sweep this
+/// plugin makes — asks the operators to build and broadcast one Bitcoin transaction, and it lands in seconds
+/// for a flat fee. A unilateral exit walks the store's own leaves out through the statechain's timelocked
+/// transaction tree: the SDK builds and signs, the plugin <em>never</em> broadcasts, and an operator has to
+/// push the transactions by hand in dependency order, waiting on confirmations and on CSV timelocks measured
+/// in days. It is a last resort for the case the exit path this plugin actually uses stops working, not a
+/// privacy or cost option, and the copy on the page says so.
+/// </para>
+/// <para>
+/// <b>Three traps that are the reason this is experimental rather than a feature.</b> First, on the pinned SDK
+/// (Breez.Sdk.Spark 0.22.0) preparing an exit <em>still requires the operators to be reachable</em>: the
+/// scenario a merchant most wants this for — operators gone — is the one it cannot serve until the SDK ships
+/// exit-from-local-state. Second, the tree transactions cannot pay their own fees, so the exit is funded by
+/// CPFP from an on-chain UTXO the operator has to send to a plugin-derived native-SegWit address first (see
+/// <see cref="Constants.UnilateralExitFundingAccount"/>); too little there and the build refuses. Third, the
+/// funds are not spendable when the transactions are built — they are spendable when the last timelock
+/// expires.
+/// </para>
+/// <para>
+/// Deliberately two properties. Everything else about an exit — fee rate, destination, which leaves — belongs
+/// to one attempt and lives on the exit record, not in the store's configuration: a persisted quote is a stale
+/// quote, and a persisted destination is an address nobody re-read before money moved.
+/// </para>
+/// </remarks>
+public class UnilateralExitSettings
+{
+    /// <summary>
+    /// The operator has been shown what a unilateral exit costs them in time and attention, and accepted it.
+    /// Quoting and building are refused without it.
+    /// </summary>
+    /// <remarks>
+    /// Stored rather than treated as a form-only checkbox, for the same reason
+    /// <see cref="StableBalanceSettings.DisclosureAcknowledged"/> is: a checkbox enforced in a view is enforced
+    /// nowhere. The service re-reads this before every operation, so the acknowledgement is a server-side gate
+    /// on an action that produces signed transactions spending the store's balance — and one an operator has to
+    /// have made deliberately, because the alternative is discovering the multi-day timelocks after starting.
+    /// </remarks>
+    public bool DisclosureAcknowledged { get; set; }
+
+    /// <summary>
+    /// Base URL of the esplora-compatible API used to discover the funding UTXO. Null uses the default for the
+    /// store's network.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The plugin has to see the funding UTXO before it can build anything, and it cannot ask the SDK: the
+    /// funding output is an ordinary on-chain UTXO on an address derived outside Spark's key tree, so nothing in
+    /// the wallet knows about it. BTCPay's own NBXplorer does not either, because the address is not in any of
+    /// the store's derivation schemes. That leaves a block explorer, and an override so an operator can point at
+    /// their own instance rather than a third party that learns which address is funding their exit.
+    /// </para>
+    /// <para>
+    /// <b>There is no usable default off mainnet.</b> mempool.space has no regtest, so a regtest exit without
+    /// this set is refused with a message saying to set it, rather than silently reporting no funding found —
+    /// which reads identically to "your UTXO has not confirmed yet" and would have an operator waiting on a
+    /// confirmation that already happened.
+    /// </para>
+    /// <para>
+    /// Nothing here is trusted with a decision. A wrong or hostile explorer can make the build refuse (no UTXO
+    /// found) or fail at broadcast (a UTXO that does not exist), which is why the operator sees the funding
+    /// figure the explorer reported before pressing Build; it cannot redirect money, because the destination is
+    /// in the transactions the SDK signs.
+    /// </para>
+    /// </remarks>
+    public string? EsploraApiUrl { get; set; }
+
+    /// <summary>An independent copy. Every property added to this class must be added here too.</summary>
+    public UnilateralExitSettings Clone() => new()
+    {
+        DisclosureAcknowledged = DisclosureAcknowledged,
+        EsploraApiUrl = EsploraApiUrl
+    };
+}
+
+/// <summary>
 /// Origin of the store's Spark wallet seed — the three sources the setup wizard offers, and the only three.
 /// </summary>
 /// <remarks>
@@ -491,8 +595,9 @@ public enum SweepDestinationMode
     /// <para>
     /// Not a Bitcoin address and not a cooperative exit: the wallet transfers to the bridge provider's Spark
     /// deposit address and the provider settles on the destination chain. It is still an ordinary Spark
-    /// transfer at the point money leaves this wallet, so the exit-path policy is untouched — there is no
-    /// unilateral exit here either.
+    /// transfer at the point money leaves this wallet, so the exit-path policy is untouched — no exit of
+    /// either kind happens here. A unilateral exit is reachable only from the experimental, env-gated flow on
+    /// the Advanced page (<see cref="UnilateralExitSettings"/>), never from a sweep.
     /// </para>
     /// <para>
     /// <b>Mainnet only</b>, hard-gated by the SDK: a connect that carries a cross-chain configuration on
@@ -647,7 +752,9 @@ public class SweepSettings
     /// <remarks>
     /// <b>On by default, and this is a cooperative exit either way.</b> "Drain" here means only that the fee
     /// is netted out of the amount, so the balance lands on exactly <see cref="ReserveSats"/>; it has nothing
-    /// to do with a unilateral exit, which this plugin does not implement anywhere, by owner decision. It
+    /// to do with a unilateral exit. Sweeping — automatic or manual — is cooperative, always; the only
+    /// unilateral-exit path in the plugin is the experimental, env-gated, manually-broadcast one on the
+    /// Advanced page (<see cref="UnilateralExitSettings"/>), which no sweep setting can reach. It
     /// defaults on because the default <see cref="ReserveSats"/> is zero, and with
     /// the fee charged on top a zero reserve leaves nothing to charge it against.
     /// </remarks>
