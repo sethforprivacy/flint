@@ -109,7 +109,7 @@
       The package carries ~200 MB of native libraries for linux-x64/arm64, osx-x64/arm64,
       win-x64/x86. There is no linux-musl (Alpine) or win-arm64 payload.
     -->
-    <PackageReference Include="Breez.Sdk.Spark" Version="0.22.3" />
+    <PackageReference Include="Breez.Sdk.Spark" Version="0.23.0" />
   </ItemGroup>
 
   <!--
