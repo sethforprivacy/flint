@@ -232,7 +232,7 @@ public class SparkFundedRegtestTests
             MaxFeePercent = 25.0
         });
 
-        var run = await engine.RunAsync(_wallet.StoreId, SweepTrigger.Manual, Ct);
+        var run = await engine.RunAsync(_wallet.StoreId, SweepTrigger.Manual, cancellationToken: Ct);
         Assert.True(
             run.Kind is SweepOutcomeKind.Swept,
             $"the sweep did not go out: {run.Kind} — {run.Reason}");
@@ -257,7 +257,7 @@ public class SparkFundedRegtestTests
         var confirmed = await PollAsync(
             async () =>
             {
-                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, Ct);
+                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
                 var current = await records.GetAsync(_wallet.StoreId, sent.IdempotencyKey, Ct);
                 return current?.Status is SweepRecordStatus.Confirmed ? current : null;
             },
@@ -354,7 +354,7 @@ public class SparkFundedRegtestTests
         var resolved = await PollAsync(
             async () =>
             {
-                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, Ct);
+                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
                 var current = await records.GetAsync(_wallet.StoreId, idempotencyKey, Ct);
                 return current?.Status is SweepRecordStatus.Sent or SweepRecordStatus.Confirmed ? current : null;
             },

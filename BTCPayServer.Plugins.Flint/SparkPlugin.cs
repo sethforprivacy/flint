@@ -231,6 +231,16 @@ public class SparkPlugin : BaseBTCPayServerPlugin
             provider.GetRequiredService<StoreRepository>);
         services.AddSingleton<ICrossChainValueOracle, BTCPayCrossChainValueOracle>();
 
+        // Webhook notifier for post-sweep notifications. Named client so the timeout applies to delivery
+        // alone and does not share the catalogue's socket pool. Failures are logged as warnings.
+        services.AddHttpClient(SparkSweepWebhookNotifier.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        });
+        services.AddSingleton<SparkSweepWebhookNotifier>();
+
         // The sweep engine. One path for automatic and manual sweeps; every economic and safety guard lives here
         // rather than in the controller or the view.
         services.TryAddSingleton(TimeProvider.System);
@@ -298,6 +308,15 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // launcher fires the first pass immediately at startup, so SparkService deliberately does not run
         // its own. See SparkLightningConfigSweepTask.
         services.AddScheduledTask<SparkLightningConfigSweepTask>(Constants.ConfigSweepInterval);
+
+        // Daily registry check: fires a webhook when a new Flint version appears on the plugin registry.
+        services.AddHttpClient(SparkPluginUpdateChecker.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        });
+        services.AddScheduledTask<SparkPluginUpdateChecker>(TimeSpan.FromDays(1));
 
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");

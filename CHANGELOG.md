@@ -4,6 +4,88 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8.0] - 2026-08-24
+
+### Added
+
+- **Plugin update webhook.** A new server-level setting (`PUT /api/v1/server/spark`) accepts an
+  `updateWebhookUrl`. Once set, Flint checks the BTCPay plugin registry daily and POSTs a
+  `plugin.update-available` event payload when a newer version is found. The payload includes
+  `pluginIdentifier`, `installedVersion`, and `availableVersion`. Each available version is
+  notified at most once. Read the current setting with `GET /api/v1/server/spark`. Both endpoints
+  require `canModifyServerSettings`.
+
+
+## [0.1.7.0] - 2026-08-24
+
+### Added
+
+- **GET sweep record by idempotency key.** New endpoint
+  `GET /api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}` returns the full sweep record for a
+  given key. Requires `canViewStoreSettings`. Returns 404 with code `sweep-record-not-found` when no
+  record matches.
+
+- **Destination address override in POST sweep.** The `POST .../spark/sweep` request body now accepts
+  an optional `destinationAddress` field. When supplied, the sweep sends to that Bitcoin address
+  instead of the store's configured sweep destination. The address is validated against the server's
+  chain before the engine runs. Not supported for EVM cross-chain sweep mode (returns 422).
+
+- **Force flag in POST sweep.** The request body now accepts an optional `force` boolean (default
+  false). When true, the sweep proceeds even if the Spark balance is below the store's configured
+  minimum sweep amount. The absolute on-chain protocol minimum (`Constants.MinimumOnchainSendSats`)
+  still applies and cannot be bypassed.
+
+
+## [0.1.6.2] - 2026-08-24
+
+### Added
+
+- **Sweep webhook fires on failed sweeps.** When a sweep is attempted and fails (Spark rejects it or
+  reports it as failed), Flint now POSTs an `event: "sweep.failed"` notification to the configured
+  webhook URL. The payload includes `storeId`, `trigger`, `reason`, and — when a sweep record was
+  created before the failure — `idempotencyKey`, `amountSats`, `destination`, and `destinationMode`.
+  Same retry logic as the success notification (3 retries with exponential backoff).
+
+### Changed
+
+- **Success webhook payload includes `event: "sweep.swept"`.** Added to let receivers distinguish
+  success from failure notifications on the same endpoint without inspecting other fields.
+
+
+## [0.1.6.1] - 2026-08-24
+
+### Changed
+
+- **Sweep webhook delivery retries on transient failures.** Flint now retries a failed webhook POST up
+  to three times with exponential backoff (2 s, 4 s, 8 s) before giving up. 5xx responses and network
+  errors are retried; 4xx responses are not (they indicate a permanent client-side rejection and will not
+  resolve on their own).
+
+## [0.1.6.0] - 2026-08-23
+
+### Added
+
+- **`POST /api/v1/stores/{storeId}/spark/sync` forces a wallet sync and returns the current balance.**
+  The balance returned by other endpoints is read from the SDK cache without forcing a sync and may lag
+  settlement by up to 20 seconds. The new endpoint forces an explicit sync before reading, so the
+  returned `balanceSats` is current at call time. Requires `btcpay.store.canmodifystoresettings`.
+  Response: `{ "walletRunning": bool, "balanceSats": long, "syncedAt": timestamp }`.
+- **Sweep webhook.** Setting `sweepWebhookUrl` in the sweep configuration causes Flint to POST a JSON
+  payload to that URL after each successful sweep. The payload includes `storeId`, `idempotencyKey`,
+  `txId`, `amountSats`, `feeSats`, `destination`, `destinationMode`, `trigger`, and `completedAt`.
+  Delivery failures are logged as warnings; the sweep record is the authoritative source. The field is
+  included in `SweepSettings.Clone()` so it survives a seed change.
+- **Sweep configuration warnings.** `GET /api/v1/stores/{storeId}/spark/sweep` now includes a `warnings`
+  array. On mainnet, entries appear when the balance threshold or minimum sweep amount are below the
+  recommended defaults (which were measured on regtest and may not hold on mainnet).
+- **`scripts/setup-stores.sh`** - bash script for headless provisioning of one or more stores via the
+  Greenfield API. Saves each store's recovery phrase (optionally GPG-encrypted) immediately on
+  provisioning, since the API returns it exactly once.
+- **`scripts/flint-logrotate.conf`** - logrotate configuration for `sdk.log`. Uses `copytruncate`
+  because the Rust SDK holds the file handle open; a rename-based rotation leaves the SDK writing to
+  the renamed file.
+- **`docs/railway.md`** - deployment guide for Railway: persistent volume requirements, environment
+  variables, log rotation options, and a post-deploy verification script.
 
 ## [1.0.4] — 2026-09-02
 
@@ -206,6 +288,7 @@ All notable changes to this plugin are recorded here. The format follows
   scrubber's five regex passes run only on lines that will actually be emitted. Lines that are
   emitted scrub exactly as before.
 
+
 ## [1.0.1] — 2026-08-26
 
 ### Changed
@@ -219,6 +302,7 @@ All notable changes to this plugin are recorded here. The format follows
   stronger warning for a store manager who is not a server admin. The same disclosure is on the
   Greenfield provisioning endpoint and in SECURITY.md, the README trust model and the trust-model
   document.
+
 
 ## [1.0.0] — 2026-08-26
 
@@ -243,6 +327,7 @@ All notable changes to this plugin are recorded here. The format follows
   the new `DepositInfo` fields are default-off / ignored. Verified on mainnet against a live
   Lightspark service provider on the test servers; the SDK's own storage schema migrates to
   version 40 on startup.
+
 
 ## [0.1.5.5] — 2026-08-25
 
@@ -296,7 +381,7 @@ All notable changes to this plugin are recorded here. The format follows
   configuration (with the victim's payment key rotated, so previously leaked copies of the victim's
   string stop resolving).
 
-## [0.1.5.2] — 2026-08-22
+## [0.1.5.2] - 2026-08-22
 
 ### Changed
 

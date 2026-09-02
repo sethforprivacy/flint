@@ -48,12 +48,12 @@
 
     Product is the *display* name and nothing else. The plugin's identity is Identifier
     (Constants.PluginIdentifier, "BTCPayServer.Plugins.Flint"), which names its directory on disk and is
-    what every existing install is keyed by — renaming that would orphan them, so the two must not be
+    what every existing install is keyed by - renaming that would orphan them, so the two must not be
     conflated. Note that BaseBTCPayServerPlugin falls back to the assembly name when Product is absent:
     delete this line and the plugin silently starts calling itself "BTCPayServer.Plugins.Flint" in the
     registry. SparkBrandingTests holds both ends of that.
 
-    Version is the *single* source of truth for the plugin's version — there is deliberately no
+    Version is the *single* source of truth for the plugin's version - there is deliberately no
     version constant in Constants.cs and no hard-coded version anywhere else. (The Boltz plugin is
     the cautionary tale: three version sources that drifted apart.) The only other place the number
     appears is the newest heading in CHANGELOG.md, and PluginVersionTests asserts the two agree, so
@@ -62,7 +62,7 @@
   <PropertyGroup>
     <Product>Flint</Product>
     <Description>Accept Lightning payments without running a node. Each store gets its own Spark wallet, wired into Lightning and LNURL automatically, with optional automatic sweeps to on-chain Bitcoin or to a stablecoin on an EVM address. Funds sit on Spark, a non-custodial Bitcoin layer two network, until they are swept.</Description>
-    <Version>1.0.4</Version>
+<Version>0.1.8.0</Version>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
@@ -147,7 +147,7 @@
     EF PackageReference at all.
 
     Everything below exists solely to author migrations, and is opt-in via -p:EfMigrations=true so
-    that no ordinary Debug or Release build — and therefore no packaged plugin — is affected.
+    that no ordinary Debug or Release build - and therefore no packaged plugin - is affected.
   -->
   <ItemGroup Condition="'$(EfMigrations)' == 'true'">
     <!--
