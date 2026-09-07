@@ -45,7 +45,7 @@ target, so without it you get an output directory with nothing built into it and
 a missing assembly.
 
 The `btcpayserver` submodule is pinned to a specific stable BTCPay Server release tag (currently
-`v2.4.2`). The pin, the `TargetFramework` in
+`v2.4.3`). The pin, the `TargetFramework` in
 [`BTCPayServer.Plugins.Flint.csproj`](../BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj)
 and `Constants.BuiltAgainstBTCPayServerVersion` must always agree.
 
