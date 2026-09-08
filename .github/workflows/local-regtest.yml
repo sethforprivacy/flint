@@ -131,11 +131,18 @@ jobs:
 
       # Same key as every job in ci.yml, exact on the csproj hashes with no `restore-keys` prefix
       # fallback, so a warm cache from a different dependency set is never adopted.
+      #
+      # `!e2e/**` is not in ci.yml's key and does not change it: e2e/ holds no csproj, so the hashed file
+      # set is identical. It is here because hashFiles is evaluated TWICE — once at restore, once in the
+      # action's post step at the end of the job — and by then e2e/ contains the fixture checkout and
+      # the BTCPay data directory, with files the containers wrote as root that the runner user cannot
+      # read. Walking into them made the post-step hash fail ("Fail to hash files under directory") on
+      # this workflow's first green run, which lost the cache save and put a red step on a passing job.
       - name: Cache NuGet packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '!e2e/**') }}
 
       - name: Build (plugin + tests)
         # -m:1 serialises MSBuild project scheduling. Not for speed obviously, but for correctness:
