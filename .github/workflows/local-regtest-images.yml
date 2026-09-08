@@ -1,0 +1,195 @@
+name: Local regtest images
+
+# Builds the four images the local Spark stack would otherwise compile from source on every run, and
+# pushes them to this repository's GitHub Container Registry namespace so
+# .github/workflows/local-regtest.yml (and a developer running e2e/local-regtest/up.sh) can pull them
+# instead.
+#
+# WHY this workflow exists at all. callebtc/cashu-regtest publishes no images: its compose file carries
+# `build:` sections for the Spark operators (Rust), open-ssp (Go), Electrs (Rust) and ldk-server (Rust),
+# and a hosted runner gets a clean machine with no Docker layer cache, so `local-regtest.yml` paid that
+# compile — around 40 minutes — on every single run. That cost is the whole reason that job was advisory
+# rather than a gate. Building once per pinned fixture SHA and pulling thereafter is what makes it cheap
+# enough for package.yml to block a release on (see docs/ci-and-releases.md).
+#
+# ONE SOURCE OF TRUTH for the fixture revision: `CASHU_REGTEST_SHA` in e2e/local-regtest/up.sh. This
+# workflow greps it out of that file rather than carrying its own copy, so the images can only ever be
+# built from the revision up.sh will verify its checkout against. (local-regtest.yml's own `ref:` is the
+# third copy, and up.sh fails loudly when it drifts — that is the check that keeps all three honest.)
+#
+# ONE SOURCE OF TRUTH for the image set: `docker compose --profile spark config`. The services that need
+# building, and the exact local image name each one expects, are read out of the pinned compose file
+# rather than hardcoded here, because that is also how up.sh decides what to pull and what to tag it as.
+# Hardcoding either side would let the two disagree silently — compose would just rebuild, and the only
+# symptom would be a 40-minute "fast" run. Services are deduplicated by image: `ldk` and `ldk-fee` share
+# one image, as do the three operators, so four targets cover seven services.
+#
+# linux/amd64 ONLY, deliberately. Hosted runners are amd64 and that is what CI needs. An arm64 variant
+# would have to cross-build several large Rust projects under QEMU, which takes hours rather than
+# minutes; arm64 developers (Apple silicon) build locally once and keep the layers, which is the same
+# trade the fixture itself makes. up.sh skips the pull entirely on a non-amd64 host for this reason —
+# pulling an amd64 operator onto arm64 would "work" and then run the whole stack under emulation.
+#
+# The packages must be PUBLIC for a fork's `local-regtest.yml` to pull them without credentials. GitHub
+# creates a package private-by-default on its first push; making it public is a one-time repository
+# settings change (Packages → the package → Package settings → Change visibility). up.sh degrades to
+# building from source when a pull fails, so a private package is slow, not broken.
+
+on:
+  # The normal trigger. Publishing is a deliberate act tied to a pin bump, not something that should
+  # happen on unrelated pushes.
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      # up.sh is where the pin lives, so a merged pin bump republishes the set for the new SHA. The
+      # workflow itself is here so a change to how images are built is exercised on merge.
+      - .github/workflows/local-regtest-images.yml
+      - e2e/local-regtest/up.sh
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & push the fixture images
+    runs-on: ubuntu-latest
+    # Cold, this compiles four Rust/Go projects on one runner. The fixture's own CI allows 90 minutes
+    # for a build plus a full stack run; this does only the build half, but with no layer cache on a
+    # first run for a new pin, so it gets the same allowance.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write  # the only job in this repository that writes to the registry
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No submodules and no .NET here: this job never builds the plugin. The btcpayserver
+          # submodule is the single largest thing this repository checks out, and skipping it is
+          # worth minutes.
+          fetch-depth: 1
+
+      # Grepped rather than duplicated. Anchored on the exact assignment so a renamed variable or a
+      # short SHA fails here instead of checking out something unintended: `actions/checkout` accepts
+      # almost anything as a `ref`, including a branch name that happens to look like a prefix.
+      - name: Read the pinned fixture SHA out of up.sh
+        id: pin
+        run: |
+          set -euo pipefail
+          sha="$(sed -n 's/^CASHU_REGTEST_SHA="\([0-9a-f]\{40\}\)"$/\1/p' e2e/local-regtest/up.sh)"
+          if [ -z "$sha" ]; then
+            echo "error: could not read a 40-hex CASHU_REGTEST_SHA out of e2e/local-regtest/up.sh." >&2
+            echo "       That assignment is this workflow's only input; fix the grep or the script." >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Fixture pin: $sha"
+
+      - name: Check out the cashu-regtest fixture at the pinned SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: callebtc/cashu-regtest
+          ref: ${{ steps.pin.outputs.sha }}
+          path: cashu-regtest
+          persist-credentials: false
+
+      # Produces a buildx bake override file next to the compose file. Bake reads the compose file's
+      # `build:` sections natively — contexts, build args, and the inline Dockerfile `ldk` uses, which
+      # no `docker/build-push-action` invocation could express — and this override only replaces each
+      # target's tags and adds the platform and cache settings.
+      #
+      # The cache scope is per image name rather than shared: one scope for four unrelated Rust/Go
+      # builds would have them evicting each other out of a 10 GB repository cache budget.
+      - name: Derive the bake targets from the pinned compose file
+        id: targets
+        working-directory: cashu-regtest
+        env:
+          # Lowercased: a GHCR path segment must be lowercase, and `github.repository_owner` preserves
+          # whatever case the account was created with.
+          OWNER: ${{ github.repository_owner }}
+          PIN: ${{ steps.pin.outputs.sha }}
+          # The Spark services are behind a compose profile; `config` omits them without this.
+          COMPOSE_PROFILES: spark
+          COMPOSE_PROJECT_NAME: cashu
+        run: |
+          set -euo pipefail
+          prefix="ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/flint-regtest"
+          docker compose config --format json \
+            | jq --arg prefix "$prefix" --arg pin "$PIN" '
+                # One target per distinct local image: ldk/ldk-fee share one, the three operators
+                # share one. Building a target twice would only hit cache, but pushing the same ref
+                # twice from two targets is a race nobody needs.
+                [ .services | to_entries[] | select(.value.build != null) ]
+                | group_by(.value.image) | map(.[0]) as $targets
+                | {
+                    target: ( $targets | map({
+                        (.key): {
+                          tags: [ $prefix + "/" + (.value.image | split(":")[0]) + ":" + $pin ],
+                          platforms: [ "linux/amd64" ],
+                          "cache-from": [ "type=gha,scope=" + (.value.image | split(":")[0]) ],
+                          "cache-to": [ "type=gha,mode=max,scope=" + (.value.image | split(":")[0]) ]
+                        }
+                      }) | add ),
+                    _names: ( $targets | map(.key) )
+                  }' > bake-override.json
+          jq -e '._names | length == 4' bake-override.json > /dev/null || {
+            echo "error: expected exactly four buildable images in the spark profile; got:" >&2
+            jq -r '._names[]' bake-override.json >&2
+            echo "       The fixture's compose file changed shape. Re-read it, then update this" >&2
+            echo "       assertion and e2e/local-regtest/up.sh's pull list together." >&2
+            exit 1
+          }
+          # `_names` is not a bake key, so it has to come out before bake reads the file.
+          names="$(jq -r '._names | join(" ")' bake-override.json)"
+          jq 'del(._names)' bake-override.json > bake-override.tmp
+          mv bake-override.tmp bake-override.json
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+          echo "Targets: $names"
+          jq -r '.target | to_entries[] | "  \(.key) -> \(.value.tags[0])"' bake-override.json
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # GITHUB_TOKEN with `packages: write` is enough; there is no registry secret to hold.
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # bake-action rather than build-push-action: the compose file is the build definition (one target
+      # uses an inline Dockerfile and a git-URL context), and bake is the only front end that consumes
+      # it. It is also what exports the GitHub Actions cache credentials the `type=gha` backend needs —
+      # a bare `docker buildx bake` in a `run:` step cannot see them.
+      - name: Build and push
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          workdir: cashu-regtest
+          files: |
+            docker-compose.yml
+            bake-override.json
+          targets: ${{ steps.targets.outputs.names }}
+          push: true
+
+      - name: Summarise what was published
+        working-directory: cashu-regtest
+        env:
+          PIN: ${{ steps.pin.outputs.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Fixture images published"
+            echo ""
+            echo "Fixture pin: \`$PIN\`"
+            echo ""
+            jq -r '.target | to_entries[] | "- `" + .value.tags[0] + "`  (compose service `" + .key + "`)"' \
+              bake-override.json
+            echo ""
+            echo "\`e2e/local-regtest/up.sh\` pulls these and retags them to the local names the"
+            echo "pinned compose file expects, which is what makes it skip the source build."
+            echo ""
+            echo "If a fork cannot pull them, the packages are still private:"
+            echo "make each one public under the repository's Packages settings."
+          } >> "$GITHUB_STEP_SUMMARY"

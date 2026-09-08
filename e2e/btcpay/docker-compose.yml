@@ -1,0 +1,121 @@
+# A BTCPay Server that runs the packaged Flint plugin against the local Spark stack.
+#
+# Three containers — Postgres, NBXplorer, BTCPay Server — joined to the *fixture's* docker network
+# (`cashu_default`) rather than one of their own. That is the whole trick of this file: NBXplorer then
+# talks to the fixture's bitcoind, and the Flint plugin inside BTCPay reaches the fixture's Spark
+# operators, SSP and Esplora by their compose hostnames. Nothing here starts a bitcoind of its own, so
+# BTCPay and the Spark stack share one chain and one fee market, which is what makes a cooperative exit
+# something the tests can mine to confirmation.
+#
+# Every image is pinned by digest, as ci.yml pins its Postgres service: an e2e run that quietly moved to
+# a different BTCPay Server would be reporting on a host the plugin was not built against.
+#
+# Service names are prefixed `flint-e2e-` because they share a network namespace with ~40 fixture
+# services. `postgres` and `nbxplorer` would both be plausible names for something the fixture adds
+# later, and a hostname collision on a shared network resolves silently to the wrong container.
+
+name: flint-btcpay-e2e
+
+services:
+  flint-e2e-postgres:
+    # Same image and digest as the store-test service in .github/workflows/ci.yml, so the plugin's
+    # migrations run on the version CI already covers. `trust` auth and the durability flags off: this
+    # database is destroyed by down.sh and nothing in it is worth an fsync.
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - flint-e2e-postgres:/var/lib/postgresql/data
+
+  flint-e2e-nbxplorer:
+    # The version BTCPay's own BTCPayServer.Tests/docker-compose.yml pairs with this submodule tag.
+    image: nicolasdorier/nbxplorer:2.6.10@sha256:7d2ab1f6ce38e301cba98a4f85bfbfcf2912d5034bd88af056f9d60e5511f911
+    restart: unless-stopped
+    depends_on:
+      flint-e2e-postgres:
+        condition: service_healthy
+    environment:
+      NBXPLORER_NETWORK: regtest
+      NBXPLORER_CHAINS: btc
+      # The fixture's bitcoind, by its compose hostname. Its command line is
+      # `-regtest -rpcallowip=0.0.0.0/0 -rpcbind=0.0.0.0 -rpcuser=cashu -rpcpassword=cashu -txindex`,
+      # so regtest's default RPC port 18443 is reachable from anywhere on this network and the
+      # credentials are the fixture's fixed pair. 18444 is regtest's P2P port, which is how NBXplorer
+      # follows new blocks; the fixture exposes both.
+      NBXPLORER_BTCRPCURL: http://bitcoind:18443/
+      NBXPLORER_BTCNODEENDPOINT: bitcoind:18444
+      NBXPLORER_BTCRPCUSER: cashu
+      NBXPLORER_BTCRPCPASSWORD: cashu
+      NBXPLORER_BIND: 0.0.0.0:32838
+      NBXPLORER_NOAUTH: 1
+      # Small gap sizes purely to keep the initial scan cheap; nothing here derives many addresses.
+      NBXPLORER_MINGAPSIZE: 5
+      NBXPLORER_MAXGAPSIZE: 10
+      NBXPLORER_POSTGRES: >-
+        User ID=postgres;Include Error Detail=true;Host=flint-e2e-postgres;Port=5432;Database=nbxplorer
+    volumes:
+      - flint-e2e-nbxplorer:/datadir
+
+  flint-e2e-btcpay:
+    # btcpayserver/btcpayserver:2.4.4 — the tag the `btcpayserver` submodule is pinned to, which is what
+    # Constants.BuiltAgainstBTCPayServerVersion says the plugin was compiled against. Pinned to the
+    # multi-arch index digest so the same line works on an amd64 runner and on an arm64 Mac; the plugin
+    # ships Breez's native library for both linux RIDs, so either resolves.
+    image: btcpayserver/btcpayserver:2.4.4@sha256:c264aa08cd32a469bd30d41978b73dc8bb2de1503ce67bdb0ab8fd5d934fb614
+    restart: unless-stopped
+    depends_on:
+      flint-e2e-postgres:
+        condition: service_healthy
+      flint-e2e-nbxplorer:
+        condition: service_started
+    environment:
+      BTCPAY_NETWORK: regtest
+      BTCPAY_CHAINS: btc
+      BTCPAY_BTCEXPLORERURL: http://flint-e2e-nbxplorer:32838/
+      BTCPAY_POSTGRES: >-
+        User ID=postgres;Include Error Detail=true;Host=flint-e2e-postgres;Port=5432;Database=btcpayserver
+      # BTCPAY_DATADIR is already /datadir in the image, but the plugin directory is *not* derived from
+      # it: DataDirectories.Configure reads `plugindir` independently and otherwise falls back to a
+      # path under $HOME. Set explicitly so the bind mount below is the directory PluginManager scans.
+      BTCPAY_PLUGINDIR: /datadir/Plugins
+      BTCPAY_DEBUGLOG: /datadir/btcpay.log
+      BTCPAY_DEBUGLOGLEVEL: information
+      # Kestrel's own URL setting, not BTCPay's --bind: `bind`/`port` are only honoured when an HTTPS
+      # certificate is configured (see Startup.cs), and the image sets no ASPNETCORE_URLS, so without
+      # this Kestrel listens on 127.0.0.1:5000 *inside* the container and the published port answers
+      # nothing.
+      ASPNETCORE_URLS: http://0.0.0.0:49392
+      # The one production read of this variable (SparkService.ResolveCustomNetwork): it points every
+      # store's wallet at the fixture's own Spark operators instead of Spark's hosted regtest. The file
+      # is the --docker descriptor, mounted below; it carries in-network addresses, so it is only
+      # meaningful to a process on this network.
+      SPARK_LOCAL_REGTEST_NETWORK: /datadir/spark-network.json
+    ports:
+      # Loopback only. The tests drive it from the host over this port.
+      - "127.0.0.1:${FLINT_BTCPAY_E2E_PORT:-14142}:49392"
+    volumes:
+      - flint-e2e-btcpay:/datadir
+      # Read-write on purpose: PluginManager creates the directory, drains a command queue in it, and
+      # writes a disable marker for a plugin that crashed at startup. Mounted read-only, a crash would
+      # present as a second, unrelated failure.
+      - ./data/plugins:/datadir/Plugins
+      - ./data/spark-network.json:/datadir/spark-network.json:ro
+
+volumes:
+  flint-e2e-postgres:
+  flint-e2e-nbxplorer:
+  flint-e2e-btcpay:
+
+networks:
+  # The fixture's network, joined rather than created. `external: true` means compose refuses to start
+  # if the stack is not up, which is the correct failure: without bitcoind there is no chain for either
+  # NBXplorer or the Spark operators.
+  default:
+    name: ${FLINT_REGTEST_NETWORK:-cashu_default}
+    external: true

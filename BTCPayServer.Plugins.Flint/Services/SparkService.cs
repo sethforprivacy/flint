@@ -17,6 +17,7 @@ using BTCPayServer.Plugins.Flint.Sdk;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NBitcoin;
+using SdkNetwork = Breez.Sdk.Spark.Network;
 
 namespace BTCPayServer.Plugins.Flint.Services;
 
@@ -156,6 +157,17 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// does not provide.
     /// </summary>
     private readonly SemaphoreSlim _instanceLock = new(1, 1);
+
+    /// <summary>
+    /// Set once the local-regtest network descriptor has been reported, so the line appears one time per
+    /// process rather than once per store and again on every wallet restart.
+    /// </summary>
+    /// <remarks>
+    /// An <c>int</c> driven by <see cref="Interlocked.Exchange(ref int, int)"/> rather than a
+    /// <c>bool</c>: stores are connected from the startup loop and from the provisioning path, so two
+    /// threads can reach this and a plain read-then-write would log twice.
+    /// </remarks>
+    private int _customNetworkReported;
 
     /// <summary>
     /// Startup gate. Everything that reads <see cref="_settings"/> or <see cref="_instances"/> waits on this
@@ -395,6 +407,12 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             return networkError;
         }
 
+        // Resolved here — before the wallet-owner check, before the storage claim, before anything is
+        // allocated — so that a descriptor that cannot be read costs nothing and names itself.
+        var customNetwork = ResolveCustomNetwork(sdkNetwork, storeId, out var customNetworkError);
+        if (customNetworkError is not null)
+            return customNetworkError;
+
         // The SDK's hazard is per wallet, not per store: two instances on one seed corrupt one SQLite file
         // even though the storage directories differ. Two stores sharing a seed is not hypothetical — reusing
         // the BTCPay hot-wallet seed on two stores of the same server does it.
@@ -462,7 +480,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 // which is below the mainnet floor essentially always, and above it a deposit is never claimed and
                 // never surfaces anywhere the merchant looks.
                 maxDepositClaimFee: (settings.Deposits ?? new SparkDepositSettings()).ToMaxFee(),
-                stableBalance: BuildStableBalance(settings));
+                stableBalance: BuildStableBalance(settings),
+                // Null unless this process was pointed at a privately hosted regtest network; see
+                // ResolveCustomNetwork for why reading an environment variable here is safe.
+                customNetwork: customNetwork);
 
             // Created before the SDK because the factory registers the event listener against this writer, and
             // events can arrive the moment it does. The channel buffers until the consumer starts below.
@@ -552,6 +573,91 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 storageLock.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// The privately hosted Spark network this process was pointed at, or null for the one the SDK ships.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The one production read of <see cref="SparkCustomNetworkFile.EnvironmentVariable"/>.</b> It exists so
+    /// that a BTCPay Server running inside the local-regtest stack — the <c>BtcpayE2E</c> suite's whole point —
+    /// exercises the plugin's <em>real</em> store-connect path against local operators, instead of the suite
+    /// reaching around the plugin and connecting an SDK instance of its own. Everything the e2e suite observes
+    /// (invoice settlement, the reconciler, the sweep engine, the Greenfield surface) therefore runs on the
+    /// same code a mainnet store runs on, with only the signing set swapped.
+    /// </para>
+    /// <para>
+    /// <b>Why an environment variable is safe here.</b> Three independent reasons, and any one of them would do:
+    /// </para>
+    /// <list type="number">
+    /// <item><description>
+    /// The network check is first, and the variable is <em>not read at all</em> off regtest. A mainnet or
+    /// testnet server behaves exactly as it did before this method existed, whatever the environment says.
+    /// </description></item>
+    /// <item><description>
+    /// <c>SparkSdkClientFactory</c> refuses a custom network on any network but
+    /// <see cref="SdkNetwork.Regtest"/> anyway, so even a future caller that skipped the check above would get
+    /// a throw rather than a wallet on somebody else's signing set.
+    /// </description></item>
+    /// <item><description>
+    /// It is an environment variable of the BTCPay <em>process</em>, not a store setting and not anything a
+    /// merchant or an API key can reach. See <see cref="SparkCustomNetwork"/> for why that boundary matters:
+    /// whoever can set it can already replace the plugin.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// A descriptor that exists but cannot be read is a refusal to start the wallet rather than a silent
+    /// fallback to Spark's own regtest. The fallback is the worse failure: the store would come up healthy,
+    /// against the wrong network, and the e2e suite would report a wallet that never sees its own money.
+    /// </para>
+    /// </remarks>
+    private SparkCustomNetwork? ResolveCustomNetwork(SdkNetwork sdkNetwork, string storeId, out string? error)
+    {
+        error = null;
+
+        // First, and load-bearing: see reason 1 in the remarks. Nothing below runs off regtest.
+        if (sdkNetwork is not SdkNetwork.Regtest)
+            return null;
+
+        SparkCustomNetwork? network;
+        try
+        {
+            network = SparkCustomNetworkFile.TryLoadFromEnvironment();
+        }
+        catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException)
+        {
+            _logger.LogError(
+                ex,
+                "Store {StoreId}: {EnvironmentVariable} names a Spark network descriptor that could not be "
+                + "read, so the store's wallet was not started. Regenerate it with "
+                + "e2e/local-regtest/write-network.sh, or unset the variable to use Spark's own regtest",
+                storeId, SparkCustomNetworkFile.EnvironmentVariable);
+
+            error = "This server is configured with a local Spark regtest network descriptor that could not "
+                    + "be read, so this store's wallet was not started. Check the server logs.";
+            return null;
+        }
+
+        if (network is null)
+            return null;
+
+        // Once per process. Enough to answer "which Spark network is this server actually on?" from the log of
+        // a run that has gone wrong, which is the question a locally hosted signing set makes worth asking.
+        if (Interlocked.Exchange(ref _customNetworkReported, 1) == 0)
+        {
+            _logger.LogInformation(
+                "Spark wallets on this server connect to the privately hosted regtest network described by "
+                + "{EnvironmentVariable}: {OperatorCount} operator(s) at a threshold of {Threshold}, SSP "
+                + "{SspBaseUrl}, chain source {EsploraUrl}. Spark's own regtest is not used",
+                SparkCustomNetworkFile.EnvironmentVariable,
+                network.Operators.Count,
+                network.Threshold,
+                network.Ssp.BaseUrl,
+                network.EsploraUrl);
+        }
+
+        return network;
     }
 
     /// <summary>

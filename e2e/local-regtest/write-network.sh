@@ -8,7 +8,18 @@
 # identity keys, published host ports, the admin token — are read out of the pinned checkout's own
 # files where possible, so a bump that changes them shows up here instead of silently disagreeing.
 #
-# Usage:  write-network.sh [output-path]
+# Usage:  write-network.sh [--docker] [output-path]
+#
+#   --docker   emit IN-NETWORK addresses instead of published loopback ports, for a client that runs
+#              inside the fixture's own docker network (`cashu_default`) rather than on the host. That
+#              is the BTCPay Server container the BtcpayE2E suite drives: from inside the network,
+#              `127.0.0.1:5000` is the BTCPay container itself and `localhost:8535` is nothing at all,
+#              so the descriptor has to name the compose services — `spark-operator-N:8535`,
+#              `spark-ssp:5000`, `spark-electrs:3002`. The default output path changes to
+#              network.docker.json so a --docker run cannot quietly replace the host descriptor the
+#              LocalRegtest suite is pointed at; the two are not interchangeable, and a wallet
+#              connected through the wrong one fails as a TLS or timeout error naming neither.
+#
 # Environment:
 #   CASHU_REGTEST_DIR      the fixture checkout (default: the one up.sh manages, alongside this script)
 #   COMPOSE_PROJECT_NAME   defaults to `cashu`, which is what the fixture's docker-scripts.sh exports
@@ -17,7 +28,42 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 checkout="${CASHU_REGTEST_DIR:-$script_dir/cashu-regtest}"
-output="${1:-$script_dir/network.json}"
+
+in_docker=0
+output=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --docker) in_docker=1 ;;
+    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -*) echo "error: unknown option $1" >&2; exit 1 ;;
+    *) output="$1" ;;
+  esac
+  shift
+done
+
+if [ -z "$output" ]; then
+  if [ "$in_docker" = 1 ]; then output="$script_dir/network.docker.json"; else output="$script_dir/network.json"; fi
+fi
+
+# The two address sets. Everything else in the descriptor is identical between them: the operators'
+# certificates, their identity keys, the SSP's identity and the whole fixture block are properties of
+# the stack, not of where the client sits.
+if [ "$in_docker" = 1 ]; then
+  # `spark-operator-<i>` is both the compose service name and the SAN the certificate carries, which is
+  # what makes this address verifiable at all; asserted per operator below rather than assumed.
+  operator_host_for() { printf 'spark-operator-%s' "$1"; }
+  operator_port_for() { printf '8535'; }
+  operator_san_for()  { printf 'DNS:spark-operator-%s' "$1"; }
+  ssp_base_url="http://spark-ssp:5000"
+  esplora_url="http://spark-electrs:3002"
+else
+  operator_host_for() { printf 'localhost'; }
+  # Every operator listens on 8535 inside the network; the compose file publishes them as 8535/8536/8537.
+  operator_port_for() { printf '%s' "$((8535 + $1))"; }
+  operator_san_for()  { printf 'DNS:localhost'; }
+  ssp_base_url="http://127.0.0.1:5000"
+  esplora_url="http://127.0.0.1:30000"
+fi
 
 # The fixture pins its compose project name in docker-scripts.sh (`export COMPOSE_PROJECT_NAME=cashu`)
 # rather than letting Compose derive it from the directory name. That is what makes the containers
@@ -121,14 +167,15 @@ for id in 0 1 2; do
   printf '%s' "$cert" | grep -q 'BEGIN CERTIFICATE' \
     || { echo "error: server_$id.crt does not look like a PEM certificate" >&2; exit 1; }
 
-  # The client connects to https://localhost:<port> from the host, so `localhost` has to be a name
-  # the certificate covers or the SDK's TLS handshake fails on hostname verification — and the
-  # certificate is the only thing pinned, since there is no CA to fall back on. spark-cert-init
-  # issues each cert with `subjectAltName = DNS:spark-operator-<i>,DNS:spark-operator-<i>.minikube
-  # .local,DNS:localhost`, so it does; this asserts it rather than assuming, because that SAN list
-  # is a line in the fixture's compose file and a bump could drop the localhost entry.
-  if ! printf '%s' "$cert" | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:localhost'; then
-    echo "error: server_$id.crt has no DNS:localhost SAN, so a host client cannot verify it." >&2
+  # Whichever hostname the client will use has to be a name the certificate covers, or the SDK's TLS
+  # handshake fails on hostname verification — and the certificate is the only thing pinned, since
+  # there is no CA to fall back on. spark-cert-init issues each cert with
+  # `subjectAltName = DNS:spark-operator-<i>,DNS:spark-operator-<i>.minikube.local,DNS:localhost`, so
+  # both address sets are covered; this asserts the one actually being written rather than assuming,
+  # because that SAN list is a line in the fixture's compose file and a bump could drop either entry.
+  required_san="$(operator_san_for "$id")"
+  if ! printf '%s' "$cert" | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -q "$required_san"; then
+    echo "error: server_$id.crt has no $required_san SAN, so this client cannot verify it." >&2
     echo "       Check spark-cert-init's -addext subjectAltName in the fixture's docker-compose.yml." >&2
     exit 1
   fi
@@ -144,7 +191,7 @@ for id in 0 1 2; do
   operators_json="$(jq \
     --argjson id "$id" \
     --arg identifier "$(printf '%064x' $((id + 1)))" \
-    --arg address "https://localhost:$((8535 + id))" \
+    --arg address "https://$(operator_host_for "$id"):$(operator_port_for "$id")" \
     --arg identityPublicKey "$identity_public_key" \
     --arg caCertPem "$cert" \
     '. + [{id: $id, identifier: $identifier, address: $address,
@@ -158,6 +205,8 @@ mkdir -p "$(dirname -- "$output")"
 # newlines is the classic way this file ends up unparseable.
 jq -n \
   --argjson operators "$operators_json" \
+  --arg sspBaseUrl "$ssp_base_url" \
+  --arg esploraUrl "$esplora_url" \
   --arg sspIdentityPublicKey "$ssp_identity" \
   --arg bitcoindContainer "$bitcoind_container" \
   --arg lndContainer "$lnd_container" \
@@ -168,11 +217,11 @@ jq -n \
     threshold: 2,
     operators: $operators,
     ssp: {
-      baseUrl: "http://127.0.0.1:5000",
+      baseUrl: $sspBaseUrl,
       identityPublicKey: $sspIdentityPublicKey,
       schemaEndpoint: "graphql/spark/rc"
     },
-    esploraUrl: "http://127.0.0.1:30000",
+    esploraUrl: $esploraUrl,
     fixture: {
       bitcoindContainer: $bitcoindContainer,
       bitcoindRpcUser: "cashu",
@@ -186,7 +235,13 @@ jq -n \
 
 output_abs="$(cd -- "$(dirname -- "$output")" && pwd)/$(basename -- "$output")"
 echo ""
-echo "Descriptor written. Point the suite at it with:"
-echo ""
-echo "  export SPARK_LOCAL_REGTEST_NETWORK=$output_abs"
+if [ "$in_docker" = 1 ]; then
+  echo "In-network descriptor written ($output_abs)."
+  echo "It is only usable from inside the ${COMPOSE_PROJECT_NAME}_default docker network; e2e/btcpay/up.sh"
+  echo "mounts it into the BTCPay container and sets SPARK_LOCAL_REGTEST_NETWORK to the mounted path."
+else
+  echo "Descriptor written. Point the suite at it with:"
+  echo ""
+  echo "  export SPARK_LOCAL_REGTEST_NETWORK=$output_abs"
+fi
 echo ""

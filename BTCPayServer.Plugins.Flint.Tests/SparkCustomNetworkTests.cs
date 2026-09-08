@@ -14,6 +14,10 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// that succeeds and goes on talking to Lightspark's hosted regtest — which is the failure mode these tests
 /// exist to make impossible, because a green local-regtest run against the hosted network proves nothing.
 /// </remarks>
+// Joined to the environment-variable collection because An_unset_environment_variable_yields_no_network
+// clears SPARK_LOCAL_REGTEST_NETWORK, which is process-global: without this it can run in parallel with
+// SparkServiceCustomNetworkTests, which sets it, and either class can then see the other's value.
+[Collection(SparkNetworkEnvironmentCollection.Name)]
 public class SparkCustomNetworkTests
 {
     private const string FirstIdentifier =

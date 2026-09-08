@@ -58,6 +58,16 @@ public sealed class SparkServiceHarness : IDisposable
         TimeSpan ConfirmStatus,
         TimeSpan AbandonedConnectGrace);
 
+    /// <summary>
+    /// The chain the service's network provider reports, carried across a <see cref="Restart"/>.
+    /// </summary>
+    /// <remarks>
+    /// Regtest for every test but the custom-network one, which has to prove that the environment variable
+    /// naming a local Spark stack is not read on mainnet. That is a property of the network, so the network
+    /// has to be a parameter rather than a constant.
+    /// </remarks>
+    private readonly ChainName _chain;
+
     private SparkServiceHarness(
         TestableSparkService service,
         FakeSparkSdkClientFactory sdk,
@@ -65,7 +75,8 @@ public sealed class SparkServiceHarness : IDisposable
         CapturingLogger<SparkService> log,
         string dataDir,
         Durable durable,
-        Deadlines deadlines)
+        Deadlines deadlines,
+        ChainName chain)
     {
         Service = service;
         Sdk = sdk;
@@ -74,6 +85,7 @@ public sealed class SparkServiceHarness : IDisposable
         _dataDir = dataDir;
         _durable = durable;
         _deadlines = deadlines;
+        _chain = chain;
     }
 
     public SparkService Service { get; }
@@ -128,11 +140,17 @@ public sealed class SparkServiceHarness : IDisposable
     /// moment it tries to adopt a connected wallet. The throw is production code's own argument check, not a
     /// fake standing in for it — the only thing this withholds is a real dependency.
     /// </param>
+    /// <param name="chain">
+    /// The chain the network provider reports. Regtest by default, which is what every test but the
+    /// custom-network one wants; <see cref="ChainName.Mainnet"/> is how the mainnet half of that test is
+    /// expressed.
+    /// </param>
     public static SparkServiceHarness Create(
         TimeSpan? connectDeadline = null,
         TimeSpan? confirmStatusDeadline = null,
         TimeSpan? abandonedConnectGrace = null,
-        bool failWalletAdoption = false)
+        bool failWalletAdoption = false,
+        ChainName? chain = null)
     {
         var dataDir = Path.Combine(
             Path.GetTempPath(), "spark-service-tests", Guid.NewGuid().ToString("N"));
@@ -153,6 +171,7 @@ public sealed class SparkServiceHarness : IDisposable
                 // Long by default so the existing abandon tests still observe a late connect being adopted and
                 // shut down; the release-the-lock test shortens it deliberately.
                 abandonedConnectGrace ?? TimeSpan.FromMinutes(5)),
+            chain ?? ChainName.Regtest,
             failWalletAdoption);
     }
 
@@ -174,11 +193,12 @@ public sealed class SparkServiceHarness : IDisposable
     {
         StopService();
         _ownsDataDir = false;
-        return Create(_dataDir, _durable, _deadlines);
+        return Create(_dataDir, _durable, _deadlines, _chain);
     }
 
     private static SparkServiceHarness Create(
-        string dataDir, Durable durable, Deadlines deadlines, bool failWalletAdoption = false)
+        string dataDir, Durable durable, Deadlines deadlines, ChainName chain,
+        bool failWalletAdoption = false)
     {
         var log = new CapturingLogger<SparkService>();
         var logs = new Logs();
@@ -218,7 +238,7 @@ public sealed class SparkServiceHarness : IDisposable
             new BTCPayServer.EventAggregator(logs),
             stores,
             Options.Create(new DataDirectories { DataDir = dataDir }),
-            new BTCPayNetworkProvider([], new NBXplorerNetworkProvider(ChainName.Regtest), logs),
+            new BTCPayNetworkProvider([], new NBXplorerNetworkProvider(chain), logs),
             sdk,
             invoices,
             new InMemoryOutgoingPaymentStore(),
@@ -238,7 +258,7 @@ public sealed class SparkServiceHarness : IDisposable
             service,
             NullLogger<SparkLightningConfigSweeper>.Instance);
 
-        return new SparkServiceHarness(service, sdk, broadcaster, log, dataDir, durable, deadlines);
+        return new SparkServiceHarness(service, sdk, broadcaster, log, dataDir, durable, deadlines, chain);
     }
 
     /// <summary>Stores a store's Spark settings the way a previous run would have left them.</summary>

@@ -14,7 +14,7 @@ production is a command, and every credential is a published fixture value. See
 ## Running it
 
 ```bash
-e2e/local-regtest/up.sh                     # clone at the pin, then ./start.sh --spark
+e2e/local-regtest/up.sh                     # clone at the pin, pull images, init the stack
 e2e/local-regtest/write-network.sh          # discover the live stack, write network.json
 
 SPARK_LOCAL_REGTEST_NETWORK=$PWD/e2e/local-regtest/network.json \
@@ -26,12 +26,49 @@ e2e/local-regtest/down.sh                   # compose down --volumes, all profil
 `write-network.sh` prints the `export` line for the descriptor path when it finishes. Absent that
 variable the suite skips itself, exactly as the Postgres and Lightspark suites do.
 
+### What `up.sh` actually runs
+
+Not the fixture's `./start.sh --spark`. That is the fixture's init chain *plus* its own acceptance
+suites — seven nodes' channel and UTXO counts, an LNbits probe, `cashu-spark-e2e` (which rebuilds the
+fixture's Rust Breez SDK test client with `--build` and settles four payments through it), and the `ldk/`
+and `fees/` e2e scripts — all of which is the fixture proving itself, and which mines dozens of extra
+blocks on the way. `up.sh` runs the init chain itself (stop, `up -d`, bitcoind funding, the seven-node
+Lightning topology, the six LDK channels, then `cashu-spark-init`, the step that funds the SSP's Spark
+liquidity) with one step left out: `cashu-fees-init`, which funds a fee-charging hub and waits for its
+channel policies to gossip into three routing graphs. That wait is the fixture's flakiest step — its own
+CI timed out in it in two of the three runs before this pin, and so did this suite's first run on
+ubuntu-latest — and nothing here routes through the hub: `lnd-1` and the SSP's LDK node share a direct
+channel. `up.sh` then asserts the three properties the suites actually depend on:
+
+- `open-ssp` reports `ldk_mode: live` **and** non-zero `spark.available_sats`;
+- the SSP's LDK node has all six channels ready;
+- every Lightning node sits at `bitcoind`'s tip (the fixture's own `wait-for-ldk-height`).
+
+Set `FLINT_REGTEST_FULL=1` to run the fixture's full `start.sh --spark` instead — worth doing when
+you suspect the fixture rather than the plugin.
+
 ## What it costs
 
-The fixture builds the Spark operators (Rust and Go), Electrs, `open-ssp` and `ldk-server` **from
-source** — there are no published images. A cold first run is **tens of minutes** (the fixture's own
-CI allows 90, and its Spark job takes around 40) and wants several GB of disk for the image layers
-and build caches. Subsequent runs reuse those layers and come up in a few minutes.
+The fixture publishes no images: its compose file builds the Spark operators (Rust), `open-ssp` (Go),
+Electrs (Rust) and `ldk-server` (Rust) **from source**, which is tens of minutes and several GB of
+disk. So [`.github/workflows/local-regtest-images.yml`](../../.github/workflows/local-regtest-images.yml)
+builds that set once per pinned fixture SHA and pushes it to `ghcr.io`, and `up.sh` pulls each image
+and `docker tag`s it to the exact local name the pinned compose file expects — at which point compose
+finds the image already present and skips the build. Both sides read the names and the service list out
+of `docker compose --profile spark config` rather than hardcoding them, because a hardcoded list that
+drifted would not fail: compose would quietly build again, and the only symptom would be a "fast" run
+that takes forty minutes.
+
+| variable | effect |
+|---|---|
+| `FLINT_REGTEST_IMAGE_PREFIX` | registry path to pull from. Default `ghcr.io/sethforprivacy/flint-regtest`. Set it to the empty string to never pull. |
+| `FLINT_REGTEST_FULL=1` | run the fixture's own `./start.sh --spark` instead of the leaner path above. |
+
+Every pull failure is a warning, never fatal — a fork whose packages were never published, or a
+network blip, falls through to building from source, which still works. **The published images are
+`linux/amd64` only** (an arm64 variant would mean cross-building several large Rust projects under
+QEMU, which is hours rather than minutes), so on Apple silicon `up.sh` does not pull at all: it builds
+native images once, and every run after that reuses those layers and comes up in a few minutes.
 
 `up.sh` is idempotent about the *checkout*, not the *state*: the fixture's `start.sh` begins with
 `docker compose down --volumes`, so every run resets the chain, the operator databases, the SSP
@@ -74,6 +111,12 @@ To bump: update `CASHU_REGTEST_SHA` here **and** the `ref:` in
 [`.github/workflows/local-regtest.yml`](../../.github/workflows/local-regtest.yml), delete the local
 checkout, and run the flow above. Read the fixture's diff for moved ports or changed operator keys
 while you are at it; the assertions above will catch some of that, but not a port that moved.
+
+`up.sh` is the *only* copy of the pin that anything reads programmatically: the images workflow greps
+`CASHU_REGTEST_SHA` out of this file rather than carrying its own, and tags the images it publishes with
+it. So a merged bump republishes the image set automatically (that workflow triggers on pushes to `main`
+touching `up.sh`), and until it finishes, CI's pull misses and falls back to building from source —
+slow, not broken.
 
 ## Credentials
 

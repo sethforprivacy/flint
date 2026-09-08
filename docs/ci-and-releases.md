@@ -16,24 +16,60 @@
   error-string re-wording, or a preimage reaching the log, shows as a failed job inside a green
   scheduled run. A drained wallet failing a PR is answered by funding the wallet and re-running, not by
   reading it as a code failure.
-- **`.github/workflows/local-regtest.yml`** runs the `LocalRegtest` suite against a Spark stack it
-  stands up itself — [callebtc/cashu-regtest](https://github.com/callebtc/cashu-regtest)'s `--spark`
-  profile, pinned by SHA in both the workflow and `e2e/local-regtest/up.sh`. It is the only job that
-  covers settlement end to end with **no third-party service and no secret**: real LND nodes on both
-  sides of an invoice, and blocks mined on demand. Daily, on PRs, and on manual dispatch.
+- **`.github/workflows/local-regtest.yml`** runs the `LocalRegtest` **and `BtcpayE2E`** suites against a
+  Spark stack it stands up itself — [callebtc/cashu-regtest](https://github.com/callebtc/cashu-regtest)'s
+  `--spark` profile, pinned by SHA in both the workflow and `e2e/local-regtest/up.sh`. It is the only job
+  that covers settlement end to end with **no third-party service and no secret**: real LND nodes on both
+  sides of an invoice, and blocks mined on demand. Daily, on PRs, on manual dispatch, and on
+  `workflow_call` from `package.yml`.
 
-  | job | gates a merge? | why |
+  Two layers against one stack. `LocalRegtest` drives the Breez SDK directly, so a failure there is the
+  plugin's SDK wiring. `BtcpayE2E` then stands up a real BTCPay Server in Docker with this plugin
+  side-loaded (`e2e/btcpay/up.sh`) and drives it over the Greenfield API — store Lightning method,
+  invoice lifecycle, sweep endpoint — so a failure there is the plugin *as BTCPay hosts it*, which is the
+  one thing no in-process test host can tell you.
+
+  | trigger | gates? | why |
   |---|---|---|
-  | `local-regtest` | no — `continue-on-error` | no measured flake rate yet, and the fixture is six services built from source with keyshare generation and channel gossip to wait on; a flaky fixture blocking merges would cost more than the gap it closes. Unlike `integration-test` the dependency is not a third-party service, so red here is likelier to be our bug — which is the argument for eventually gating it on PRs, once the daily schedule has accumulated a pass/fail record, exactly as `funded-regtest-test` earned its gate |
+  | `workflow_call` from `package.yml` (a `v*` tag) | **yes** — blocking | cutting a signed release over a stack that cannot settle a payment is indefensible, and a release is a moment a human is present to re-run a transient failure |
+  | a `release/*` PR | **yes** — blocking | this repository releases by merging a `release/vX.Y.Z` branch through a PR, so that PR is where a maintainer would rather learn about a broken stack than at tag time |
+  | ordinary PRs, schedule, dispatch | no — `continue-on-error` | no measured flake rate yet, and the fixture is six services with keyshare generation and channel gossip to wait on (plus a BTCPay container now); a flaky fixture blocking every merge would cost more than the gap it closes. Unlike `integration-test` the dependency is not a third-party service, so red here is likelier to be our bug — the argument for eventually promoting this case too, once the daily schedule has accumulated a pass/fail record, exactly as `funded-regtest-test` earned its gate |
 
-  It is also the slowest job in the repository by a wide margin: the fixture publishes no images, so
-  every run builds the Spark operators, Electrs, `open-ssp` and `ldk-server` from Rust and Go source
-  on a cache-less runner — around **40 minutes**, against a 90-minute timeout. Publishing those images
-  to `ghcr.io` once per pinned SHA is the noted follow-up, and is what would make the job cheap enough
-  to gate. On failure it uploads a `local-regtest-stack-logs` artifact with `docker compose ps -a` and
-  the tail of each service's log, because a failure here is usually "which of six services fell over"
-  rather than anything the .NET output shows. See
+  The gating is one job-level expression,
+  `continue-on-error: ${{ !(inputs.blocking || startsWith(github.head_ref, 'release/')) }}`. The
+  `blocking` input exists because **`github.event_name` cannot detect being called**: inside a reusable
+  workflow it reports the *caller's* triggering event (`push`, for a tag build), never `workflow_call`.
+  It defaults to `true`, so a caller has to opt *out* of the gate rather than remember to opt in; on
+  every other trigger the `inputs` context is empty and the term reads as falsy, and `github.head_ref`
+  is only set on `pull_request`, so the whole expression collapses to "advisory" everywhere else.
+
+  On failure it uploads a `local-regtest-stack-logs` artifact with `docker compose ps -a`, the tail of
+  each fixture service's log, and the BTCPay/NBXplorer container logs (matched by container name, since
+  those live in a different Compose project) — because a failure here is usually "which of seven
+  services fell over" rather than anything the .NET output shows, and a plugin that failed to load says
+  so in BTCPay's startup log and nowhere else. See
   ["Against a local Spark stack"](testing.md#against-a-local-spark-stack).
+- **`.github/workflows/local-regtest-images.yml`** is what makes the job above affordable enough to gate
+  a release. The fixture publishes no images, so compose built the Spark operators (Rust), `open-ssp`
+  (Go), Electrs (Rust) and `ldk-server` (Rust) from source on every run — around **40 minutes** on a
+  cache-less hosted runner, and the whole reason `local-regtest` was advisory on every trigger. This
+  workflow builds those four once per pinned fixture SHA and pushes them to
+  `ghcr.io/sethforprivacy/flint-regtest/<image>:<cashu-regtest-sha>`; `up.sh` pulls each one and
+  `docker tag`s it to the local name the pinned compose file expects, so compose finds it and skips the
+  build. That is the difference between ~40 minutes and **~10–15**.
+  - It runs on manual dispatch and on pushes to `main` touching `up.sh` or itself, so a merged pin bump
+    republishes the set. `CASHU_REGTEST_SHA` in `up.sh` is the single source of truth for the revision
+    (the workflow greps it out rather than carrying a copy), and
+    `docker compose --profile spark config` is the single source of truth for the image set — a
+    hardcoded list that drifted would not fail, it would just build again, and the only symptom would
+    be a "fast" run taking forty minutes.
+  - **`linux/amd64` only.** An arm64 variant means cross-building several large Rust projects under
+    QEMU, which is hours rather than minutes; Apple silicon developers build native images locally once
+    and keep the layers, and `up.sh` skips the pull entirely off amd64 rather than running the stack
+    emulated. Every pull failure is a warning, never fatal, so a fork with no images is slow, not broken.
+  - It builds with `docker buildx bake` over the fixture's own compose file, because that is the only
+    front end that consumes compose `build:` sections — one target's context is a git URL with an inline
+    Dockerfile, which no `build-push-action` invocation could express.
 - **`.github/workflows/spark-regtest-wallet.yml`** is manual-only. It prints the CI regtest wallet's
   static deposit address and balance so a maintainer can fund it — see
   ["A funded regtest wallet for CI"](testing.md#a-funded-regtest-wallet-for-ci). It never prints the seed, and
@@ -43,6 +79,16 @@
   and `SHA256SUMS`) as a workflow artifact, and attaches it to the corresponding GitHub Release when
   triggered by a tag. On a tag it also refuses to build if the tag disagrees with the version in the
   csproj, so a `v0.2.0` tag on a 0.1.0 tree fails rather than producing a mislabelled release.
+  - **A `v*` tag runs the local Spark stack first.** A `local-regtest` job calls
+    `local-regtest.yml` (taking `blocking`'s default of `true`) and `package` `needs` it, so no tag can
+    produce a signed release over a plugin that cannot settle a payment or that BTCPay cannot load. The
+    gate is scoped to tags on purpose: `workflow_dispatch` exists to inspect a packaged artifact
+    quickly, and making every dispatch pay a quarter-hour of Docker would defeat that, so the gate job
+    skips off-tag and `package`'s `if:` accepts a *skipped* need while refusing a failed or cancelled
+    one. The calling job grants only `contents: read` and `packages: read` — a job that calls a
+    reusable workflow takes its permissions from the call site, not from the called file, and nothing
+    in that stack should be able to attest or publish. No `secrets: inherit` either: every credential
+    in the fixture is a published regtest value.
   - **All four ELF/Mach-O native payloads are stripped at packaging time** by
     [`scripts/strip-native-payloads.sh`](../scripts/strip-native-payloads.sh): Breez ships its Rust
     libraries with DWARF debug info and fat symbol tables — never-mapped data that nonetheless
@@ -95,5 +141,14 @@
   (`integration-test` intentionally *not* required, since it is `continue-on-error` by design), plus
   "Require branches to be up to date before merging". `funded-regtest-test` blocks PRs since it is
   no longer `continue-on-error` there; requiring it in branch protection as well is a choice —
-  doing so means a drained CI wallet holds every merge until someone funds it. `local-regtest` is
-  `continue-on-error` on every trigger and should not be required either, for now.
+  doing so means a drained CI wallet holds every merge until someone funds it. `local-regtest` should
+  **not** be required: it is `continue-on-error` on ordinary PRs, and it blocks exactly where it needs
+  to — on `release/*` PRs and on the tag build — through its own job expression rather than through
+  branch protection. Making it a required check would extend a fixture's flake rate to every merge,
+  which is the thing that expression exists to avoid.
+- **GHCR package visibility**: `local-regtest-images.yml` creates four packages under
+  `ghcr.io/sethforprivacy/flint-regtest/`, and GitHub creates a package **private** on its first push.
+  Make each one public (Packages → the package → Package settings → Change visibility) so a fork's
+  `local-regtest` run can pull them; the same-repository case works either way, because that job logs
+  in to GHCR with `GITHUB_TOKEN`. A private package is a slow run, not a broken one — `up.sh` warns
+  and builds from source.

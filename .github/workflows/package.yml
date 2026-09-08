@@ -10,6 +10,23 @@ name: Package
 # cutting a release (e.g. to sanity-check packaging changes before tagging).
 #
 # ---------------------------------------------------------------------------------------------
+# Release gate: a `v*` tag runs the whole local Spark stack first.
+#
+# `local-regtest` below calls .github/workflows/local-regtest.yml, which stands up the cashu-regtest
+# `--spark` fixture, runs the LocalRegtest suite against the Breez SDK and the BtcpayE2E suite against
+# a real BTCPay Server with this plugin side-loaded, and — because it is called with its `blocking`
+# input at the default of true — fails rather than reporting advisory-green. `package` needs it, so a
+# tag cannot produce a signed release over a plugin that cannot settle a payment. That gate is only
+# affordable because the fixture's images are prebuilt and pulled
+# (.github/workflows/local-regtest-images.yml): ~10-15 minutes, against ~40+ if a pull falls back to
+# building from source.
+#
+# It is deliberately scoped to tags. workflow_dispatch exists to inspect a packaged artifact quickly,
+# and making every dispatch pay a quarter-hour of Docker would defeat the reason it exists — so the
+# gate job skips off-tag, and `package` accepts a skipped need explicitly. It refuses to accept a
+# failed or cancelled one.
+#
+# ---------------------------------------------------------------------------------------------
 # Signing: keyless build provenance, not a maintainer GPG key.
 #
 # The obvious precedent is the Boltz BTCPay plugin, which GPG-signs SHA256SUMS in CI with a
@@ -82,9 +99,33 @@ env:
   PROJECT_PATH: BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
 
 jobs:
+  # The release gate. See the note at the top of this file for the scoping argument.
+  local-regtest:
+    name: Local regtest gate
+    # Tags only. A `refs/tags/v*` push is the release path; a workflow_dispatch is an inspection build.
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/local-regtest.yml
+    # A job that calls a reusable workflow takes its permissions from HERE, not from the called file's
+    # own `permissions:` block, which is ignored. contents: read to check out; packages: read so up.sh can
+    # pull the prebuilt fixture images while those GHCR packages are private. Deliberately none of this
+    # workflow's write scopes: nothing in that stack should be able to attest or publish anything.
+    permissions:
+      contents: read
+      packages: read
+    # No `secrets: inherit`: every credential in the fixture is a published regtest value, and the suites
+    # generate their own wallets. Passing the release job's secrets into a stack that runs six
+    # third-party container images would be handing them out for nothing.
+
   package:
     name: Build & package plugin
     runs-on: ubuntu-latest
+    needs: [local-regtest]
+    # `always()` is what lets the gate be tag-scoped: without it a skipped `local-regtest` (every
+    # workflow_dispatch) would skip `package` too, since a skipped need is not a satisfied one. The
+    # explicit result check is the actual gate — 'failure' and 'cancelled' both stop the release, and
+    # listing the two acceptable results rather than negating the unacceptable ones means a result GitHub
+    # adds later fails closed.
+    if: always() && (needs.local-regtest.result == 'success' || needs.local-regtest.result == 'skipped')
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

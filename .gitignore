@@ -21,3 +21,11 @@ TESTING.local.md
 e2e/local-regtest/cashu-regtest/
 e2e/local-regtest/network.json
 e2e/local-regtest/up.log
+
+# Local BTCPay e2e stack (e2e/btcpay): the handoff file the up.sh script writes (it holds a live
+# API key), the staged plugin copy and the in-network Spark descriptor it mounts into the
+# container, and the --docker descriptor write-network.sh emits. All per-run artifacts of a
+# fixture down.sh destroys.
+e2e/local-regtest/network.docker.json
+e2e/btcpay/btcpay.json
+e2e/btcpay/data/
