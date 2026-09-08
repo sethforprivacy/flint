@@ -1,0 +1,284 @@
+name: Local regtest
+
+# Runs the LocalRegtest and BtcpayE2E suites against a Spark stack this workflow stands up itself:
+# callebtc/cashu-regtest's `--spark` profile — Bitcoin Core, three Spark operators, open-ssp, Electrs,
+# and three LND plus three CLN nodes as external Lightning counterparties.
+#
+# What this covers that ci.yml's `integration-test` and `funded-regtest-test` cannot. Those talk to
+# Lightspark's hosted regtest, where the far side of an invoice is not ours: nothing will pay an invoice
+# the plugin mints, nothing can mine a block on demand, and the whole thing needs a faucet-funded wallet
+# behind a repository secret — which is why the funded suite goes red when an operations event drains it,
+# and why fork PRs cannot run it at all. Here a real LND node pays a Flint invoice and Flint pays LND's,
+# confirmations are a `bitcoin-cli -generate` away, and every credential is a published fixture value. It
+# is the only job that exercises settlement end to end with no third-party service and no secret.
+#
+# It runs the suites in two layers against the same stack. `LocalRegtest` drives the Breez SDK directly,
+# so a failure there is the plugin's SDK wiring. `BtcpayE2E` then stands up a real BTCPay Server in Docker
+# with this plugin side-loaded and drives it over the Greenfield API, so a failure there is the plugin as
+# BTCPay actually hosts it — store Lightning method, invoice lifecycle, the sweep endpoint. The second
+# layer is the one that catches a plugin which loads in a test host but not in the product.
+#
+# COST. The fixture publishes no images, so compose would build the Spark operators (Rust and Go), Electrs,
+# open-ssp and ldk-server from source: around 40 minutes on ubuntu-latest, cold every time, because GitHub
+# gives each job a clean runner with no Docker layer cache. .github/workflows/local-regtest-images.yml now
+# builds that set once per pinned fixture SHA and pushes it to ghcr.io, and up.sh pulls and retags it so
+# compose skips the build — which is what took this from a ~40-minute daily signal to a ~10-15-minute job
+# cheap enough for package.yml to block a release on. up.sh falls back to building when a pull fails (a
+# fork whose packages are private, an arm64 host), so the 90-minute timeout still has to cover the cold
+# case.
+
+on:
+  # Daily, for the same reason ci.yml runs daily: the Breez SDK is pre-1.0 and open-ssp moves, so drift in
+  # the protocol between them shows up here on days with no commits.
+  schedule:
+    - cron: "0 6 * * *"  # 06:00 UTC daily, an hour after ci.yml, so the two do not contend for runners
+  pull_request:
+  workflow_dispatch: {}
+  # Called by .github/workflows/package.yml on a `v*` tag, so a release cannot be packaged over a red
+  # stack. See docs/ci-and-releases.md for the gating rule this and the job below encode.
+  #
+  # `blocking` exists because `github.event_name` CANNOT be used to detect being called: inside a reusable
+  # workflow it reports the *caller's* triggering event ("push", for a tag build), never "workflow_call".
+  # An input is the only honest signal, and defaulting it to true means a caller has to opt out of the
+  # gate rather than remember to opt in. On every other trigger the `inputs` context is empty, so
+  # `inputs.blocking` reads as null — falsy — which is exactly the advisory behaviour those triggers want.
+  workflow_call:
+    inputs:
+      blocking:
+        description: "Fail the calling workflow if the stack or either suite fails."
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  # write-network.sh and down.sh both need this to find the stack: the fixture's docker-scripts.sh pins
+  # the Compose project name rather than deriving it from the directory, and that name is what every
+  # container and volume is called. Set at workflow level so the diagnostics step has it too.
+  COMPOSE_PROJECT_NAME: cashu
+  # The Spark services are all behind a profile; `docker compose ps`/`logs` skip them without this.
+  COMPOSE_PROFILES: spark
+
+jobs:
+  local-regtest:
+    name: LocalRegtest + BtcpayE2E suites (local Spark stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # BLOCKING on the two paths where a red stack must stop something, ADVISORY everywhere else.
+    #
+    # Blocking when `inputs.blocking` is true, which is the release path: package.yml calls this workflow
+    # on a `v*` tag and takes the default (true), so a failure here fails that job, and `package` never
+    # runs. Cutting a release over a stack that cannot settle a payment is the one case where carrying on
+    # is indefensible — and a release is also the moment a human is definitely present to re-run a
+    # transient failure.
+    #
+    # Blocking on a `release/*` head branch, which is the same gate one step earlier: this repository
+    # releases by merging a `release/vX.Y.Z` branch through a PR (see git log), so the release PR is where
+    # a maintainer would rather learn about a broken stack than at tag time. `github.head_ref` is only set
+    # on `pull_request`, and casts to '' elsewhere, so this term is inert on schedule and dispatch.
+    #
+    # Advisory everywhere else — ordinary PRs, the daily schedule, manual dispatch — for the reason
+    # integration-test's comment gives for itself: there is no measured flake rate. This has a lot of
+    # moving parts that are nobody's product (six services, a FROST keyshare generation startup polls for,
+    # channel gossip that must propagate before a payment can route, and now a BTCPay container on top),
+    # and a flaky *fixture* blocking every merge would be worse than the gap it closes. Unlike
+    # integration-test the dependency is not a third-party service, so a red run here is likelier to be our
+    # bug — which is the argument for eventually promoting the ordinary-PR case too:
+    #
+    #     continue-on-error: ${{ !(inputs.blocking || github.event_name == 'pull_request') }}
+    #
+    # Let the daily schedule accumulate a few weeks of pass/fail first, exactly as `funded-regtest-test`
+    # earned its PR gate. Until then someone has to read the run summary. See docs/ci-and-releases.md.
+    continue-on-error: ${{ !(inputs.blocking || startsWith(github.head_ref, 'release/')) }}
+    # `packages: read` is only for pulling the prebuilt fixture images from this repository's GHCR
+    # namespace while those packages are still private (they are private on first push, and making them
+    # public is a one-time settings change). Declared at job level because a job in a workflow called by
+    # package.yml takes its permissions from the calling job, not from this file — see package.yml.
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Depth 1 applies to the btcpayserver submodule too (actions/checkout passes the same
+          # fetch-depth through to `git submodule update`), which matters: the submodule is a
+          # large, long-lived repo, and a full clone of it on every run would dominate CI time.
+          submodules: recursive
+          fetch-depth: 1
+
+      # Checked out rather than cloned by up.sh so the fixture's source is fetched with the same cached,
+      # authenticated transport as everything else, and so the pin is visible in this file to a reviewer
+      # and to Dependabot. `ref` MUST stay in step with `CASHU_REGTEST_SHA` in e2e/local-regtest/up.sh —
+      # up.sh verifies the checkout against its own constant and fails the job loudly if they diverge.
+      - name: Check out the cashu-regtest fixture at the pinned SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: callebtc/cashu-regtest
+          ref: 23d5c160e0b5fade7e4a245b7385f9116bf2fc5c
+          path: e2e/local-regtest/cashu-regtest
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      # Same key as every job in ci.yml, exact on the csproj hashes with no `restore-keys` prefix
+      # fallback, so a warm cache from a different dependency set is never adopted.
+      #
+      # `!e2e/**` is not in ci.yml's key and does not change it: e2e/ holds no csproj, so the hashed file
+      # set is identical. It is here because hashFiles is evaluated TWICE — once at restore, once in the
+      # action's post step at the end of the job — and by then e2e/ contains the fixture checkout and
+      # the BTCPay data directory, with files the containers wrote as root that the runner user cannot
+      # read. Walking into them made the post-step hash fail ("Fail to hash files under directory") on
+      # this workflow's first green run, which lost the cache save and put a red step on a passing job.
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '!e2e/**') }}
+
+      - name: Build (plugin + tests)
+        # -m:1 serialises MSBuild project scheduling. Not for speed obviously, but for correctness:
+        # the test project pins StaticWebAssetsEnabled=false on its ProjectReferences, which makes the
+        # btcpayserver closure build a second time under different global properties than the solution's
+        # own entries -- two builds of the same project, one output directory. On the v2.4.1 graph the
+        # two never collided; the v2.4.2 graph re-timed them and every job on the bump PR failed with
+        # "GenerateDepsFile ... deps.json ... being used by another process". The same class of race is
+        # documented for local fresh-worktree builds. Serialising the scheduler removes the collision at
+        # the cost of wall-clock; if that cost ever matters, the real fix is unifying the global
+        # properties, not removing this flag and hoping the timing holds.
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release -m:1
+
+      # Lets up.sh pull the prebuilt fixture images while those GHCR packages are private. Public
+      # packages need no credentials at all, and a fork PR gets a token that cannot read this
+      # repository's packages either way — in both of those cases up.sh falls back to building from
+      # source, which is slow but correct, so this step is a cost optimisation and never a dependency.
+      - name: Log in to GHCR (for the prebuilt fixture images)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Runs the build before the stack on purpose: a compile error should cost two minutes, not forty.
+      #
+      # up.sh pulls the four prebuilt images from ghcr.io and retags them to the local names the pinned
+      # compose file expects, so compose skips the source build; it warns and builds when a pull fails.
+      # Then it runs the fixture's init chain minus the fee-hub wait (not its `start.sh`, which also runs the
+      # fixture's own acceptance suites and would rebuild its Rust test client here) and asserts the
+      # three things the suites depend on: a live SSP with Spark liquidity, six ready LDK channels, and
+      # every Lightning node at bitcoind's tip.
+      - name: Start the local Spark stack
+        env:
+          # Reuse the checkout above instead of letting up.sh clone a second copy. up.sh still verifies
+          # its SHA, so a `ref` that drifts from up.sh's constant fails here rather than silently
+          # testing against a different revision of the fixture.
+          CASHU_REGTEST_DIR: ${{ github.workspace }}/e2e/local-regtest/cashu-regtest
+        run: e2e/local-regtest/up.sh
+
+      - name: Write the network descriptor
+        env:
+          CASHU_REGTEST_DIR: ${{ github.workspace }}/e2e/local-regtest/cashu-regtest
+        run: e2e/local-regtest/write-network.sh
+
+      # --output Detailed is Microsoft.Testing.Platform's equivalent of the VSTest
+      # `--logger "console;verbosity=detailed"` (see the test .csproj). Worth knowing if it is ever edited
+      # back: MTP does not reject the old flag, it takes it as a filter, matches nothing, and exits 5 with
+      # "Zero tests ran" -- red, but red for a reason that reads nothing like a bad command line.
+      #
+      # The suite's collection is declared with DisableParallelization: these tests move one wallet's money
+      # through one SSP, and the SSP serialises coop-exit requests per user.
+      - name: LocalRegtest suite
+        env:
+          SPARK_LOCAL_REGTEST_NETWORK: ${{ github.workspace }}/e2e/local-regtest/network.json
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=LocalRegtest"
+          --output Detailed
+
+      # Stage 2 starts here: the same stack, now with the product on top of it. e2e/btcpay/up.sh builds
+      # the plugin, starts BTCPay Server + NBXplorer + Postgres joined to the fixture's own docker network
+      # (so NBXplorer talks to the fixture's bitcoind), side-loads the plugin, provisions an admin, a store
+      # and an API key through Greenfield, points the store's Lightning method at Flint, funds the wallet,
+      # and writes e2e/btcpay/btcpay.json describing all of it.
+      #
+      # Separate from the stack step rather than folded into up.sh: this half is worth failing on its own,
+      # and a BTCPay that will not start is a different diagnosis from a Spark stack that will not.
+      - name: Start BTCPay Server against the local Spark stack
+        run: e2e/btcpay/up.sh
+
+      # Greenfield-level coverage: an invoice lnd-1 pays and BTCPay reports Settled, a payment BTCPay
+      # makes to lnd-1, and the store's sweep endpoint reaching Confirmed after a block. Same
+      # --output Detailed and same sequential-collection reasoning as the suite above.
+      - name: BtcpayE2E suite
+        env:
+          FLINT_BTCPAY_E2E: ${{ github.workspace }}/e2e/btcpay/btcpay.json
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=BtcpayE2E"
+          --output Detailed
+
+      # A failure in this job is almost never legible from the .NET output alone: the interesting evidence
+      # is which of six services fell over. `ps -a` includes exited containers, which is the common case —
+      # an operator that crashed during keyshare generation looks, from the test's side, like a timeout.
+      - name: Stack failure diagnostics
+        if: failure()
+        working-directory: e2e/local-regtest/cashu-regtest
+        run: |
+          mkdir -p "${{ github.workspace }}/local-regtest-logs"
+          docker compose ps -a | tee "${{ github.workspace }}/local-regtest-logs/ps.txt"
+          for service in bitcoind spark-operator-0 spark-operator-1 spark-operator-2 \
+                         spark-ssp ldk spark-electrs lnd-1; do
+            # `|| true` per service: a service that never got created has no logs, and that must not stop
+            # the loop before it reaches the one that did fail.
+            docker compose logs --tail=400 --no-color "$service" \
+              > "${{ github.workspace }}/local-regtest-logs/$service.log" 2>&1 || true
+          done
+          # The stage-2 containers belong to a different Compose project, and this step is inside the
+          # fixture's, so they are matched by container name rather than by service: `docker logs` needs
+          # no project context, and matching by name keeps working if e2e/btcpay renames its project.
+          # A plugin that failed to load says so in BTCPay's own startup log and nowhere else, which is
+          # the single most valuable thing in this whole artefact when stage 2 is what went red.
+          docker ps -a --format '{{.Names}}' \
+            | grep -E 'btcpay|nbxplorer' \
+            | while IFS= read -r container; do
+                docker logs --tail=400 "$container" \
+                  > "${{ github.workspace }}/local-regtest-logs/$container.log" 2>&1 || true
+              done || true
+          tail -n 60 "${{ github.workspace }}/local-regtest-logs/"*.log || true
+
+      # Only on failure: on a green run these logs are tens of MB of routine chatter, and unlike
+      # `funded-regtest-test`'s artefact they answer no standing question. Nothing here is secret — every
+      # credential in the stack is a published fixture value and the suite's wallet is random per run and
+      # holds regtest coins — so there is no withholding logic to mirror.
+      - name: Upload the stack logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: local-regtest-stack-logs
+          path: local-regtest-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Before the fixture's teardown, always: these containers are attached to the fixture's docker
+      # network, and `compose down` on the fixture cannot remove a network something else is still joined
+      # to — it fails, leaves the network behind, and the next run on a self-hosted runner inherits it.
+      - name: Tear BTCPay Server down
+        if: always()
+        run: e2e/btcpay/down.sh || true
+
+      # always(), so a cancelled or timed-out run does not leave containers holding the runner's disk. On a
+      # hosted runner the runner is discarded anyway; this matters for self-hosted ones and costs seconds.
+      - name: Tear the stack down
+        if: always()
+        env:
+          CASHU_REGTEST_DIR: ${{ github.workspace }}/e2e/local-regtest/cashu-regtest
+        run: e2e/local-regtest/down.sh || true

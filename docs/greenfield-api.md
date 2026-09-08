@@ -27,7 +27,16 @@ engine with the same guards.
 A key scoped to a single store works; `btcpay.store.canmodifystoresettings` covers the read endpoints too.
 Basic authentication is accepted wherever an API key is, as everywhere in Greenfield.
 
-Three things are worth knowing before scripting against it.
+Four things are worth knowing before scripting against it.
+
+- **A key that generates or imports a seed needs `btcpay.server.canmodifyserversettings` as well**, even
+  when it belongs to an administrator. `seedSource` `generate`, `import` and `hotWallet` all create a hot
+  wallet on this server, and the plugin asks BTCPay's own `CanUseHotWallet` — which answers yes only when
+  the server policy *allow non-admins to create hot wallets* is switched on, or when **the caller** holds
+  the server-settings policy. An API key is judged on its own permissions and not on its owner's role, so a
+  store-scoped key made by an admin is refused with `403` and `hot-wallet-not-allowed`. Either add that
+  permission to the key or turn the server policy on; the refusal is a server policy rather than a bad
+  request, which is why it is a `403` and not a validation error.
 
 - **A generated recovery phrase is returned exactly once**, in the response to the `POST` that generated
   it, and never again. There is no endpoint that reads a seed back — the phrase is stored encrypted with

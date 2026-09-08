@@ -33,6 +33,18 @@ public sealed class FakeSparkSdkClientFactory : ISparkSdkClientFactory
     /// <summary>Every store a connect was attempted for, in order.</summary>
     public List<string> Connects { get; } = [];
 
+    /// <summary>
+    /// The options each store's most recent connect was made with.
+    /// </summary>
+    /// <remarks>
+    /// Recorded because several of the connect options are decisions <see cref="Services.SparkService"/> makes
+    /// and nothing downstream would reveal — the custom-network descriptor most of all, whose whole point is
+    /// that it is null on mainnet whatever the environment says. Holding the object is safe here and nowhere
+    /// else: it carries the mnemonic, and <see cref="SparkConnectOptions.ToString"/> is suppressed for that
+    /// reason, so a test must never print one.
+    /// </remarks>
+    public ConcurrentDictionary<string, SparkConnectOptions> Options { get; } = new();
+
     /// <summary>The clients handed out, by store. A hung store appears only once it is released.</summary>
     public ConcurrentDictionary<string, FakeSparkSdkClient> Clients { get; } = new();
 
@@ -46,6 +58,7 @@ public sealed class FakeSparkSdkClientFactory : ISparkSdkClientFactory
     {
         lock (Connects)
             Connects.Add(options.StoreId);
+        Options[options.StoreId] = options;
         EventWriters[options.StoreId] = eventWriter;
 
         if (FailFor.TryGetValue(options.StoreId, out var failure))

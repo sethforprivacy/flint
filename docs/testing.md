@@ -10,7 +10,7 @@ The default run covers the plugin's own logic — invoice-record state transitio
 connection-string handling, listener safety, settlement fan-out, the sweep engine's economics, guards and
 crash recovery, and the whole `ILightningClient` surface driven through a fake SDK. It needs no Docker, no
 database and no network, and finishes in a couple of seconds. It does **not** cover the EF store or the SDK
-itself; those need the two opt-in suites below.
+itself; those need the opt-in suites below.
 
 The fake SDK deliberately models the real one's hazards rather than an idealised SDK: a cooperative-exit
 quote that does not check the balance, quotes that expire, the script-type dust floor, a send that returns
@@ -147,3 +147,135 @@ context: a preimage next to a name the scrubber knows is handled; one with no na
 scrubber's remarks left open, and since it lives in `sdk.log` the fix is a log-level or file-permissions
 question rather than a regex. Either way, **record the answer in `Sdk/SparkLogScrubber.cs` and delete the
 stated gap.** That is what the artifact is for; it only needs reading once.
+
+## Against a local Spark stack
+
+Both regtest suites above run against Lightspark's hosted service, where everything on the far side of an
+invoice is somebody else's: **no counterparty will pay an invoice the plugin mints**, no one can mine a
+block on demand, and the funded suite needs a faucet-filled wallet behind a repository secret — which is
+why it goes red when the wallet drains, and why a fork cannot run it at all.
+
+A local stack removes all three constraints. [`e2e/local-regtest/`](../e2e/local-regtest/) stands up
+[callebtc/cashu-regtest](https://github.com/callebtc/cashu-regtest)'s `--spark` profile: Bitcoin Core in
+regtest, three Spark operators signing 2-of-3, an `open-ssp` service provider backed by an LDK node,
+Electrs serving an Esplora API, and three LND plus three CLN nodes in a funded channel topology. Those
+Lightning nodes are the point — `lnd-1` pays a Flint invoice and Flint pays `lnd-1`'s, so a **settlement**
+is observable from both sides, with the payment hash checked against what the payer recorded. Deposits
+confirm because a test mines them, a cooperative exit reaches `Confirmed` in seconds rather than whenever
+a block arrives, and there is no secret and no balance to keep topped up.
+
+```bash
+e2e/local-regtest/up.sh                     # clone at the pinned SHA, then ./start.sh --spark
+e2e/local-regtest/write-network.sh          # discover the live stack, write network.json
+
+SPARK_LOCAL_REGTEST_NETWORK=$PWD/e2e/local-regtest/network.json \
+  dotnet test --filter "Category=LocalRegtest"
+
+e2e/local-regtest/down.sh
+```
+
+`SPARK_LOCAL_REGTEST_NETWORK` points at a **network descriptor**: a JSON file naming the three operators
+with their addresses, identity keys and TLS certificates, the SSP's base URL and identity key, and the
+Esplora URL. The plugin's `SparkCustomNetwork` loader reads it and rewrites the SDK's regtest config from
+it; the test fixture additionally reads the container names it needs to drive `bitcoin-cli` and `lncli`.
+It has to be generated rather than committed, because the SSP's identity key and the operators'
+certificates are created fresh by every `start.sh` — so **re-run `write-network.sh` after every
+`up.sh`**. Absent the variable the suite skips itself, as the Postgres and integration suites do.
+
+The cost is time: the fixture publishes no images, so a cold run builds six services from Rust and Go
+source and takes **tens of minutes** (a few minutes once the layers are cached). On Docker Desktop for macOS
+the fixture's Core Lightning nodes cannot write their SQLite database on a bind mount, so `up.sh` gives them
+named volumes through a compose override there; see the
+[fixture README](../e2e/local-regtest/README.md#on-macos). Do not mine or start the suite while `up.sh` is
+still running — the fixture's init waits for every node to reach one exact height, and outside mining
+makes that wait time out with the SSP unfunded.
+
+Everything the stack holds — the `cashu`/`cashu` RPC credentials, the `regtest-spark-admin-token`, the
+operator keyshares — is a public fixture value, and the suite's wallet is random per run. Details, and how
+to bump the pin, are in [`e2e/local-regtest/README.md`](../e2e/local-regtest/README.md).
+
+### Through a real BTCPay Server
+
+The suite above drives the plugin's own collaborators and connects an SDK instance of its own. That is
+enough to prove the money paths, but it means the plugin has never been observed **inside a host**: no
+BTCPay invoice ever reached `Settled`, the Lightning payment method the provisioner writes was never
+resolved by BTCPay, the reconciliation and sweep tasks never ran on BTCPay's schedule against real store
+settings in Postgres, and the plugin was never once *loaded* the way an install loads it — as a directory
+under the data dir, out of the official image, with Breez's native library resolved by BTCPay's plugin load
+context. [`e2e/btcpay/`](../e2e/btcpay/) closes that gap.
+
+It brings up BTCPay Server, NBXplorer and Postgres **joined to the Spark stack's own docker network**, so
+NBXplorer uses the fixture's `bitcoind` and the plugin inside BTCPay reaches the fixture's operators, SSP
+and Esplora. One chain, one fee market, and a cooperative exit the tests can mine to confirmation.
+
+```bash
+e2e/local-regtest/up.sh                     # the Spark stack first; this needs it
+e2e/btcpay/up.sh                            # BTCPay + NBXplorer + Postgres, then provision and fund
+
+FLINT_BTCPAY_E2E=$PWD/e2e/btcpay/btcpay.json \
+  dotnet test --filter "Category=BtcpayE2E" --output Detailed
+
+e2e/btcpay/down.sh                          # BTCPay side only; then e2e/local-regtest/down.sh
+```
+
+`up.sh` takes about **20 seconds** on a warm machine — it starts three containers, waits for BTCPay's
+`/api/v1/health`, and then does everything a merchant would do, over Greenfield: create the first
+administrator, mint an API key, create a store, `POST /api/v1/stores/{id}/spark` with
+`seedSource: generate`, read the deposit address back, pay it from the fixture's `bitcoind`, mine, wait for
+the claim, and configure sweeping. It writes `e2e/btcpay/btcpay.json` — base URL, API key, store id and the
+same `fixture` block `network.json` carries — which is the only thing the tests read. The suite itself takes
+about **two minutes**, nearly all of it the cooperative exit.
+
+Two things about that provisioning are worth knowing before scripting anything similar.
+
+- **The API key needs `btcpay.server.canmodifyserversettings`**, even when it belongs to an administrator.
+  `seedSource: generate` creates a hot wallet, and BTCPay's own `CanUseHotWallet` check answers yes only
+  when the server policy *allow non-admins to create hot wallets* is on, or when **the caller** holds the
+  server-settings policy — and an API key is judged on its own permissions, not on its owner's role. Without
+  it the provisioning `POST` answers `403 hot-wallet-not-allowed`. See
+  [`greenfield-api.md`](greenfield-api.md).
+- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.4`, matching the `btcpayserver`
+  submodule tag and therefore `Constants.BuiltAgainstBTCPayServerVersion`. The official image is a Release
+  build, so `DEBUG_PLUGINS` — the side-loading route [`development.md`](development.md) uses — does not
+  exist in it; `up.sh` instead stages the Release build output as
+  `<plugindir>/BTCPayServer.Plugins.Flint/`, which is the layout `PluginManager` scans and byte-for-byte
+  what `PluginPacker` would have zipped. `BTCPAY_PLUGINDIR` is set explicitly because BTCPay resolves the
+  plugin directory independently of `BTCPAY_DATADIR`.
+
+The three tests each close one host-facing gap, and each is checked against the counterparty rather than
+against the plugin:
+
+1. an invoice created through Greenfield, its BOLT11 read off the payment-methods endpoint, paid by `lnd-1`,
+   reaching `Settled` — with the payment hash BTCPay recorded compared against the hash LND says it paid;
+2. `POST /api/v1/stores/{id}/lightning/BTC/invoices/pay` paying an invoice `lnd-1` minted, with the verdict
+   read from LND's own copy of that invoice — which also proves BTCPay resolved a plugin-supplied
+   `ILightningClient` from the connection string the provisioner wrote;
+3. `POST /api/v1/stores/{id}/spark/sweep` reaching outcome `Swept`, then `Confirmed` after mining, with the
+   record's txid looked up in the fixture's `bitcoind` and its confirmations counted.
+
+**The fixture's SSP liquidity is the consumable, and the numbers are tight.** The wallet is funded with
+150,000 sats out of the SSP's own Spark leaves, and the deposit is only the first demand: every Spark payment
+out of the wallet needs the SSP to *split* a leaf it can back. Against a leaf set that is too small or too
+coarse, a wallet takes its deposit and then refuses both the first Lightning send and the exit quote with
+`Tree service error: insufficient funds` — a message that names the wallet and means the SSP. This is
+sequence-dependent: the fixture seeds one 500,000-sat leaf, the `LocalRegtest` suite that runs first in CI
+borrows ~140,000 of it and returns most through its cooperative exit, and this suite's deposit then left
+~360,000 — at which point a 3,000-sat send failed, while the same run against two leaves (857,000) passed.
+So `up.sh` **tops the SSP up itself** until it holds at least five times the funding amount, adding one
+500,000-sat leaf per round exactly as the fixture's `cashu-spark-fund-ssp` does (admin deposit address →
+`bitcoind` → three confirmations → admin claim). Regtest coins are free; the top-up costs about ten seconds.
+
+`down.sh` is what keeps that from being necessary often. It pays the store's remaining balance back to
+`lnd-1` over Lightning before removing the containers, which returns the leaves to the SSP: a full
+`up.sh` → suite → `down.sh` cycle was measured to cost the SSP **500 sats** net. The return leg is a
+Lightning payment and not a sweep on purpose — an exit on this chain costs around 20,000 sats, so the
+plugin's fee guard correctly refuses any remainder much smaller than that, which is exactly the amount left
+after the sweep test. Without it the leftover is stranded in a wallet whose storage `down.sh` destroys, and
+one measured pair of runs took the SSP from 500,000 to 382,000.
+
+Observed figures from a green run, for calibration: 150,000 sats deposited, **140,100 credited** (a
+9,900-sat claim fee at ~100 sat/vB, auto-claimed by the SDK's own worker), and a sweep of 125,100 delivering
+105,400 for a **19,700-sat exit fee** — 18.7% of what the destination received, inside the store's 40%
+ceiling and well inside the engine's 50% hard backstop. Every one of those numbers is set by the fixture's
+fee market, which drifts upward as the fixture sends more `fee_rate=100` transactions, so the sweep test
+quotes first and sizes itself off the quote rather than fixing an amount.
