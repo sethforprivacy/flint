@@ -166,12 +166,12 @@ jobs:
       - name: Build and push
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
-          # `source: .` is load-bearing. Without it bake-action builds from its default *git* context —
-          # this repository at the triggering commit — where there is no docker-compose.yml, and the
-          # first run on main failed with "lstat docker-compose.yml: no such file or directory". With it,
-          # the definition and every build context resolve inside the fixture checkout under `workdir`.
-          source: .
-          workdir: cashu-regtest
+          # `source` is load-bearing, and it is the fixture checkout, not `.`: bake-action v7 has no
+          # `workdir` input (the run warned about it and ignored it) — a *local* `source` IS the working
+          # directory, and without one the action builds from its default git context, this repository
+          # at the triggering commit, where there is no docker-compose.yml. Both wrong shapes failed on
+          # main with "docker-compose.yml: no such file or directory". `files` are relative to it.
+          source: cashu-regtest
           files: |
             docker-compose.yml
             bake-override.json
