@@ -141,7 +141,10 @@ jobs:
             exit 1
           }
           # `_names` is not a bake key, so it has to come out before bake reads the file.
-          names="$(jq -r '._names | join(" ")' bake-override.json)"
+          # Comma-separated, not space-separated: bake-action splits its `targets` input on commas and
+          # newlines only, so a space-joined list arrives as ONE target named "ldk spark-ssp …" and bake
+          # fails with "failed to find target". (Found by the same derivation in the upstream fixture PR.)
+          names="$(jq -r '._names | join(",")' bake-override.json)"
           jq 'del(._names)' bake-override.json > bake-override.tmp
           mv bake-override.tmp bake-override.json
           echo "names=$names" >> "$GITHUB_OUTPUT"
