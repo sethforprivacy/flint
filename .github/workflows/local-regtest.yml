@@ -1,0 +1,175 @@
+name: Local regtest
+
+# Runs the LocalRegtest suite against a Spark stack this workflow stands up itself:
+# callebtc/cashu-regtest's `--spark` profile — Bitcoin Core, three Spark operators, open-ssp, Electrs,
+# and three LND plus three CLN nodes as external Lightning counterparties.
+#
+# What this covers that ci.yml's `integration-test` and `funded-regtest-test` cannot. Those talk to
+# Lightspark's hosted regtest, where the far side of an invoice is not ours: nothing will pay an invoice
+# the plugin mints, nothing can mine a block on demand, and the whole thing needs a faucet-funded wallet
+# behind a repository secret — which is why the funded suite goes red when an operations event drains it,
+# and why fork PRs cannot run it at all. Here a real LND node pays a Flint invoice and Flint pays LND's,
+# confirmations are a `bitcoin-cli -generate` away, and every credential is a published fixture value. It
+# is the only job that exercises settlement end to end with no third-party service and no secret.
+#
+# COST, and it is not small: the fixture publishes no images, so every run builds the Spark operators
+# (Rust and Go), Electrs, open-ssp and ldk-server from source. Cold, that is around 40 minutes on
+# ubuntu-latest — the number the fixture's own spark-regtest job takes — and GitHub gives each job a clean
+# runner with no Docker layer cache, so it is cold every time. The 90-minute timeout matches the fixture's.
+# FOLLOW-UP: build these images once per pinned SHA and push them to ghcr.io, then have this job pull them.
+# That turns 40 minutes into a few and is the difference between this being a daily signal and a per-PR
+# gate. Doing it now would mean maintaining a publish workflow before the suite has proven its worth.
+
+on:
+  # Daily, for the same reason ci.yml runs daily: the Breez SDK is pre-1.0 and open-ssp moves, so drift in
+  # the protocol between them shows up here on days with no commits.
+  schedule:
+    - cron: "0 6 * * *"  # 06:00 UTC daily, an hour after ci.yml, so the two do not contend for runners
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  # write-network.sh and down.sh both need this to find the stack: the fixture's docker-scripts.sh pins
+  # the Compose project name rather than deriving it from the directory, and that name is what every
+  # container and volume is called. Set at workflow level so the diagnostics step has it too.
+  COMPOSE_PROJECT_NAME: cashu
+  # The Spark services are all behind a profile; `docker compose ps`/`logs` skip them without this.
+  COMPOSE_PROFILES: spark
+
+jobs:
+  local-regtest:
+    name: LocalRegtest suite (local Spark stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # ADVISORY ON EVERY TRIGGER FOR NOW, deliberately, and for the reason integration-test's comment gives
+    # for itself: there is no measured flake rate. This suite has a lot of moving parts that are nobody's
+    # product — a source build of six services, a FROST keyshare generation that startup polls for, channel
+    # gossip that has to propagate before a payment can route — and a flaky *fixture* blocking merges would
+    # be worse than the gap it closes. Unlike integration-test the dependency is not a third-party service,
+    # so a red run here is more likely to be our bug, which is the argument for eventually flipping it:
+    #
+    #     continue-on-error: ${{ github.event_name != 'pull_request' }}
+    #
+    # Let the daily schedule accumulate a few weeks of pass/fail first, exactly as `funded-regtest-test`
+    # earned its PR gate. Until then someone has to read the run summary. See docs/ci-and-releases.md.
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Depth 1 applies to the btcpayserver submodule too (actions/checkout passes the same
+          # fetch-depth through to `git submodule update`), which matters: the submodule is a
+          # large, long-lived repo, and a full clone of it on every run would dominate CI time.
+          submodules: recursive
+          fetch-depth: 1
+
+      # Checked out rather than cloned by up.sh so the fixture's source is fetched with the same cached,
+      # authenticated transport as everything else, and so the pin is visible in this file to a reviewer
+      # and to Dependabot. `ref` MUST stay in step with `CASHU_REGTEST_SHA` in e2e/local-regtest/up.sh —
+      # up.sh verifies the checkout against its own constant and fails the job loudly if they diverge.
+      - name: Check out the cashu-regtest fixture at the pinned SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: callebtc/cashu-regtest
+          ref: 23d5c160e0b5fade7e4a245b7385f9116bf2fc5c
+          path: e2e/local-regtest/cashu-regtest
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      # Same key as every job in ci.yml, exact on the csproj hashes with no `restore-keys` prefix
+      # fallback, so a warm cache from a different dependency set is never adopted.
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+
+      - name: Build (plugin + tests)
+        # -m:1 serialises MSBuild project scheduling. Not for speed obviously, but for correctness:
+        # the test project pins StaticWebAssetsEnabled=false on its ProjectReferences, which makes the
+        # btcpayserver closure build a second time under different global properties than the solution's
+        # own entries -- two builds of the same project, one output directory. On the v2.4.1 graph the
+        # two never collided; the v2.4.2 graph re-timed them and every job on the bump PR failed with
+        # "GenerateDepsFile ... deps.json ... being used by another process". The same class of race is
+        # documented for local fresh-worktree builds. Serialising the scheduler removes the collision at
+        # the cost of wall-clock; if that cost ever matters, the real fix is unifying the global
+        # properties, not removing this flag and hoping the timing holds.
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release -m:1
+
+      # Runs the build before the stack on purpose: a compile error should cost two minutes, not forty.
+      - name: Start the local Spark stack
+        env:
+          # Reuse the checkout above instead of letting up.sh clone a second copy. up.sh still verifies
+          # its SHA, so a `ref` that drifts from up.sh's constant fails here rather than silently
+          # testing against a different revision of the fixture.
+          CASHU_REGTEST_DIR: ${{ github.workspace }}/e2e/local-regtest/cashu-regtest
+        run: e2e/local-regtest/up.sh
+
+      - name: Write the network descriptor
+        env:
+          CASHU_REGTEST_DIR: ${{ github.workspace }}/e2e/local-regtest/cashu-regtest
+        run: e2e/local-regtest/write-network.sh
+
+      # --output Detailed is Microsoft.Testing.Platform's equivalent of the VSTest
+      # `--logger "console;verbosity=detailed"` (see the test .csproj). Worth knowing if it is ever edited
+      # back: MTP does not reject the old flag, it takes it as a filter, matches nothing, and exits 5 with
+      # "Zero tests ran" -- red, but red for a reason that reads nothing like a bad command line.
+      #
+      # The suite's collection is declared with DisableParallelization: these tests move one wallet's money
+      # through one SSP, and the SSP serialises coop-exit requests per user.
+      - name: LocalRegtest suite
+        env:
+          SPARK_LOCAL_REGTEST_NETWORK: ${{ github.workspace }}/e2e/local-regtest/network.json
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=LocalRegtest"
+          --output Detailed
+
+      # A failure in this job is almost never legible from the .NET output alone: the interesting evidence
+      # is which of six services fell over. `ps -a` includes exited containers, which is the common case —
+      # an operator that crashed during keyshare generation looks, from the test's side, like a timeout.
+      - name: Stack failure diagnostics
+        if: failure()
+        working-directory: e2e/local-regtest/cashu-regtest
+        run: |
+          mkdir -p "${{ github.workspace }}/local-regtest-logs"
+          docker compose ps -a | tee "${{ github.workspace }}/local-regtest-logs/ps.txt"
+          for service in bitcoind spark-operator-0 spark-operator-1 spark-operator-2 \
+                         spark-ssp ldk spark-electrs lnd-1; do
+            # `|| true` per service: a service that never got created has no logs, and that must not stop
+            # the loop before it reaches the one that did fail.
+            docker compose logs --tail=400 --no-color "$service" \
+              > "${{ github.workspace }}/local-regtest-logs/$service.log" 2>&1 || true
+          done
+          tail -n 60 "${{ github.workspace }}/local-regtest-logs/"*.log || true
+
+      # Only on failure: on a green run these logs are tens of MB of routine chatter, and unlike
+      # `funded-regtest-test`'s artefact they answer no standing question. Nothing here is secret — every
+      # credential in the stack is a published fixture value and the suite's wallet is random per run and
+      # holds regtest coins — so there is no withholding logic to mirror.
+      - name: Upload the stack logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: local-regtest-stack-logs
+          path: local-regtest-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # always(), so a cancelled or timed-out run does not leave containers holding the runner's disk. On a
+      # hosted runner the runner is discarded anyway; this matters for self-hosted ones and costs seconds.
+      - name: Tear the stack down
+        if: always()
+        env:
+          CASHU_REGTEST_DIR: ${{ github.workspace }}/e2e/local-regtest/cashu-regtest
+        run: e2e/local-regtest/down.sh || true

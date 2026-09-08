@@ -10,7 +10,7 @@ The default run covers the plugin's own logic — invoice-record state transitio
 connection-string handling, listener safety, settlement fan-out, the sweep engine's economics, guards and
 crash recovery, and the whole `ILightningClient` surface driven through a fake SDK. It needs no Docker, no
 database and no network, and finishes in a couple of seconds. It does **not** cover the EF store or the SDK
-itself; those need the two opt-in suites below.
+itself; those need the opt-in suites below.
 
 The fake SDK deliberately models the real one's hazards rather than an idealised SDK: a cooperative-exit
 quote that does not check the balance, quotes that expire, the script-type dust floor, a send that returns
@@ -147,3 +147,49 @@ context: a preimage next to a name the scrubber knows is handled; one with no na
 scrubber's remarks left open, and since it lives in `sdk.log` the fix is a log-level or file-permissions
 question rather than a regex. Either way, **record the answer in `Sdk/SparkLogScrubber.cs` and delete the
 stated gap.** That is what the artifact is for; it only needs reading once.
+
+## Against a local Spark stack
+
+Both regtest suites above run against Lightspark's hosted service, where everything on the far side of an
+invoice is somebody else's: **no counterparty will pay an invoice the plugin mints**, no one can mine a
+block on demand, and the funded suite needs a faucet-filled wallet behind a repository secret — which is
+why it goes red when the wallet drains, and why a fork cannot run it at all.
+
+A local stack removes all three constraints. [`e2e/local-regtest/`](../e2e/local-regtest/) stands up
+[callebtc/cashu-regtest](https://github.com/callebtc/cashu-regtest)'s `--spark` profile: Bitcoin Core in
+regtest, three Spark operators signing 2-of-3, an `open-ssp` service provider backed by an LDK node,
+Electrs serving an Esplora API, and three LND plus three CLN nodes in a funded channel topology. Those
+Lightning nodes are the point — `lnd-1` pays a Flint invoice and Flint pays `lnd-1`'s, so a **settlement**
+is observable from both sides, with the payment hash checked against what the payer recorded. Deposits
+confirm because a test mines them, a cooperative exit reaches `Confirmed` in seconds rather than whenever
+a block arrives, and there is no secret and no balance to keep topped up.
+
+```bash
+e2e/local-regtest/up.sh                     # clone at the pinned SHA, then ./start.sh --spark
+e2e/local-regtest/write-network.sh          # discover the live stack, write network.json
+
+SPARK_LOCAL_REGTEST_NETWORK=$PWD/e2e/local-regtest/network.json \
+  dotnet test --filter "Category=LocalRegtest"
+
+e2e/local-regtest/down.sh
+```
+
+`SPARK_LOCAL_REGTEST_NETWORK` points at a **network descriptor**: a JSON file naming the three operators
+with their addresses, identity keys and TLS certificates, the SSP's base URL and identity key, and the
+Esplora URL. The plugin's `SparkCustomNetwork` loader reads it and rewrites the SDK's regtest config from
+it; the test fixture additionally reads the container names it needs to drive `bitcoin-cli` and `lncli`.
+It has to be generated rather than committed, because the SSP's identity key and the operators'
+certificates are created fresh by every `start.sh` — so **re-run `write-network.sh` after every
+`up.sh`**. Absent the variable the suite skips itself, as the Postgres and integration suites do.
+
+The cost is time: the fixture publishes no images, so a cold run builds six services from Rust and Go
+source and takes **tens of minutes** (a few minutes once the layers are cached). On Docker Desktop for macOS
+the fixture's Core Lightning nodes cannot write their SQLite database on a bind mount, so `up.sh` gives them
+named volumes through a compose override there; see the
+[fixture README](../e2e/local-regtest/README.md#on-macos). Do not mine or start the suite while `up.sh` is
+still running — the fixture's init waits for every node to reach one exact height, and outside mining
+makes that wait time out with the SSP unfunded.
+
+Everything the stack holds — the `cashu`/`cashu` RPC credentials, the `regtest-spark-admin-token`, the
+operator keyshares — is a public fixture value, and the suite's wallet is random per run. Details, and how
+to bump the pin, are in [`e2e/local-regtest/README.md`](../e2e/local-regtest/README.md).

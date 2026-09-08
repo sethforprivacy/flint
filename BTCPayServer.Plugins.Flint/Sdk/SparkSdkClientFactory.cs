@@ -48,6 +48,7 @@ public class SparkSdkClientFactory : ISparkSdkClientFactory
         // backgroundTasksEnabled = false, which disables the in-process event stream this plugin's
         // settlement path is built on, and hard-fails on Stable Balance config.
         config = ApplyPostMvpConfig(config, options, _logger);
+        config = ApplyCustomNetwork(config, options, _logger);
 
         var seed = new Seed.Mnemonic(options.Mnemonic, options.Passphrase);
 
@@ -55,6 +56,16 @@ public class SparkSdkClientFactory : ISparkSdkClientFactory
         var builder = new SdkBuilder(config, seed);
         try
         {
+            // A private network has no Lightspark chain API in front of it, so the chain source has to be
+            // named explicitly — and before Build(), which is the only point the builder still accepts it.
+            // Credentials are null because the fixture's Esplora is unauthenticated.
+            if (options.CustomNetwork is { } customNetwork)
+            {
+                await builder
+                    .WithRestChainService(customNetwork.EsploraUrl, ChainApiType.Esplora, null)
+                    .ConfigureAwait(false);
+            }
+
             switch (_storageProvider.GetTarget(options.StoreId))
             {
                 case SparkStorageTarget.Directory directory:
@@ -194,6 +205,130 @@ public class SparkSdkClientFactory : ISparkSdkClientFactory
                     defaultTargetOverpayBps: null)
             };
         }
+
+        return config;
+    }
+
+    /// <summary>
+    /// How often a wallet on a private network polls. Seconds rather than the SDK's 60, because a local
+    /// stack mines on demand: a test that waits a minute for the next sync is a test that times out.
+    /// </summary>
+    internal const uint CustomNetworkSyncIntervalSecs = 2;
+
+    /// <summary>
+    /// Repoints the config at a privately hosted Spark network, or returns it untouched.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Internal and static for the same reason as <see cref="ApplyPostMvpConfig"/>: these are the settings
+    /// that decide whether a connect talks to the local stack or quietly keeps talking to Lightspark's, and
+    /// that distinction is invisible from a connected client.
+    /// </para>
+    /// <para>
+    /// Mirrors the Spark reference regtest client. The toggles are not tuning — each of them names a hosted
+    /// service that does not exist on a private network, and every one left at its default is a background
+    /// task retrying against the internet for the life of the wallet.
+    /// </para>
+    /// </remarks>
+    internal static Config ApplyCustomNetwork(Config config, SparkConnectOptions options, ILogger logger)
+    {
+        if (options.CustomNetwork is not { } network)
+        {
+            return config;
+        }
+
+        // Refused rather than ignored on mainnet. A custom signing set is exactly the shape of a wallet
+        // takeover — real funds, somebody else's operators — so the mismatch has to stop the connect.
+        if (options.Network is not Network.Regtest)
+        {
+            throw new ArgumentException(
+                $"A custom Spark network is only supported on {Network.Regtest}, not {options.Network}.",
+                nameof(options));
+        }
+
+        // DefaultConfig carries a sparkConfig on both networks today; asserted rather than assumed, because
+        // the fields kept below are withdraw parameters, and inventing values for those would be worse than
+        // failing to start.
+        if (config.sparkConfig is not { } sparkConfig)
+        {
+            throw new InvalidOperationException(
+                "The Spark SDK's default config has no sparkConfig to base a custom network on.");
+        }
+
+        var operators = new SparkSigningOperator[network.Operators.Count];
+        for (var index = 0; index < operators.Length; index++)
+        {
+            var op = network.Operators[index];
+            operators[index] = new SparkSigningOperator(
+                op.Id, op.Identifier, op.Address, op.IdentityPublicKey, op.CaCertPem);
+        }
+
+        config = config with
+        {
+            // Patched rather than constructed: expectedWithdrawBondSats and
+            // expectedWithdrawRelativeBlockLocktime are protocol parameters the local stack shares with the
+            // hosted one, and a cooperative exit quoted against the wrong bond is rejected by the operators.
+            sparkConfig = sparkConfig with
+            {
+                coordinatorIdentifier = network.CoordinatorIdentifier,
+                threshold = network.Threshold,
+                signingOperators = operators,
+                sspConfig = new SparkSspConfig(
+                    network.Ssp.BaseUrl, network.Ssp.IdentityPublicKey, network.Ssp.SchemaEndpoint)
+            },
+
+            // Every hosted Breez service is switched off by name.
+            //
+            // apiKey and lnurlDomain address Breez infrastructure that knows nothing about this wallet, so a
+            // key here is at best inert. realTimeSyncServerUrl is the one that matters: left at its default
+            // the wallet keeps pushing its state to Breez's datasync server — a real endpoint, reachable from
+            // CI — which is both an outbound leak from a supposedly private network and a source of sync
+            // failures that look like local-stack faults. useDefaultExternalInputParsers pulls its parser
+            // list over the network at connect time, from a service the stack does not have.
+            apiKey = null,
+            lnurlDomain = null,
+            realTimeSyncServerUrl = null,
+            useDefaultExternalInputParsers = false,
+
+            // Routing and privacy defaults, pinned so the tests assert the SDK's behaviour and not the
+            // release's choice of default: sends go over Lightning (which is what the fixture's LND and CLN
+            // nodes are there to exercise), and transfers stay private.
+            preferSparkOverLightning = false,
+            privateEnabledDefault = true,
+
+            syncIntervalSecs = CustomNetworkSyncIntervalSecs
+        };
+
+        // Leaf and token optimization run as background tasks that talk to the SSP on a timer. On a stack
+        // that is torn down minutes after it is built they buy nothing, and their traffic interleaves with
+        // whatever a test is asserting. Patched rather than replaced so that the multiplicity and output
+        // thresholds stay whatever the SDK version ships.
+        if (config.leafOptimizationConfig is { } leafOptimization)
+        {
+            config = config with
+            {
+                leafOptimizationConfig = leafOptimization with { autoEnabled = false }
+            };
+        }
+
+        if (config.tokenOptimizationConfig is { } tokenOptimization)
+        {
+            config = config with
+            {
+                tokenOptimizationConfig = tokenOptimization with { autoEnabled = false }
+            };
+        }
+
+        // backgroundTasksEnabled is deliberately left alone: the plugin's whole settlement path is the
+        // in-process event stream those tasks feed, so a local-regtest run with them off would exercise a
+        // wallet the plugin never ships. maxDepositClaimFee is likewise left as ApplyPostMvpConfig set it —
+        // the reference client disables automatic claiming and claims by hand, which is the opposite of what
+        // these tests exist to cover.
+
+        logger.LogDebug(
+            "Store {StoreId}: using a custom Spark network with {OperatorCount} operator(s) "
+            + "(threshold {Threshold}), SSP {SspBaseUrl}, chain source {EsploraUrl}",
+            options.StoreId, operators.Length, network.Threshold, network.Ssp.BaseUrl, network.EsploraUrl);
 
         return config;
     }

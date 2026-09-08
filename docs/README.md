@@ -28,8 +28,9 @@ Everything about the plugin beyond "what is it and how do I install it". Start a
 
 - **[Building](building.md)** — prerequisites, the submodule pin, packaging a `.btcpay`, and why the
   built-against version and the support floor are separate numbers.
-- **[Tests](testing.md)** — the default run, the opt-in Postgres and regtest suites, and the runbook for
-  the funded regtest wallet CI uses.
+- **[Tests](testing.md)** — the default run, the opt-in Postgres and regtest suites, the runbook for
+  the funded regtest wallet CI uses, and the local Spark stack that settles real payments against real
+  LND counterparties.
 - **[Local development](development.md)** — side-loading the plugin into a local BTCPay, and authoring EF
   migrations.
 - **[CI, releases & upstream updates](ci-and-releases.md)** — what each workflow does, which jobs gate a

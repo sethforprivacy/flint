@@ -22,7 +22,8 @@ public sealed class SparkConnectOptions
         string? apiKey,
         SdkNetwork network,
         SparkMaxFee? maxDepositClaimFee = null,
-        SparkStableBalanceConfiguration? stableBalance = null)
+        SparkStableBalanceConfiguration? stableBalance = null,
+        SparkCustomNetwork? customNetwork = null)
     {
         StoreId = storeId;
         Mnemonic = mnemonic;
@@ -31,6 +32,7 @@ public sealed class SparkConnectOptions
         Network = network;
         MaxDepositClaimFee = maxDepositClaimFee;
         StableBalance = stableBalance;
+        CustomNetwork = customNetwork;
     }
 
     public string StoreId { get; }
@@ -64,6 +66,17 @@ public sealed class SparkConnectOptions
     /// work once and then silently stop.
     /// </remarks>
     public SparkStableBalanceConfiguration? StableBalance { get; }
+
+    /// <summary>
+    /// A privately hosted Spark network to connect to instead of the one the SDK ships, or null for the
+    /// SDK's own. Legal only with <see cref="SdkNetwork.Regtest"/>.
+    /// </summary>
+    /// <remarks>
+    /// Exists for the local-regtest test suite, and has no merchant-facing path into it — see
+    /// <see cref="SparkCustomNetwork"/> for why that matters. Setting it replaces the whole signing set,
+    /// so a wallet created against one network cannot be read on another.
+    /// </remarks>
+    public SparkCustomNetwork? CustomNetwork { get; }
 
     /// <summary>Deliberately says nothing: this object holds seed material.</summary>
     public override string ToString() => $"{nameof(SparkConnectOptions)}({StoreId}, {Network})";

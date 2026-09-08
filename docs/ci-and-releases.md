@@ -16,6 +16,24 @@
   error-string re-wording, or a preimage reaching the log, shows as a failed job inside a green
   scheduled run. A drained wallet failing a PR is answered by funding the wallet and re-running, not by
   reading it as a code failure.
+- **`.github/workflows/local-regtest.yml`** runs the `LocalRegtest` suite against a Spark stack it
+  stands up itself — [callebtc/cashu-regtest](https://github.com/callebtc/cashu-regtest)'s `--spark`
+  profile, pinned by SHA in both the workflow and `e2e/local-regtest/up.sh`. It is the only job that
+  covers settlement end to end with **no third-party service and no secret**: real LND nodes on both
+  sides of an invoice, and blocks mined on demand. Daily, on PRs, and on manual dispatch.
+
+  | job | gates a merge? | why |
+  |---|---|---|
+  | `local-regtest` | no — `continue-on-error` | no measured flake rate yet, and the fixture is six services built from source with keyshare generation and channel gossip to wait on; a flaky fixture blocking merges would cost more than the gap it closes. Unlike `integration-test` the dependency is not a third-party service, so red here is likelier to be our bug — which is the argument for eventually gating it on PRs, once the daily schedule has accumulated a pass/fail record, exactly as `funded-regtest-test` earned its gate |
+
+  It is also the slowest job in the repository by a wide margin: the fixture publishes no images, so
+  every run builds the Spark operators, Electrs, `open-ssp` and `ldk-server` from Rust and Go source
+  on a cache-less runner — around **40 minutes**, against a 90-minute timeout. Publishing those images
+  to `ghcr.io` once per pinned SHA is the noted follow-up, and is what would make the job cheap enough
+  to gate. On failure it uploads a `local-regtest-stack-logs` artifact with `docker compose ps -a` and
+  the tail of each service's log, because a failure here is usually "which of six services fell over"
+  rather than anything the .NET output shows. See
+  ["Against a local Spark stack"](testing.md#against-a-local-spark-stack).
 - **`.github/workflows/spark-regtest-wallet.yml`** is manual-only. It prints the CI regtest wallet's
   static deposit address and balance so a maintainer can fund it — see
   ["A funded regtest wallet for CI"](testing.md#a-funded-regtest-wallet-for-ci). It never prints the seed, and
@@ -77,4 +95,5 @@
   (`integration-test` intentionally *not* required, since it is `continue-on-error` by design), plus
   "Require branches to be up to date before merging". `funded-regtest-test` blocks PRs since it is
   no longer `continue-on-error` there; requiring it in branch protection as well is a choice —
-  doing so means a drained CI wallet holds every merge until someone funds it.
+  doing so means a drained CI wallet holds every merge until someone funds it. `local-regtest` is
+  `continue-on-error` on every trigger and should not be required either, for now.

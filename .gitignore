@@ -14,3 +14,10 @@ packages/
 .local/
 TESTING.local.md
 *.local.md
+
+# Local Spark stack (e2e/local-regtest): the pinned cashu-regtest checkout, the descriptor
+# write-network.sh generates from the live stack, and up.sh's captured startup log. All three are
+# per-run artifacts of a disposable fixture — the pin itself lives in up.sh and the workflow.
+e2e/local-regtest/cashu-regtest/
+e2e/local-regtest/network.json
+e2e/local-regtest/up.log
