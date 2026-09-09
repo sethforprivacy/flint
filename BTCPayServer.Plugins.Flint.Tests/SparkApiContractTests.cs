@@ -87,15 +87,22 @@ public class SparkApiContractTests
             var authorize = method.GetCustomAttributes<AuthorizeAttribute>().Single();
             Assert.Equal(AuthenticationSchemes.Greenfield, authorize.AuthenticationSchemes);
 
-            var expected = verb is "get"
-                ? Policies.CanViewStoreSettings
-                : Policies.CanModifyStoreSettings;
+            var isServerLevel = path.StartsWith("/api/v1/server/", StringComparison.Ordinal);
+            string expected;
+            if (isServerLevel)
+                expected = Policies.CanModifyServerSettings;
+            else if (verb is "get")
+                expected = Policies.CanViewStoreSettings;
+            else
+                expected = Policies.CanModifyStoreSettings;
 
             Assert.Equal(expected, policy);
 
             // Reads may not require a write permission and writes may not accept a read one.
+            var requiresWrite = policy == Policies.CanModifyStoreSettings
+                                || policy == Policies.CanModifyServerSettings;
             Assert.True(
-                verb is "get" || policy == Policies.CanModifyStoreSettings,
+                verb is "get" || requiresWrite,
                 $"{verb.ToUpperInvariant()} {path} changes state but is gated on {policy}");
         }
     }
@@ -230,7 +237,8 @@ public class SparkApiContractTests
         { "SparkSweepResultData", typeof(SparkSweepResultData) },
         { "SparkSweepPreviewData", typeof(SparkSweepPreviewData) },
         { "SparkSweepDestinationData", typeof(SparkSweepDestinationData) },
-        { "SparkSweepQuoteData", typeof(SparkSweepQuoteData) }
+        { "SparkSweepQuoteData", typeof(SparkSweepQuoteData) },
+        { "SparkBalanceSyncData", typeof(SparkBalanceSyncData) }
     };
 
     [Theory]

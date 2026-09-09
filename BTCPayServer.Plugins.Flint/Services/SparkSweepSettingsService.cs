@@ -223,6 +223,17 @@ public sealed class SparkSweepSettingsService
         return new SparkSweepHistoryPage(records, total, skip, count);
     }
 
+    /// <summary>One sweep record for this store, or null when no row matches the key.</summary>
+    public async Task<SweepRecord?> ReadRecordAsync(
+        string storeId,
+        string idempotencyKey,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+        ArgumentException.ThrowIfNullOrEmpty(idempotencyKey);
+        return await _records.GetAsync(storeId, idempotencyKey, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Validates <paramref name="input"/> and, if it passes, stores it as the store's sweep configuration.
     /// </summary>

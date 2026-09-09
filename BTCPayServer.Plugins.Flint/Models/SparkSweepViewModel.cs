@@ -83,6 +83,9 @@ public class SweepSettingsInput
     public long CrossChainMinimumStableUnits { get; set; } =
         SweepSettings.DefaultCrossChainMinimumStableUnits;
 
+    [Display(Name = "Sweep webhook URL (optional)")]
+    public string? SweepWebhookUrl { get; set; }
+
     public static SweepSettingsInput From(SweepSettings settings) => new()
     {
         EvmAddress = settings.EvmAddress,
@@ -101,7 +104,8 @@ public class SweepSettingsInput
         MaxFeeFlatSats = settings.MaxFeeFlatSats,
         DrainWhenSweeping = settings.DrainWhenSweeping,
         DestinationMode = settings.DestinationMode,
-        StaticAddress = settings.StaticAddress
+        StaticAddress = settings.StaticAddress,
+        SweepWebhookUrl = settings.SweepWebhookUrl
     };
 
     /// <summary>
@@ -138,6 +142,7 @@ public class SweepSettingsInput
         settings.EvmAsset = crossChain ? EvmAsset?.Trim() : null;
         settings.CrossChainSlippageBps = crossChain ? CrossChainSlippageBps : null;
         settings.CrossChainMinimumStableUnits = CrossChainMinimumStableUnits;
+        settings.SweepWebhookUrl = string.IsNullOrWhiteSpace(SweepWebhookUrl) ? null : SweepWebhookUrl.Trim();
     }
 
     /// <summary>
