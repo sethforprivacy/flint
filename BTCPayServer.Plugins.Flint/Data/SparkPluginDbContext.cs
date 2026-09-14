@@ -113,6 +113,8 @@ public class SparkPluginDbContext : DbContext
             // pins its own.
             entity.HasIndex(record => record.FirstSeenAt)
                 .HasDatabaseName("IX_InvoicePaymentHashes_FirstSeenAt");
+        });
+
         modelBuilder.Entity<UnilateralExitRecord>(entity =>
         {
             // The plugin-generated UUID is the primary key. Unlike the sweep table's, it is not an SDK

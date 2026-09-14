@@ -47,7 +47,6 @@ public static class SparkErrors
             SdkException.InvalidUuid uuid => $"Invalid identifier: {Strip(uuid.v1)}",
             SdkException.Generic generic => Strip(generic.v1),
             SdkException.InsufficientCpfpFunds shortfall => DescribeCpfpShortfall(ToSats(shortfall.requiredSat)),
-            SdkException.FundingUtxoConflict conflict => DescribeUtxoConflict(conflict.txid, conflict.vout),
             // MissingUtxo and MaxDepositClaimFeeExceeded carry several named fields rather than a
             // single v1, so there is nothing better to do than strip the synthesised prefix.
             SdkException => Strip(exception.Message),
@@ -144,18 +143,17 @@ public static class SparkErrors
     }
 
     /// <summary>
-    /// Turns the two unilateral-exit-specific SDK errors into typed plugin exceptions, or returns null when the
+    /// Turns the unilateral-exit-specific SDK error into a typed plugin exception, or returns null when the
     /// failure is something else.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// These two are lifted out of the generic error path because a caller has to <em>act</em> differently on
-    /// them, and the action needs the numbers. <c>InsufficientCpfpFunds</c> names the amount that would have
-    /// worked, which is exactly the figure to put in front of an operator who has to top up a funding address;
-    /// <c>FundingUtxoConflict</c> names the output that is already committed elsewhere, which is what
-    /// distinguishes "your funding UTXO was spent" from "the exit is impossible". Neither reads as anything
-    /// useful through <see cref="Describe"/> alone, and neither can be matched on without touching SDK types —
-    /// which above this seam nothing may do.
+    /// <b>There is now exactly one of these, and there used to be two.</b> SDK 0.25 removed
+    /// <c>SdkException.FundingUtxoConflict</c> along with the build shape that could produce it: a conflict is
+    /// no longer reported as an error at all, because an earlier attempt's spent funding is followed to
+    /// whatever it became rather than rejected, and fresh funding can be passed alongside the old. What
+    /// remains is the shortfall, which a caller still has to act on and which needs the number the SDK
+    /// provides — the figure to put in front of an operator who has to top a funding address up.
     /// </para>
     /// <para>
     /// Returns null rather than the original exception so a call site can use it as an exception filter and let
@@ -169,8 +167,6 @@ public static class SparkErrors
         {
             SdkException.InsufficientCpfpFunds shortfall =>
                 new SparkExitFundingShortfallException(ToSats(shortfall.requiredSat), shortfall),
-            SdkException.FundingUtxoConflict conflict =>
-                new SparkExitFundingUtxoConflictException(conflict.txid, conflict.vout, conflict),
             _ => null
         };
     }
@@ -180,13 +176,6 @@ public static class SparkErrors
         "There is not enough confirmed Bitcoin on the exit funding address to pay the exit's on-chain fees. "
         + "Spark needs at least {0:N0} sat available there, as a single confirmed output.",
         requiredSat);
-
-    internal static string DescribeUtxoConflict(string? txid, uint vout) => string.Format(
-        CultureInfo.InvariantCulture,
-        "The funding output {0}:{1} is already spent or committed to another transaction, so it cannot pay for "
-        + "this exit. Send fresh funds to the funding address and try again once they confirm.",
-        string.IsNullOrWhiteSpace(txid) ? "(unknown)" : txid,
-        vout);
 
     /// <remarks>
     /// Every amount on the exit surface is a <c>u64</c> of satoshi — no tokens, no base units, no
@@ -228,36 +217,4 @@ public sealed class SparkExitFundingShortfallException : InvalidOperationExcepti
 
     /// <summary>What the SDK said the exit needs, in satoshi, as a single confirmed output.</summary>
     public long RequiredSat { get; }
-}
-
-/// <summary>
-/// Raised when a funding output offered to a unilateral exit is already spent or otherwise committed.
-/// </summary>
-/// <remarks>
-/// <para>
-/// Almost always means the discovery step raced the chain: the output was unspent when the plugin listed the
-/// funding address and is not by the time the SDK builds against it. It can also mean the same funding UTXO is
-/// being used by a second exit attempt, which is why the outpoint is carried rather than folded into prose —
-/// an operator comparing it against a previous attempt's record is how that gets diagnosed.
-/// </para>
-/// <para>
-/// Nothing was built, signed or broadcast. Re-discovering the funding outputs and trying again is safe.
-/// </para>
-/// </remarks>
-public sealed class SparkExitFundingUtxoConflictException : InvalidOperationException
-{
-    public SparkExitFundingUtxoConflictException(string? txid, uint vout, Exception? innerException = null)
-        : base(SparkErrors.DescribeUtxoConflict(txid, vout), innerException)
-    {
-        Txid = txid;
-        Vout = vout;
-    }
-
-    public string? Txid { get; }
-
-    public uint Vout { get; }
-
-    /// <summary>The conflicting output as <c>txid:vout</c>, for comparison against a persisted record.</summary>
-    public string OutPoint =>
-        $"{Txid ?? "(unknown)"}:{Vout.ToString(CultureInfo.InvariantCulture)}";
 }

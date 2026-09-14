@@ -805,10 +805,10 @@ public sealed class SparkSdkClient : ISparkSdkClient
         pair.asset,
         pair.contractAddress,
         pair.decimals,
-        pair.supportedSources is null
+        pair.acceptedAssets is null
             ? []
-            : pair.supportedSources
-                .Select(source => source is SourceAsset.Token
+            : pair.acceptedAssets
+                .Select(asset => asset is SparkAsset.Token
                     ? SparkCrossChainSource.Token
                     : SparkCrossChainSource.Bitcoin)
                 .Distinct()
@@ -880,9 +880,10 @@ public sealed class SparkSdkClient : ISparkSdkClient
 
         var inputs = fundingUtxos.Select(ToSdkFundingInput).ToArray();
 
-        // Re-quoted here rather than accepted from the caller. See ISparkSdkClient.UnilateralExitAsync: this
-        // quote does not expire, it goes stale silently, so the only safe quote is one taken inside the call
-        // that consumes it.
+        // Quoted inside this call rather than accepted from the caller, for the same reason as before the SDK
+        // change: a quote describes the wallet's tree, which moves under it, and 0.25 made the quote the thing
+        // the build consumes rather than an argument it re-derives from. A caller that held one across a
+        // request boundary would hand back a document describing leaves the wallet no longer has.
         var prepared = await PrepareExitAsync(feeRateSatPerVbyte, destinationAddress, leafIds)
             .ConfigureAwait(false);
         var quote = MapExitQuote(prepared);
@@ -911,9 +912,9 @@ public sealed class SparkSdkClient : ISparkSdkClient
             }
             catch (Exception ex) when (SparkErrors.TranslateUnilateralExit(ex) is { } typed)
             {
-                // Both translated failures mean the funding outputs were wrong, not that the exit is
-                // impossible, and neither built or broadcast anything. Raised as typed exceptions so the
-                // service above can put the SDK's own numbers in front of an operator.
+                // A funding shortfall means the outputs were wrong, not that the exit is impossible, and it
+                // built and broadcast nothing. Raised as a typed exception so the service above can put the
+                // SDK's own number in front of an operator.
                 throw typed;
             }
 
@@ -938,6 +939,64 @@ public sealed class SparkSdkClient : ISparkSdkClient
         }
     }
 
+    public async Task<SparkExitProgress> CheckUnilateralExitAsync(
+        SparkExitResult exit,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(exit);
+
+        var request = new CheckUnilateralExitRequest(ToSdkExit(exit));
+        var checkedExit = await _sdk.CheckUnilateralExit(request).ConfigureAwait(false);
+
+        var verdict = checkedExit.verdict switch
+        {
+            UnilateralExitVerdict.Done => SparkExitVerdict.Done,
+            UnilateralExitVerdict.Redo => SparkExitVerdict.Redo,
+            UnilateralExitVerdict.Valid => SparkExitVerdict.Valid,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(exit), checkedExit.verdict?.GetType().Name,
+                "Spark returned a unilateral-exit verdict this plugin does not know.")
+        };
+
+        return new SparkExitProgress(
+            verdict,
+            ToLong(checkedExit.exit.recoverableValueSat),
+            ToLong(checkedExit.exit.totalFeeSat),
+            MapExitTransactions(checkedExit.exit.transactions));
+    }
+
+    /// <summary>
+    /// Exports the SDK's unilateral-exit backup blob for this wallet.
+    /// </summary>
+    /// <remarks>
+    /// See <see cref="ISparkSdkClient.ExportUnilateralExitStateAsync"/>: this is the one thing that makes the
+    /// exit data survivable without the operators, and it is sensitive because it describes the wallet's whole
+    /// balance and its history.
+    /// </remarks>
+    public async Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var exported = await _sdk.ExportUnilateralExitState().ConfigureAwait(false);
+        return exported.exitState;
+    }
+
+    public async Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+        string exitState,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentException.ThrowIfNullOrWhiteSpace(exitState);
+
+        var imported = await _sdk
+            .ImportUnilateralExitState(new ImportUnilateralExitStateRequest(exitState))
+            .ConfigureAwait(false);
+
+        return new SparkExitStateImport(
+            imported.importedLeaves, imported.skippedForeignLeaves,
+            imported.skippedConflictingLeaves, imported.skippedChains);
+    }
+
     /// <summary>
     /// One <c>PrepareUnilateralExit</c>, with the response's own echo of the request checked.
     /// </summary>
@@ -959,8 +1018,9 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 feeRateSatPerVbyte,
                 // P2WPKH is the only funding kind offered. The SDK also accepts P2TR and an arbitrary script,
                 // and neither is a choice a merchant makes: the funding key is derived on one fixed path, and a
-                // funding kind that disagrees with the input supplied later produces an invalid witness.
-                new CpfpFundingKind.P2wpkh(),
+                // funding kind that disagrees with the input supplied later produces a signature that does not
+                // verify.
+                ToSdkFundingKind(),
                 destinationAddress,
                 ToSdkLeafSelection(leafIds)))
             .ConfigureAwait(false);
@@ -968,6 +1028,16 @@ public sealed class SparkSdkClient : ISparkSdkClient
         RequireQuoteEchoesRequest(prepared, feeRateSatPerVbyte, destinationAddress);
         return prepared;
     }
+
+    /// <summary>
+    /// The funding kind every exit in this plugin is quoted with.
+    /// </summary>
+    /// <remarks>
+    /// Named once, because the quote and the build have to agree on it. <see cref="ToSdkFundingInput"/> builds
+    /// the P2WPKH half of the same decision, and the two are deliberately adjacent so a future funding kind
+    /// cannot be added to one without the other.
+    /// </remarks>
+    internal static CpfpFundingKind ToSdkFundingKind() => new CpfpFundingKind.P2wpkh();
 
     /// <summary>
     /// Refuses a quote that does not describe the exit that was asked for.
@@ -1073,6 +1143,84 @@ public sealed class SparkSdkClient : ISparkSdkClient
         UnilateralExitTransaction[]? transactions) =>
         transactions is null ? [] : transactions.Select(MapExitTransaction).ToList();
 
+    /// <summary>
+    /// Rebuilds an SDK exit response from the stored result, to hand back to <c>CheckUnilateralExit</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>CheckUnilateralExit</c> reads the chain and nothing else — no wallet, no leaves, no signer, no
+    /// funding — which is what makes an exit followable on a device that has lost everything but the stored
+    /// response. So the reconstruction is exact rather than approximate: every transaction is handed back with
+    /// the status the stored copy carries, because the SDK replaces those statuses from the chain and would
+    /// otherwise be judging a set whose <c>dependsOn</c> edges had been quietly dropped.
+    /// </para>
+    /// <para>
+    /// The fields the check does not read (<c>cpfpFeeSat</c>, <c>fanoutFeeSat</c>, <c>sweepFeeSat</c>) are
+    /// reconstructed as zero rather than as their real values, because the plugin's persisted
+    /// <see cref="SparkExitResult"/> does not keep them — it keeps the two totals an operator is shown. That is
+    /// a deliberate omission and not an oversight: adding fields to the record for numbers nothing reads would
+    /// be cargo, and the verdict and the per-transaction statuses are what the follow-up flow acts on.
+    /// </para>
+    /// </remarks>
+    internal static UnilateralExitResponse ToSdkExit(SparkExitResult exit)
+    {
+        ArgumentNullException.ThrowIfNull(exit);
+
+        return new UnilateralExitResponse(
+            ToUlong(exit.RecoverableValueSat),
+            ToUlong(exit.TotalFeeSat),
+            cpfpFeeSat: 0,
+            fanoutFeeSat: 0,
+            sweepFeeSat: 0,
+            exit.Leaves.Select(leaf => new UnilateralExitLeaf(leaf.LeafId, ToUlong(leaf.ValueSat))).ToArray(),
+            exit.Transactions.Select(ToSdkExitTransaction).ToArray(),
+            // Not needed by the check, and not reconstructible from what is stored: the funding outputs are
+            // followed by the SDK at build time, and an exit that is being followed does not rebuild.
+            fundingInputs: []);
+    }
+
+    internal static UnilateralExitTransaction ToSdkExitTransaction(SparkExitTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+
+        return new UnilateralExitTransaction(
+            ToSdkExitTxKind(transaction.Kind),
+            transaction.NodeId,
+            transaction.Txid,
+            transaction.TxHex,
+            transaction.CpfpTxHex,
+            transaction.CsvTimelockBlocks,
+            transaction.DependsOn.ToArray(),
+            ToSdkExitTxStatus(transaction.Status));
+    }
+
+    internal static UnilateralExitTxKind ToSdkExitTxKind(SparkExitTxKind kind) => kind switch
+    {
+        SparkExitTxKind.Fanout => UnilateralExitTxKind.FanOut,
+        SparkExitTxKind.TreeNode => UnilateralExitTxKind.Node,
+        SparkExitTxKind.Refund => UnilateralExitTxKind.Refund,
+        SparkExitTxKind.Sweep => UnilateralExitTxKind.Sweep,
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(kind), kind, "Unknown plugin unilateral-exit transaction kind.")
+    };
+
+    internal static ExitTransactionStatus ToSdkExitTxStatus(SparkExitTxStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        return status.Readiness switch
+        {
+            SparkExitTxReadiness.Confirmed => new ExitTransactionStatus.Confirmed(status.BlockHeight),
+            SparkExitTxReadiness.Ready => new ExitTransactionStatus.Ready(),
+            SparkExitTxReadiness.Unverified => new ExitTransactionStatus.Unverified(),
+            // The plugin collapses the SDK's two waiting cases into one, because what a merchant needs to know
+            // is "not yet" and, when it is a timelock, from which height. Handing it back as
+            // WaitingForDependencies is the safe reconstruction: both are "do not broadcast", and the SDK
+            // replaces the status from the chain on the way out anyway.
+            _ => new ExitTransactionStatus.WaitingForDependencies()
+        };
+    }
+
     internal static SparkExitTransaction MapExitTransaction(UnilateralExitTransaction transaction)
     {
         ArgumentNullException.ThrowIfNull(transaction);
@@ -1105,19 +1253,45 @@ public sealed class SparkSdkClient : ISparkSdkClient
             "Spark returned a unilateral-exit transaction of a kind this plugin does not know how to broadcast.")
     };
 
+    /// <summary>
+    /// Collapses the SDK's status union onto the plugin's readiness plus whatever height that case carries.
+    /// </summary>
     /// <remarks>
-    /// Mapped explicitly rather than cast, for the reason given on <see cref="SparkExitTxStatus"/>: the SDK
-    /// orders its enum <c>Confirmed = 0, Unconfirmed = 1</c> and the plugin's is the other way round, so a
-    /// numeric cast would report every unmined transaction as confirmed and every confirmed one as pending.
+    /// <para>
+    /// Mapped by case rather than by ordinal, and an unknown case is a hard failure. <c>Ready</c> is the one
+    /// answer that authorises a broadcast, so falling back to it for a variant this plugin has never seen would
+    /// be exactly the wrong default — a new SDK state would arrive as permission to push a transaction out.
+    /// </para>
+    /// <para>
+    /// The two waiting cases collapse into <see cref="SparkExitTxReadiness.Waiting"/> deliberately: a merchant
+    /// needs to know "not yet" and, when it is a timelock, the height it unlocks at. Which of the SDK's two
+    /// reasons it is changes nothing an operator does, and <see cref="SparkExitTxStatus.SpendableAtHeight"/>
+    /// carries the part that does.
+    /// </para>
     /// </remarks>
-    internal static SparkExitTxStatus MapExitTxStatus(ConfirmationStatus status) => status switch
+    internal static SparkExitTxStatus MapExitTxStatus(ExitTransactionStatus status)
     {
-        ConfirmationStatus.Confirmed => SparkExitTxStatus.Confirmed,
-        ConfirmationStatus.Unconfirmed => SparkExitTxStatus.Unconfirmed,
-        ConfirmationStatus.Unverified => SparkExitTxStatus.Unverified,
-        _ => throw new ArgumentOutOfRangeException(
-            nameof(status), status, "Unknown Spark confirmation status.")
-    };
+        ArgumentNullException.ThrowIfNull(status);
+
+        return status switch
+        {
+            ExitTransactionStatus.Confirmed confirmed =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Confirmed, BlockHeight: confirmed.blockHeight),
+            ExitTransactionStatus.Ready =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Ready),
+            ExitTransactionStatus.WaitingForTimelock timelock =>
+                new SparkExitTxStatus(
+                    SparkExitTxReadiness.Waiting, SpendableAtHeight: timelock.spendableAtHeight),
+            ExitTransactionStatus.WaitingForDependencies =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Waiting),
+            ExitTransactionStatus.Unverified =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Unverified),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(status), status.GetType().Name,
+                "Spark returned a unilateral-exit transaction status this plugin does not know how to "
+                + "broadcast; refusing to guess whether it is safe to send.")
+        };
+    }
 
     #endregion
 
