@@ -48,25 +48,77 @@ public enum SparkExitTxKind
 /// Whether the chain has seen a given exit transaction yet, as the SDK's chain service reports it.
 /// </summary>
 /// <remarks>
-/// The member order is deliberately <em>not</em> the SDK's. <c>ConfirmationStatus</c> is ordered
-/// <c>Confirmed = 0, Unconfirmed = 1, Unverified = 2</c>; this enum puts <see cref="Unconfirmed"/> at 0 so that
-/// a default-initialised value, a missing JSON field, or a column added to an existing row all read as "not
-/// confirmed" rather than as "confirmed". That also means a numeric cast between the two would swap exactly the
-/// pair whose confusion matters most, which is why <see cref="SparkSdkClient"/> maps them by name.
+/// <para>
+/// <b>This is the SDK's <c>ExitTransactionStatus</c> union, collapsed into one type that carries its case.</b>
+/// SDK 0.25 replaced the flat <c>Confirmed</c>/<c>Unconfirmed</c>/<c>Unverified</c> enum with a union, because
+/// the useful question stopped being "is it mined" and became "may I broadcast it yet, and if not, what am I
+/// waiting for". A flat enum cannot answer that, and a plugin-side mirror of the union would put
+/// <c>Breez.Sdk.Spark</c> types into the persisted record, which is exactly what this seam exists to prevent.
+/// A single type with a <see cref="Readiness"/> discriminant carries the same information and survives
+/// serialisation.
+/// </para>
+/// <para>
+/// The member order of <see cref="SparkExitTxReadiness"/> is deliberately <em>not</em> the SDK's. Nothing in the
+/// SDK's union has an ordinal to mirror, and this order puts <see cref="SparkExitTxReadiness.Waiting"/>
+/// first so that a default-initialised value, a missing JSON field, or a column added to an existing row all
+/// read as "not ready to broadcast" rather than as "ready". Ordering it the other way is instructions to
+/// broadcast a transaction whose timelock has not matured.
+/// </para>
 /// </remarks>
-public enum SparkExitTxStatus
+public enum SparkExitTxReadiness
 {
-    /// <summary>Broadcast (or buildable) but not yet mined.</summary>
-    Unconfirmed,
+    /// <summary>
+    /// Its inputs are not yet where they need to be — either something in <see cref="SparkExitTransaction.DependsOn"/>
+    /// has not confirmed, or its CSV timelock has not matured. <b>Do not broadcast.</b>
+    /// </summary>
+    Waiting,
 
-    /// <summary>Mined.</summary>
+    /// <summary>Broadcast it now. Sending one that is already sent is harmless.</summary>
+    Ready,
+
+    /// <summary>Already mined; skip it and broadcast the next step.</summary>
     Confirmed,
 
     /// <summary>
-    /// The SDK could not reach a chain service to say either way. Not a failure and not a confirmation — an
-    /// operator must check the transaction themselves before treating it as either.
+    /// The SDK could not read the chain for this transaction, so it cannot say whether broadcasting is safe.
+    /// Not a failure and not a confirmation — the SDK's own guidance is to build the exit again once the chain
+    /// service is healthy. An operator must check the transaction themselves before treating it as either.
     /// </summary>
     Unverified
+}
+
+/// <summary>
+/// Where one transaction of an exit stands: its readiness, and whatever height that readiness implies.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The two heights are meaningful in different cases and null otherwise, kept as two fields rather than one so
+/// that neither can be read as the other. <see cref="BlockHeight"/> is set only for
+/// <see cref="SparkExitTxReadiness.Confirmed"/> and is the height the transaction landed at, which is what a
+/// child's CSV timelock counts from. <see cref="SpendableAtHeight"/> is set only for
+/// <see cref="SparkExitTxReadiness.Waiting"/> when the input is confirmed but the timelock has not matured, and
+/// is the first block the transaction can be mined in. The SDK reports either as nullable, so both are
+/// nullable here.
+/// </para>
+/// <para>
+/// The readiness is what the page and the record switch on; the heights are shown to an operator so "wait" is
+/// a number rather than an instruction to keep refreshing.
+/// </para>
+/// </remarks>
+public sealed record SparkExitTxStatus(
+    SparkExitTxReadiness Readiness,
+    uint? BlockHeight = null,
+    uint? SpendableAtHeight = null)
+{
+    /// <summary>Shorthand for the state every freshly built, unbroadcast transaction is in.</summary>
+    public static SparkExitTxStatus Ready { get; } = new(SparkExitTxReadiness.Ready);
+
+    /// <summary>True when this transaction may be broadcast right now.</summary>
+    /// <remarks>
+    /// The single predicate the page and the operator's checklist both use, so "ready" cannot come to mean two
+    /// different things in two places.
+    /// </remarks>
+    public bool CanBroadcast => Readiness is SparkExitTxReadiness.Ready;
 }
 
 /// <summary>
@@ -253,6 +305,96 @@ public sealed record SparkExitResult(
     long TotalFeeSat,
     IReadOnlyList<SparkExitTransaction> Transactions,
     IReadOnlyList<SparkExitLeaf> Leaves);
+
+/// <summary>
+/// What to do with a built exit, as the chain currently reports it.
+/// </summary>
+/// <remarks>
+/// The SDK's <c>UnilateralExitVerdict</c>. Three cases rather than a boolean because the three call for
+/// genuinely different actions, and — the important part — "this cannot finish" is not an error: the money is
+/// still recoverable, it just needs a new exit built from the same leaves.
+/// </remarks>
+public enum SparkExitVerdict
+{
+    /// <summary>
+    /// On track. Broadcast every transaction whose <see cref="SparkExitTransaction.Status"/> is ready, and call
+    /// again later. This is the ordinary state of an exit that is part-way through its timelocks.
+    /// </summary>
+    Valid,
+
+    /// <summary>
+    /// Every transaction has confirmed, the sweep included. The money is at the destination address and there
+    /// is nothing left to do.
+    /// </summary>
+    Done,
+
+    /// <summary>
+    /// This transaction set can no longer finish: something on-chain stopped matching it — a different refund
+    /// for a leaf confirmed, a step was fee-bumped in a way these transactions cannot follow, or funding they
+    /// counted on went elsewhere. <b>The fix is always the same: quote and build the exit again, naming the
+    /// same leaves.</b> The funds are not lost.
+    /// </summary>
+    Redo
+}
+
+/// <summary>
+/// The result of asking the chain how far a built exit has got.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="Transactions"/> replaces the set that was passed in: these are the same transactions with their
+/// statuses brought up to date, and they are what a caller should store back over what it had. Everything else
+/// is the SDK's own echo of the exit it was handed, and the two totals are carried again rather than assumed
+/// unchanged.
+/// </para>
+/// <para>
+/// The verdict is what a caller switches on, and it is the only field that decides an action. It is
+/// deliberately not derived from the statuses by this plugin: the SDK reads the chain tip to tell "waiting"
+/// from "cannot finish", and re-deriving it here would be a second opinion with less information.
+/// </para>
+/// </remarks>
+/// <param name="Verdict">What to do next — see <see cref="SparkExitVerdict"/>.</param>
+/// <param name="Transactions">
+/// Every transaction of the exit, in the SDK's own broadcast order, with chain-reported statuses.
+/// </param>
+public sealed record SparkExitProgress(
+    SparkExitVerdict Verdict,
+    long RecoverableValueSat,
+    long TotalFeeSat,
+    IReadOnlyList<SparkExitTransaction> Transactions);
+
+/// <summary>
+/// What an import of an exit-state backup actually took, and what it left behind.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The counts are not decoration: importing is the recovery path of last resort, and a caller that reports
+/// only "imported" would be telling an operator their backup is in place when the part of it that matters was
+/// skipped. Each number names a different reason nothing was restored, and they call for different responses.
+/// </para>
+/// <para>
+/// The two benign skips — <see cref="SkippedForeignLeaves"/> and <see cref="SkippedChains"/> — are normal for a
+/// backup taken from a wallet that has since moved on, because an imported copy is used only for a leaf the
+/// wallet has nothing usable for. <see cref="SkippedConflictingLeaves"/> is the one that means data could not
+/// be put back: the copy disagrees with a node the wallet already holds on a value that cannot change over a
+/// node's lifetime, so one of the two copies is simply wrong and nothing in that entry is trusted.
+/// </para>
+/// </remarks>
+public sealed record SparkExitStateImport(
+    uint ImportedLeaves,
+    uint SkippedForeignLeaves,
+    uint SkippedConflictingLeaves,
+    uint SkippedChains)
+{
+    /// <summary>
+    /// True when no leaf's exit data was restored at all.
+    /// </summary>
+    /// <remarks>
+    /// Worth naming because it is the answer that looks like success from the outside — the call returned, the
+    /// blob parsed, nothing threw — while the wallet is exactly as un-exitable as it was before.
+    /// </remarks>
+    public bool RestoredNothing => ImportedLeaves == 0;
+}
 
 /// <summary>
 /// Raised when the caller's quote approval callback vetoed an exit, so nothing was built.
