@@ -365,6 +365,108 @@ public interface ISparkSdkClient : IDisposable
 
     #endregion
 
+    #region Unilateral exit
+
+    /// <summary>
+    /// Quotes a unilateral exit — what a forced, non-cooperative withdrawal from the statechain would recover
+    /// and cost — without building or signing anything.
+    /// </summary>
+    /// <param name="feeRateSatPerVbyte">
+    /// The rate every transaction in the exit is built at. It is a single rate for the whole tree, so it also
+    /// decides which leaves are worth exiting at all, and there is no per-level override.
+    /// </param>
+    /// <param name="destinationAddress">
+    /// Where the final sweep pays. Validated by the SDK, not here; the caller is still expected to have parsed
+    /// it for the store's own network first, because a mainnet-shaped address is a valid regtest string.
+    /// </param>
+    /// <param name="leafIds">
+    /// Null or empty selects automatically (the SDK's <c>ExitLeafSelection.Auto</c>): the SDK picks whichever
+    /// leaves are worth exiting at this fee rate. Anything else pins the selection to exactly those leaves
+    /// (<c>Specific</c>), which is how a resume re-quotes the <em>same</em> exit — see
+    /// <see cref="SparkExitLeaf"/>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>An empty result is a normal answer.</b> With automatic selection the SDK returns no leaves at all when
+    /// nothing clears the fee rate, and that must reach the merchant as "nothing worth exiting right now"
+    /// rather than as a failure.
+    /// </para>
+    /// <para>
+    /// <b>This still needs the Spark operators to be reachable</b> in the pinned SDK version. Quoting an exit
+    /// walks the wallet's tree, which is not held locally, so the one situation a unilateral exit exists for —
+    /// operators gone — is the situation in which this call cannot answer. Exiting from local state is a later
+    /// SDK feature.
+    /// </para>
+    /// <para>
+    /// Cheap and free of side effects: nothing is reserved, nothing expires, and no quote id is minted. Unlike
+    /// <see cref="QuoteOnchainSendAsync"/> it does not touch the service provider's fee-quote machinery at all.
+    /// </para>
+    /// </remarks>
+    Task<SparkExitQuote> PrepareUnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Quotes and then builds a unilateral exit in one call, giving the caller a veto on the quote in between.
+    /// Returns signed transactions and <b>broadcasts nothing</b>.
+    /// </summary>
+    /// <param name="leafIds">
+    /// As on <see cref="PrepareUnilateralExitAsync"/>. A build resuming a previously quoted exit passes the ids
+    /// that quote returned, because the funding UTXO an operator has already paid for was sized for that leaf
+    /// set and automatic selection is free to choose a different one.
+    /// </param>
+    /// <param name="fundingUtxos">
+    /// Confirmed P2WPKH outputs that will pay every fee in the exit. Must be non-empty. The SDK accepts
+    /// several and judges their combined value, but the reliable shape for a fresh exit is what
+    /// <see cref="SparkExitQuote.SingleUtxoFundingSat"/> quotes: <b>one</b> output of at least that amount,
+    /// which the SDK fans out across branches — the service layer passes exactly one for that reason. A
+    /// shortfall surfaces as <see cref="SparkExitFundingShortfallException"/>.
+    /// </param>
+    /// <param name="fundingSecretKey">
+    /// The private key for those outputs, used to build a one-shot signer for the CPFP transactions. Held only
+    /// for the duration of this call and never logged. The array is the caller's to own and is not cleared here.
+    /// </param>
+    /// <param name="approveQuote">
+    /// Called with the quote this build is about to commit to, and before anything is built. Return null to
+    /// proceed or a human-readable refusal, which is raised as <see cref="SparkExitRefusedException"/>. Must not
+    /// throw. This is where the "is this still worth doing" guard belongs: the quote passed here is the fresh
+    /// one, not whatever a page rendered minutes ago.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>Quote and build are one call for the same reason the send paths are</b> — a quote must never be held
+    /// across a request or task boundary. The reason differs in kind, though, and is worse here: this quote does
+    /// not expire, it goes <em>stale silently</em>. The leaf set is a function of the wallet's tree, which moves
+    /// as payments settle, so a build against a quote taken earlier can commit to a different set of leaves than
+    /// the operator funded for, with nothing rejecting it.
+    /// </para>
+    /// <para>
+    /// <b>Nothing is broadcast, by the SDK or by this plugin.</b> The returned transactions are signed and
+    /// inert; an operator pushes them out by hand, fan-out first and alone, then each tree node packaged with
+    /// its CPFP child in dependency order, then the sweep. See <see cref="SparkExitTransaction"/>. That is also
+    /// what makes the failure modes here benign: every exception this can throw has moved no coins.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="SparkExitRefusedException"><paramref name="approveQuote"/> returned a refusal.</exception>
+    /// <exception cref="SparkExitFundingShortfallException">
+    /// The funding outputs do not cover the exit's fees. Carries what the SDK said was needed.
+    /// </exception>
+    /// <exception cref="SparkExitFundingUtxoConflictException">
+    /// One of the funding outputs is already spent by, or committed to, another transaction.
+    /// </exception>
+    Task<SparkExitResult> UnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote,
+        CancellationToken cancellationToken = default);
+
+    #endregion
+
     /// <summary>
     /// Detaches the event listener and stops the background sync loop.
     /// </summary>

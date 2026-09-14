@@ -10,7 +10,7 @@
 # the osx dylibs carry ~9-11 MB of symbol/linkedit. None of it is loaded at run
 # time — stripping removes only never-mapped sections, .text/.rodata/.data/
 # .eh_frame/.dynsym are untouched — yet it is what makes the packaged runtimes
-# ~200 MB instead of ~100 MB. Measured on Breez.Sdk.Spark 0.23.0:
+# ~200 MB instead of ~100 MB. Measured on Breez.Sdk.Spark 0.25.0:
 #
 #   linux-x64   60 MB -> 21 MB     linux-arm64  59 MB -> 18 MB
 #   osx-x64     26 MB -> 16 MB     osx-arm64    25 MB -> 14 MB
@@ -44,7 +44,7 @@
 #     modification; NOTICE still travels (enforced in package.yml).
 #
 # What it deliberately does not touch:
-#   - Windows DLLs. Checked on 0.23.0: the PE debug directory is a CodeView
+#   - Windows DLLs. Checked on 0.25.0: the PE debug directory is a CodeView
 #     pointer of tens of bytes on win-x64; the payload is all real code.
 #   - A Mach-O carrying a real (non-ad-hoc, non-linker-signed) signature: strip
 #     would invalidate the signing identity. Today the dylibs are unsigned

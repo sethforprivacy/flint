@@ -201,7 +201,7 @@ jobs:
             '
 
       # Prune the one native RID no BTCPay Server deployment can load. Measured on
-      # Breez.Sdk.Spark 0.23.0 before this step: linux-x64 60 MB, linux-arm64 60 MB,
+      # Breez.Sdk.Spark 0.25.0 before this step: linux-x64 60 MB, linux-arm64 60 MB,
       # osx-arm64 25 MB, osx-x64 26 MB, win-x64 17 MB, win-x86 15 MB. A 32-bit Windows
       # process is not a BTCPay Server deployment target, and unlike the ELF/Mach-O
       # payloads the PE cannot be stripped (the script header says why: its debug

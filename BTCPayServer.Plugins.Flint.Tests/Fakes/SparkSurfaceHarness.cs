@@ -163,6 +163,9 @@ public sealed class SparkSurfaceHarness
     /// because that is the state the sweep page has to keep rendering and saving in, and because a test that did
     /// not ask for a live catalogue should not quietly get one.
     /// </param>
+    /// <param name="unilateralExit">
+    /// The unilateral-exit service the pages call, or null for one that refuses everything.
+    /// </param>
     public static SparkSurfaceHarness Create(
         bool allowHotWalletForAll = true,
         HotWalletSeedResult? hotWalletSeed = null,
@@ -170,7 +173,8 @@ public sealed class SparkSurfaceHarness
         bool configureAttackerStore = false,
         bool mainnet = false,
         bool serverAdmin = false,
-        string? crossChainRoutes = null)
+        string? crossChainRoutes = null,
+        ISparkUnilateralExitService? unilateralExit = null)
     {
         var writeLog = new WriteLog();
 
@@ -263,9 +267,14 @@ public sealed class SparkSurfaceHarness
             TimeProvider.System,
             NullLogger<CrossChainCatalog>.Instance);
 
+        // Refuses everything unless a test supplies its own. A page test that did not ask for an exit service
+        // should not be able to quote one by accident, and an unstubbed call failing loudly beats it returning
+        // a plausible-looking empty page.
+        var exit = unilateralExit ?? new UnavailableUnilateralExitService();
+
         var mvc = new SparkController(
             settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
-            depositService, stableBalanceService, crossChainCatalog,
+            depositService, stableBalanceService, exit, crossChainCatalog,
             new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
         var api = new GreenfieldSparkController(
@@ -323,5 +332,61 @@ public sealed class SparkSurfaceHarness
 
         if (withTempData && controller is Controller mvc)
             mvc.TempData = new TempDataDictionary(httpContext, new NullTempDataProvider());
+    }
+
+    /// <summary>
+    /// The default unilateral-exit service: a store with nothing in flight, and a refusal for every write.
+    /// </summary>
+    /// <remarks>
+    /// The exit flow is behind an environment switch and off for the whole suite bar the tests that turn it on,
+    /// so this exists to satisfy the constructor rather than to be exercised. It answers the read with an empty,
+    /// unacknowledged store — the state every other page test is implicitly asserting nothing about — and
+    /// refuses every write with a sentence that names itself, so a test that unexpectedly reaches one sees where
+    /// it came from.
+    /// </remarks>
+    private sealed class UnavailableUnilateralExitService : ISparkUnilateralExitService
+    {
+        private static UnilateralExitOpResult Refused =>
+            new(false, "No unilateral-exit service was supplied to this test harness.", null);
+
+        public Task<UnilateralExitPageData> ReadAsync(string storeId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(
+                new UnilateralExitPageData(
+                    WalletRunning: false,
+                    DisclosureAcknowledged: false,
+                    BalanceSats: 0,
+                    ActiveRecord: null,
+                    History: [],
+                    FundingReceivedSat: null,
+                    FundingLargestOutputSat: null,
+                    LeafCount: null,
+                    FundingKeyPath: null,
+                    Transactions: null,
+                    TransactionsUnreadable: false));
+
+        public Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
+            string storeId, CancellationToken cancellationToken = default) => Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> QuoteAsync(
+            string storeId,
+            long feeRateSatPerVbyte,
+            string destinationAddress,
+            CancellationToken cancellationToken = default) => Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> BuildAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> AbandonAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> MarkCompletedAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> SetExplorerUrlAsync(
+            string storeId, string? esploraApiUrl, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
     }
 }

@@ -91,8 +91,9 @@ public sealed record SweepPreview(
 /// <remarks>
 /// <para>
 /// <b>Every sweep here is a cooperative exit</b> — <c>PrepareSendPayment</c>/<c>SendPayment</c> to a Bitcoin
-/// address through the service provider. There is no unilateral-exit path in this class, in this plugin, or in
-/// its UI, by owner decision. "Drain" means the SDK's
+/// address through the service provider. There is no unilateral-exit path in this class or anywhere sweeping
+/// can reach; the plugin's only unilateral path is the experimental, gated flow on the Advanced page, entirely
+/// separate from this engine. "Drain" means the SDK's
 /// <c>FeePolicy.FeesIncluded</c> and nothing else.
 /// </para>
 /// <para>
