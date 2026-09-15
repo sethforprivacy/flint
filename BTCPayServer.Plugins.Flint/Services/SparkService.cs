@@ -803,8 +803,16 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         });
     }
 
-    private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
+private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
     {
+        // Imported before the sync, and the order is the point. The SDK collects a leaf's exit data as it
+        // learns about the leaf, so bringing the backup in first means a leaf whose chain existed only in the
+        // backup is present before anything asks the operators about it. Doing it the other way round spends a
+        // round trip confirming a leaf set that the import might have expanded — and the import is the part
+        // that has to work when the operators are unreachable, which is exactly when a sync is most likely to
+        // fail or to be wasted.
+        await RestoreExitStateAsync(storeId, sdk).ConfigureAwait(false);
+
         try
         {
             var info = await sdk.GetInfoAsync(ensureSynced: true).ConfigureAwait(false);
@@ -823,8 +831,6 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 + "creation may fail until this resolves",
                 storeId, SparkErrors.Describe(ex));
         }
-
-        await RestoreExitStateAsync(storeId, sdk).ConfigureAwait(false);
     }
 
     /// <summary>
