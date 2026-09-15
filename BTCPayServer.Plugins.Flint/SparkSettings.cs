@@ -530,11 +530,37 @@ public class UnilateralExitSettings
     /// </remarks>
     public string? EsploraApiUrl { get; set; }
 
+    /// <summary>
+    /// A backup of the SDK's unilateral-exit state, as produced by its export and accepted by its import. Null
+    /// when none has been stored.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What this is for:</b> the transactions an exit is built from live only in the SDK's local storage.
+    /// While the operators are reachable they can be fetched again; when that storage is gone and the operators
+    /// are not, they cannot be recovered from anywhere and the leaves they cover can no longer be exited. This
+    /// blob is the copy that survives the device.
+    /// </para>
+    /// <para>
+    /// <b>It is sensitive and the plugin treats it as such.</b> It carries every leaf of the wallet and its
+    /// transactions, which discloses the balance, how it is split and what the wallet has received and spent. It
+    /// must never be written to a log, echoed in an error, or sent back to a page.
+    /// </para>
+    /// <para>
+    /// Its content is <b>not</b> validated on the way in. The encoding is the SDK's own and the SDK is the only
+    /// thing that can judge it; a check invented here would reject a valid backup from a future SDK, and a
+    /// rejected backup is a lost exit. Only its length is bounded, because a value past the SDK's own few
+    /// megabytes is a paste error rather than a backup.
+    /// </para>
+    /// </remarks>
+    public string? ExitStateBackup { get; set; }
+
     /// <summary>An independent copy. Every property added to this class must be added here too.</summary>
     public UnilateralExitSettings Clone() => new()
     {
         DisclosureAcknowledged = DisclosureAcknowledged,
-        EsploraApiUrl = EsploraApiUrl
+        EsploraApiUrl = EsploraApiUrl,
+        ExitStateBackup = ExitStateBackup
     };
 }
 

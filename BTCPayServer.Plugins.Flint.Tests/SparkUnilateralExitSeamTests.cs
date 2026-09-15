@@ -12,9 +12,11 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// </summary>
 /// <remarks>
 /// Everything asserted here is a place where the SDK's shape and the plugin's disagree, and where getting it
-/// wrong is silent: two enums ordered differently, an optional selection whose empty case means the opposite of
-/// what it looks like, a quote that echoes the request back, and two typed errors whose whole value is the
-/// numbers they carry.
+/// wrong is silent: a status union whose <c>Ready</c> case is the only one that authorises a broadcast, an
+/// optional selection whose empty case means the opposite of what it looks like, a quote that echoes the request
+/// back, the one typed error that carries a number worth acting on, and — the bridge nothing else covers — the
+/// reconstruction of a stored exit back into the SDK's response, because <c>CheckUnilateralExit</c> judges the
+/// reconstruction rather than anything the plugin holds.
 /// </remarks>
 public class SparkUnilateralExitSeamTests
 {
@@ -55,28 +57,110 @@ public class SparkUnilateralExitSeamTests
         Assert.Equal(SparkExitTxKind.Sweep, SparkSdkClient.MapExitTxKind(UnilateralExitTxKind.Sweep));
     }
 
+    /// <summary>
+    /// Every case the SDK's status union can report maps to the readiness the page and the record switch on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Mapped by case rather than by ordinal, and the assertion that matters most is the last group: a
+    /// transaction the SDK reports as <em>waiting</em> must not come back broadcastable. That invariant used to
+    /// be expressible only as "the two enums are ordered differently, so do not cast" — SDK 0.25 replaced the
+    /// flat enum with a union, so it is now stated directly and the whole class of cast bug is gone by
+    /// construction.
+    /// </para>
+    /// <para>
+    /// The harm the waiting case prevents: a tree node whose CSV timelock has not matured is
+    /// <b>invalid</b>, not merely early. An operator handed it as "send this now" gets a rejected broadcast at
+    /// best, and at worst pushes a transaction that a sibling has already spent the same output of the
+    /// statechain for.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public void Confirmation_statuses_are_mapped_by_name()
+    public void Every_chain_reported_status_becomes_the_readiness_that_decides_a_broadcast()
     {
-        Assert.Equal(SparkExitTxStatus.Confirmed, SparkSdkClient.MapExitTxStatus(ConfirmationStatus.Confirmed));
-        Assert.Equal(
-            SparkExitTxStatus.Unconfirmed, SparkSdkClient.MapExitTxStatus(ConfirmationStatus.Unconfirmed));
-        Assert.Equal(SparkExitTxStatus.Unverified, SparkSdkClient.MapExitTxStatus(ConfirmationStatus.Unverified));
+        // A confirmed transaction carries the height its children's timelocks count from.
+        var confirmed = SparkSdkClient.MapExitTxStatus(new ExitTransactionStatus.Confirmed(812_345));
+        Assert.Equal(SparkExitTxReadiness.Confirmed, confirmed.Readiness);
+        Assert.Equal(812_345u, confirmed.BlockHeight);
+        Assert.False(confirmed.CanBroadcast);
+
+        // Confirmed with a null height is its own case: the SDK reports it and it must not become an exception.
+        var confirmedWithoutHeight = SparkSdkClient.MapExitTxStatus(new ExitTransactionStatus.Confirmed(null));
+        Assert.Equal(SparkExitTxReadiness.Confirmed, confirmedWithoutHeight.Readiness);
+        Assert.Null(confirmedWithoutHeight.BlockHeight);
+
+        var ready = SparkSdkClient.MapExitTxStatus(new ExitTransactionStatus.Ready());
+        Assert.Equal(SparkExitTxReadiness.Ready, ready.Readiness);
+        Assert.True(ready.CanBroadcast);
+
+        // The one the ordering test used to protect, now stated as the behaviour it was protecting: waiting is
+        // never permission to broadcast.
+        var waitingOnDependencies =
+            SparkSdkClient.MapExitTxStatus(new ExitTransactionStatus.WaitingForDependencies());
+        Assert.Equal(SparkExitTxReadiness.Waiting, waitingOnDependencies.Readiness);
+        Assert.False(waitingOnDependencies.CanBroadcast);
+
+        // A timelock keeps the height that makes "not yet" a number an operator can act on, rather than an
+        // instruction to keep refreshing the page.
+        var waitingOnTimelock =
+            SparkSdkClient.MapExitTxStatus(new ExitTransactionStatus.WaitingForTimelock(901_200));
+        Assert.Equal(SparkExitTxReadiness.Waiting, waitingOnTimelock.Readiness);
+        Assert.Equal(901_200u, waitingOnTimelock.SpendableAtHeight);
+        Assert.False(waitingOnTimelock.CanBroadcast);
+
+        // And the two heights stay in their own fields: a waiting transaction reports no block height, so
+        // nothing downstream can read a spendable-at height as "this already confirmed".
+        Assert.Null(waitingOnTimelock.BlockHeight);
+
+        var unverified = SparkSdkClient.MapExitTxStatus(new ExitTransactionStatus.Unverified());
+        Assert.Equal(SparkExitTxReadiness.Unverified, unverified.Readiness);
+        Assert.False(unverified.CanBroadcast);
     }
 
     /// <summary>
-    /// Guards the reason the status mapping is written out rather than cast.
+    /// <c>Ready</c> is the only readiness that authorises a broadcast, and it survives the trip back to the SDK.
     /// </summary>
     /// <remarks>
-    /// The SDK orders its enum <c>Confirmed = 0, Unconfirmed = 1</c> and the plugin's is the other way round, so
-    /// a numeric cast reports every unmined transaction as confirmed. This asserts the two orderings still
-    /// disagree, so that an SDK bump which aligned them cannot quietly make a future cast look harmless.
+    /// The round trip is what makes the mapping a bijection rather than a lossy collapse, and the SDK is handed
+    /// this back on every check. If <c>Ready</c> came back as anything else, an operator would be told to
+    /// broadcast a transaction the check had just been shown as ready.
     /// </remarks>
     [Fact]
-    public void A_numeric_cast_between_the_status_enums_would_be_wrong()
+    public void A_readiness_survives_the_trip_back_to_the_SDK()
     {
-        Assert.NotEqual((int)ConfirmationStatus.Confirmed, (int)SparkExitTxStatus.Confirmed);
-        Assert.Equal(0, (int)SparkExitTxStatus.Unconfirmed);
+        Assert.IsType<ExitTransactionStatus.Ready>(
+            SparkSdkClient.ToSdkExitTxStatus(new SparkExitTxStatus(SparkExitTxReadiness.Ready)));
+
+        Assert.IsType<ExitTransactionStatus.Unverified>(
+            SparkSdkClient.ToSdkExitTxStatus(new SparkExitTxStatus(SparkExitTxReadiness.Unverified)));
+
+        var confirmed = Assert.IsType<ExitTransactionStatus.Confirmed>(
+            SparkSdkClient.ToSdkExitTxStatus(
+                new SparkExitTxStatus(SparkExitTxReadiness.Confirmed, BlockHeight: 700_000)));
+        Assert.Equal(700_000u, confirmed.blockHeight);
+
+        // Both of the plugin's waiting cases go back as a wait, because the SDK replaces the status from the
+        // chain anyway and the one thing that must never happen is a wait returning as permission to send.
+        Assert.False(
+            SparkSdkClient.ToSdkExitTxStatus(new SparkExitTxStatus(SparkExitTxReadiness.Waiting))
+                is ExitTransactionStatus.Ready);
+    }
+
+    /// <summary>
+    /// The default-initialised readiness is "waiting", so a value that was never set cannot authorise a broadcast.
+    /// </summary>
+    /// <remarks>
+    /// A missing JSON field, a column added to an existing row, or a <c>default</c> in a switch all produce a
+    /// zero-valued <see cref="SparkExitTxReadiness"/>, and on this surface a zero that meant "ready" would be
+    /// instructions to push a timelocked transaction out. The plugin's own ordering puts <c>Waiting</c> first
+    /// deliberately; the SDK's union has no ordinal at all to mirror, which is why this is asserted here rather
+    /// than as an enum comparison.
+    /// </remarks>
+    [Fact]
+    public void The_default_readiness_is_waiting_rather_than_ready()
+    {
+        Assert.Equal(SparkExitTxReadiness.Waiting, default(SparkExitTxReadiness));
+        Assert.False(new SparkExitTxStatus(default).CanBroadcast);
     }
 
     [Fact]
@@ -86,11 +170,14 @@ public class SparkUnilateralExitSeamTests
             leaves: [new UnilateralExitLeaf("leaf-a", 40_000), new UnilateralExitLeaf("leaf-b", 10_000)],
             recoverableValueSat: 50_000,
             totalFeeSat: 3_000,
+            cpfpFeeSat: 0,
             fanoutFeeSat: 500,
+            sweepFeeSat: 0,
             singleUtxoFundingSat: 4_200,
             perBranchFunding: [new PerBranchFunding("leaf-a", 3_000), new PerBranchFunding("leaf-b", 1_200)],
             feeRateSatPerVbyte: 7,
-            destination: Destination));
+            destination: Destination,
+            exitChainState: new ExitChainState([], [], [], [], [])));
 
         Assert.Equal(50_000, quote.RecoverableValueSat);
         Assert.Equal(3_000, quote.TotalFeeSat);
@@ -116,11 +203,14 @@ public class SparkUnilateralExitSeamTests
             leaves: [],
             recoverableValueSat: 0,
             totalFeeSat: 0,
+            cpfpFeeSat: 0,
             fanoutFeeSat: 0,
+            sweepFeeSat: 0,
             singleUtxoFundingSat: 0,
             perBranchFunding: [],
             feeRateSatPerVbyte: 1,
-            destination: Destination));
+            destination: Destination,
+            exitChainState: new ExitChainState([], [], [], [], [])));
 
         Assert.True(quote.IsEmpty);
         Assert.Empty(quote.Leaves);
@@ -138,11 +228,14 @@ public class SparkUnilateralExitSeamTests
             leaves: [new UnilateralExitLeaf("leaf-a", ulong.MaxValue)],
             recoverableValueSat: ulong.MaxValue,
             totalFeeSat: ulong.MaxValue,
+            cpfpFeeSat: 0,
             fanoutFeeSat: ulong.MaxValue,
+            sweepFeeSat: 0,
             singleUtxoFundingSat: ulong.MaxValue,
             perBranchFunding: [],
             feeRateSatPerVbyte: 1,
-            destination: Destination));
+            destination: Destination,
+            exitChainState: new ExitChainState([], [], [], [], [])));
 
         Assert.Equal(long.MaxValue, quote.RecoverableValueSat);
         Assert.Equal(long.MaxValue, quote.TotalFeeSat);
@@ -160,7 +253,7 @@ public class SparkUnilateralExitSeamTests
             cpfpTxHex: "0200cpfp",
             csvTimelockBlocks: 1_008,
             dependsOn: ["fanout"],
-            status: ConfirmationStatus.Unconfirmed));
+            status: new ExitTransactionStatus.Ready()));
 
         Assert.Equal(SparkExitTxKind.TreeNode, mapped.Kind);
         Assert.Equal("node-1", mapped.NodeId);
@@ -168,6 +261,7 @@ public class SparkUnilateralExitSeamTests
         Assert.Equal(1_008u, mapped.CsvTimelockBlocks!.Value);
         Assert.Equal(["fanout"], mapped.DependsOn);
         Assert.True(mapped.RequiresPackageBroadcast);
+        Assert.Equal(SparkExitTxReadiness.Ready, mapped.Status.Readiness);
     }
 
     /// <remarks>
@@ -186,14 +280,15 @@ public class SparkUnilateralExitSeamTests
             cpfpTxHex: null,
             csvTimelockBlocks: null,
             dependsOn: null!,
-            status: ConfirmationStatus.Unverified));
+            status: new ExitTransactionStatus.Unverified()));
 
         Assert.Null(mapped.NodeId);
         Assert.Null(mapped.CpfpTxHex);
         Assert.Null(mapped.CsvTimelockBlocks);
         Assert.Empty(mapped.DependsOn);
         Assert.False(mapped.RequiresPackageBroadcast);
-        Assert.Equal(SparkExitTxStatus.Unverified, mapped.Status);
+        Assert.Equal(SparkExitTxReadiness.Unverified, mapped.Status.Readiness);
+        Assert.False(mapped.Status.CanBroadcast);
     }
 
     [Fact]
@@ -259,16 +354,6 @@ public class SparkUnilateralExitSeamTests
         Assert.DoesNotContain("@v1=", translated.Message);
     }
 
-    [Fact]
-    public void A_funding_conflict_becomes_a_typed_error_naming_the_outpoint()
-    {
-        var translated = Assert.IsType<SparkExitFundingUtxoConflictException>(
-            SparkErrors.TranslateUnilateralExit(new SdkException.FundingUtxoConflict("dd", 2)));
-
-        Assert.Equal("dd:2", translated.OutPoint);
-        Assert.Contains("dd:2", translated.Message);
-    }
-
     /// <remarks>
     /// Null rather than the original exception, so the client can use it as an exception filter and let anything
     /// else escape with its own stack rather than re-throwing a copy.
@@ -279,23 +364,153 @@ public class SparkUnilateralExitSeamTests
         Assert.Null(SparkErrors.TranslateUnilateralExit(new SdkException.NetworkException("@v1=offline")));
     }
 
+    /// <remarks>
+    /// There is exactly one translation left. SDK 0.25 removed <c>SdkException.FundingUtxoConflict</c> along with
+    /// the build shape that produced it — a spent funding output is now followed to whatever it became rather
+    /// than reported — so the filter must not claim a conflict it no longer recognises.
+    /// </remarks>
+    [Fact]
+    public void Only_the_CPFP_shortfall_is_translated()
+    {
+        Assert.IsType<SparkExitFundingShortfallException>(
+            SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientCpfpFunds(1)));
+
+        Assert.Null(SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientFunds(tokenIdentifier: null)));
+    }
+
     [Fact]
     public void The_exit_errors_never_reach_a_merchant_with_a_UniFFI_prefix()
     {
-        Exception[] errors =
-        [
-            new SdkException.InsufficientCpfpFunds(1_234),
-            new SdkException.FundingUtxoConflict("ee", 1)
-        ];
+        var described = SparkErrors.Describe(new SdkException.InsufficientCpfpFunds(1_234));
+        Assert.False(string.IsNullOrWhiteSpace(described));
+        Assert.DoesNotContain("@v1=", described);
+    }
 
-        foreach (var error in errors)
-        {
-            var described = SparkErrors.Describe(error);
-            Assert.False(string.IsNullOrWhiteSpace(described));
-            Assert.DoesNotContain("@v1=", described);
-        }
+    /// <summary>
+    /// A stored exit rebuilt into the SDK's response keeps every field <c>CheckUnilateralExit</c> judges it by.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the bridge between the persisted record and the SDK, and nothing else crosses it.</b> The
+    /// plugin never holds the SDK's response — it holds a serialised <see cref="SparkExitResult"/> on a database
+    /// row, possibly days old, and <c>CheckUnilateralExit</c> is handed the result of rebuilding that back into
+    /// the SDK's own type. So a field this loses is a field the SDK never sees, and the SDK reads
+    /// <c>dependsOn</c> to decide whether a transaction is waiting on a confirmation, <c>csvTimelockBlocks</c> to
+    /// decide whether its lock has matured, and <c>cpfpTxHex</c> to know the fee-paying child exists at all.
+    /// </para>
+    /// <para>
+    /// <b>The two failures that would be silent and expensive.</b> A dropped <c>dependsOn</c> edge makes a
+    /// node look independent, so the check reports it ready and the operator broadcasts a transaction whose
+    /// parent has not confirmed — rejected, or worse, mined against a statechain state that has moved. A lost
+    /// <c>cpfpTxHex</c> turns a package into a transaction paying no fee, and the operator is left with a
+    /// stuck zero-fee parent and no explanation. Neither throws, and neither is visible on any other test.
+    /// </para>
+    /// <para>
+    /// The whole set is asserted, not just the interesting transaction, because the check is handed all of them:
+    /// a <c>Zip</c>-shaped rebuild that dropped the last entry would leave the sweep out of the exit the SDK was
+    /// asked to judge.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_stored_exit_rebuilt_for_the_SDK_keeps_every_dependency_edge_and_hex()
+    {
+        var fanout = new SparkExitTransaction(
+            SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [],
+            new SparkExitTxStatus(SparkExitTxReadiness.Confirmed, BlockHeight: 800_100));
+
+        var node = new SparkExitTransaction(
+            SparkExitTxKind.TreeNode, "node:leaf-a", "txid:node:leaf-a", "0200nodeleaf-a",
+            "0200cpfpleaf-a", 1_008, ["txid:fanout"],
+            new SparkExitTxStatus(SparkExitTxReadiness.Waiting, SpendableAtHeight: 801_108));
+
+        var refund = new SparkExitTransaction(
+            SparkExitTxKind.Refund, "node:leaf-b", "txid:refund:leaf-b", "0200refundleaf-b",
+            "0200cpfprefund", 144, ["txid:fanout", "txid:node:leaf-b"],
+            new SparkExitTxStatus(SparkExitTxReadiness.Ready));
+
+        var sweep = new SparkExitTransaction(
+            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null,
+            ["txid:node:leaf-a", "txid:refund:leaf-b"],
+            new SparkExitTxStatus(SparkExitTxReadiness.Unverified));
+
+        var exit = new SparkExitResult(
+            350_000,
+            4_100,
+            [fanout, node, refund, sweep],
+            [new SparkExitLeaf("leaf-a", 300_000), new SparkExitLeaf("leaf-b", 50_000)]);
+
+        var rebuilt = SparkSdkClient.ToSdkExit(exit);
+
+        // The totals and the leaves the check echoes back for a caller to store over what it had.
+        Assert.Equal(350_000UL, rebuilt.recoverableValueSat);
+        Assert.Equal(4_100UL, rebuilt.totalFeeSat);
+        Assert.Equal(["leaf-a", "leaf-b"], rebuilt.leaves.Select(leaf => leaf.leafId));
+        Assert.Equal(300_000UL, rebuilt.leaves[0].value);
+
+        // Order preserved: the SDK's topological order is the operator's broadcast schedule and nothing
+        // downstream re-derives it.
+        Assert.Equal(4, rebuilt.transactions.Length);
+
+        Assert.Equal(UnilateralExitTxKind.FanOut, rebuilt.transactions[0].kind);
+        Assert.Equal("txid:fanout", rebuilt.transactions[0].txid);
+        Assert.Equal("0200fanout", rebuilt.transactions[0].txHex);
+        Assert.Empty(rebuilt.transactions[0].dependsOn);
+
+        // The node: the CPFP child, the timelock and the dependency edge all have to survive, because these are
+        // the three fields that decide how and when it may be broadcast.
+        var rebuiltNode = rebuilt.transactions[1];
+        Assert.Equal(UnilateralExitTxKind.Node, rebuiltNode.kind);
+        Assert.Equal("node:leaf-a", rebuiltNode.nodeId);
+        Assert.Equal("0200nodeleaf-a", rebuiltNode.txHex);
+        Assert.Equal("0200cpfpleaf-a", rebuiltNode.cpfpTxHex);
+        Assert.Equal(1_008u, rebuiltNode.csvTimelockBlocks);
+        Assert.Equal(["txid:fanout"], rebuiltNode.dependsOn);
+
+        // A refund and a node with more than one parent, so the rebuild is not merely preserving a single edge.
+        Assert.Equal(UnilateralExitTxKind.Refund, rebuilt.transactions[2].kind);
+        Assert.Equal(["txid:fanout", "txid:node:leaf-b"], rebuilt.transactions[2].dependsOn);
+
+        Assert.Equal(UnilateralExitTxKind.Sweep, rebuilt.transactions[3].kind);
+        Assert.Null(rebuilt.transactions[3].cpfpTxHex);
+        Assert.Equal(["txid:node:leaf-a", "txid:refund:leaf-b"], rebuilt.transactions[3].dependsOn);
+
+        // The statuses go back as the cases the stored readiness came from, heights included — the SDK replaces
+        // them from the chain, but a wait must not come back as a ready.
+        var ready = Assert.IsType<ExitTransactionStatus.Confirmed>(rebuilt.transactions[0].status);
+        Assert.Equal(800_100u, ready.blockHeight);
+        var waiting = Assert.IsType<ExitTransactionStatus.WaitingForDependencies>(
+            rebuilt.transactions[1].status);
+        Assert.NotNull(waiting);
+        Assert.IsType<ExitTransactionStatus.Ready>(rebuilt.transactions[2].status);
+        Assert.IsType<ExitTransactionStatus.Unverified>(rebuilt.transactions[3].status);
+    }
+
+    /// <remarks>
+    /// The check reads the chain and nothing else, so the funding outputs are absent by design — the SDK
+    /// follows them at build time and an exit being followed does not rebuild. Asserted because a rebuild that
+    /// invented a funding input would hand the SDK an output the plugin has no key for.
+    /// </remarks>
+    [Fact]
+    public void A_rebuilt_exit_carries_no_funding_inputs()
+    {
+        var rebuilt = SparkSdkClient.ToSdkExit(new SparkExitResult(0, 0, [], []));
+
+        Assert.Empty(rebuilt.transactions);
+        Assert.Empty(rebuilt.leaves);
+        Assert.Empty(rebuilt.fundingInputs);
     }
 
     private static PrepareUnilateralExitResponse Response(string destination, ulong feeRate) =>
-        new([], 0, 0, 0, 0, [], feeRate, destination);
+        new(
+            leaves: [],
+            recoverableValueSat: 0,
+            totalFeeSat: 0,
+            cpfpFeeSat: 0,
+            fanoutFeeSat: 0,
+            sweepFeeSat: 0,
+            singleUtxoFundingSat: 0,
+            perBranchFunding: [],
+            feeRateSatPerVbyte: feeRate,
+            destination: destination,
+            exitChainState: new ExitChainState([], [], [], [], []));
 }

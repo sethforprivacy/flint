@@ -33,12 +33,34 @@
         _ => "Sweep"
     };
 
-    static string DescribeTxStatus(SparkExitTxStatus status) => status switch
+    // The SDK's 0.25 status is a union, not a flat enum, because the useful question stopped being "is it
+    // mined" and became "may I broadcast it yet". So this says the action, not the state: an operator reading
+    // "Not confirmed" beside a transaction the chain service could not see would reasonably go looking for a
+    // node. Each readiness gets its own wording and none of them fall through to a generic one — "waiting" and
+    // "unverified" both mean "do not send this yet" but the next step is different in each case.
+    static string DescribeTxStatus(SparkExitTxStatus status) => status.Readiness switch
     {
-        SparkExitTxStatus.Confirmed => "Confirmed",
-        SparkExitTxStatus.Unconfirmed => "Not confirmed",
-        _ => "Unverified"
+        SparkExitTxReadiness.Ready => "Ready — broadcast it now",
+        // Naming the height is what turns "wait" into a number. Without it the operator has nothing to do but
+        // reload the page, and a page that only ever says "wait" is one people stop opening.
+        SparkExitTxReadiness.Waiting when status.SpendableAtHeight is { } spendableAt
+            => $"Waiting — valid from block {spendableAt.ToString("N0")}",
+        SparkExitTxReadiness.Waiting
+            => "Waiting — a transaction it depends on has not confirmed",
+        SparkExitTxReadiness.Confirmed when status.BlockHeight is { } blockHeight
+            => $"Confirmed in block {blockHeight.ToString("N0")} — nothing left to do",
+        SparkExitTxReadiness.Confirmed => "Confirmed — nothing left to do",
+        _ => "Unverified — no chain service answered"
     };
+
+    // The one place the submitpackage-versus-sendrawtransaction decision is made. A tree transaction pays no
+    // fee of its own, so submitting it alone is rejected — which is why this is a decision and not a format
+    // string. It is a local function called from both the "send these now" list and the full table, so the two
+    // cannot disagree about which command a given row needs: a merchant who ran one command from the summary
+    // and a different one from the table would be right to stop trusting both.
+    static string BroadcastCommand(SparkExitTransaction tx) => tx.CpfpTxHex is { } cpfpTxHex
+        ? $"bitcoin-cli submitpackage '[\"{tx.TxHex}\",\"{cpfpTxHex}\"]'"
+        : $"bitcoin-cli sendrawtransaction {tx.TxHex}";
 
     // The explorer form appears in two of this page's states — before anything is quoted, and beside the
     // funding panel — and never in both at once, so one local function serves both without colliding ids.
@@ -126,9 +148,11 @@
                     control, in a specific order, over those days.
                 </p>
                 <p>
-                    <strong>It still needs Spark's operators to be reachable.</strong> The version of the SDK
-                    shipped here has to talk to them to price and build an exit, so this is not yet a remedy for
-                    operators who have vanished — only for operators who refuse.
+                    <strong>It works without Spark's operators only if you prepared for it.</strong> An exit is
+                    quoted and built from data the SDK holds on this server, so it does not need the operators
+                    to be reachable — but only for leaves whose data was collected while they still were. That
+                    is what the exit-state backup on the Advanced page is for: collect it before you need it,
+                    and an exit built from it goes ahead with the operators gone for good.
                 </p>
                 <p class="mb-0">
                     <strong>It is experimental.</strong> It is behind a server-side switch for that reason, and
@@ -448,6 +472,53 @@
             {
                 <h3 class="mt-5 mb-3">Broadcast it yourself</h3>
 
+                @if (Model.CheckResult is { } verdict)
+                {
+                    @*
+                        The three verdicts are not a scale of severity — they are three different next actions,
+                        which is why each gets its own copy rather than a shared banner with a varying colour.
+                        In particular Redo is an error that must not read like a loss: the chain moved out from
+                        under the stored transactions, and the money is still there to be recovered by building
+                        again. The word "abandon" is deliberately absent.
+                    *@
+                    @if (verdict is SparkExitVerdict.Done)
+                    {
+                        <div class="alert alert-success" role="alert" id="SparkExitCheckDone">
+                            <strong>This exit is finished.</strong> Every transaction has confirmed, the sweep
+                            included, so the money is at your destination address. Mark it completed below and
+                            this store can quote another exit.
+                        </div>
+                    }
+                    else if (verdict is SparkExitVerdict.Redo)
+                    {
+                        <div class="alert alert-danger" role="alert" id="SparkExitCheckRedo">
+                            <strong>This set of transactions can no longer finish.</strong> Something on-chain has
+                            stopped matching them, so broadcasting the rest will not complete this exit.
+                            <strong>Your money is not lost</strong> — a new exit built from the same leaves
+                            recovers it. Press <em>Build again</em> below and the plugin re-reads the chain and
+                            signs a fresh set; anything already confirmed is skipped rather than rebuilt.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="alert alert-info" role="alert" id="SparkExitCheckValid">
+                            <strong>This exit is on track.</strong>
+                            @if (Model.PendingBroadcast is { Count: > 0 } readyCount)
+                            {
+                                <span>@readyCount.Count.ToString("N0") of its transactions can be broadcast
+                                right now; they are listed beside the table below.</span>
+                            }
+                            else
+                            {
+                                <span>Nothing can be broadcast at this moment — every step is either already
+                                confirmed or still waiting on one that is.</span>
+                            }
+                            The statuses in the table have been refreshed from the chain and stored, so what you
+                            see below is current rather than what the exit looked like when it was built.
+                        </div>
+                    }
+                }
+
                 <div class="alert alert-danger" role="alert">
                     <strong>These transactions exist nowhere but this page and this server's database.</strong>
                     Nothing has broadcast them and nothing will. Copy them somewhere safe before you start.
@@ -455,10 +526,28 @@
 
                 <div class="alert alert-warning" role="alert" id="SparkExitBroadcastOrder">
                     <p>
+                        <strong>Follow the Status column.</strong> Every row tells you whether it may go out yet,
+                        and a row that says Ready is safe to broadcast — sending one that has already been sent
+                        is harmless, so you do not have to remember what you pushed. The order below is what the
+                        dependencies mean, and the table is already sorted to satisfy it.
+                    </p>
+                    <p>
                         <strong>You need a node that can accept packages</strong> —
                         <code>bitcoin-cli submitpackage</code>. A plain <code>sendrawtransaction</code> rejects
                         the tree transactions: they pay zero fee on their own and are only acceptable together
                         with the child that funds them.
+                    </p>
+                    <p>
+                        <strong>Check this page every day, not at the end.</strong> Roughly 50 blocks — about
+                        eight hours — after a step becomes valid, a second version of that same step becomes
+                        valid too. Spark's watchtowers hold it as a safety net for a wallet that goes offline
+                        part-way through, and they can send it once it unlocks. Both versions move the same
+                        money to the same place; they differ only in who pays the mining fee. The version this
+                        plugin builds is paid for by the funding UTXO, at the rate you were quoted. The
+                        watchtower's version has its fee built in and takes it out of the leaf, so it comes off
+                        what arrives at your destination, at a rate you have no say in. <strong>A step left
+                        unbroadcast for a day or more can therefore end up paying for parts of itself out of the
+                        money it is recovering.</strong>
                     </p>
                     <ol class="mb-0">
                         <li>
@@ -473,9 +562,9 @@
                             one on the same branch.
                         </li>
                         <li>
-                            <strong>Refunds only after their timelocks have matured.</strong> The CSV column is
-                            how many blocks must pass after the parent confirms; submitting earlier is simply
-                            rejected.
+                            <strong>Later steps wait for their timelocks.</strong> A row whose status says it is
+                            waiting is not ready yet — the Status column names the block it becomes valid at, and
+                            those are the steps the watchtower warning above applies to.
                         </li>
                         <li>
                             The <strong>sweep</strong> goes last and alone, once everything it depends on has
@@ -548,6 +637,43 @@
                     </div>
 
                     <div permission="@Policies.CanModifyStoreSettings">
+                        @*
+                            The actionable slice of the table below, first. A built exit runs to a dozen rows
+                            and at most one or two are ever sendable at a time, so an operator who opens this
+                            page a day later should not have to read the whole set to find the row that matters.
+                            This is a filter, not a second exit: the same transactions, the same
+                            BroadcastCommand, read off the same model.
+                        *@
+                        @if (Model.PendingBroadcast is { Count: > 0 } pending)
+                        {
+                            <h4 class="mt-4 mb-2">Send these now</h4>
+                            <div class="alert alert-info" role="alert" id="SparkExitPendingBroadcast">
+                                <p class="mb-2">
+                                    <strong>@pending.Count.ToString("N0") of these transactions can be broadcast
+                                    right now.</strong> The rest are waiting on one of them to confirm — check
+                                    this page again after each one lands.
+                                </p>
+                                <ul class="mb-0">
+                                    @foreach (var ready in pending)
+                                    {
+                                        <li class="mb-2">
+                                            <span>@DescribeKind(ready.Kind)</span>
+                                            <div class="d-flex align-items-start gap-2 mt-1">
+                                                <code class="text-break flex-grow-1">@BroadcastCommand(ready)</code>
+                                                <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
+                                                        data-clipboard-text="@BroadcastCommand(ready)">
+                                                    Copy
+                                                </button>
+                                            </div>
+                                            <div class="form-text">
+                                                <vc:truncate-center text="@ready.Txid" classes="truncate-center-id" />
+                                            </div>
+                                        </li>
+                                    }
+                                </ul>
+                            </div>
+                        }
+
                         <table class="table" id="SparkExitTransactions">
                             <thead>
                                 <tr>
@@ -577,11 +703,13 @@
                                         </td>
                                         <td>
                                             @DescribeTxStatus(tx.Status)
-                                            @if (tx.Status is SparkExitTxStatus.Unverified)
+                                            @if (tx.Status.Readiness is SparkExitTxReadiness.Unverified)
                                             {
                                                 <div class="form-text">
                                                     No chain service answered. Check it yourself before treating it as
-                                                    either.
+                                                    either. If it stays unverified, build this exit again once your
+                                                    chain service is healthy — the SDK's own guidance for this case,
+                                                    because a rebuild re-reads the chain rather than guessing.
                                                 </div>
                                             }
                                         </td>
@@ -623,7 +751,15 @@
                                                         two are only valid submitted together.
                                                     </p>
                                                     <div class="d-flex align-items-start gap-2 mb-2">
-                                                        <code class="text-break flex-grow-1" id="SparkExitPackage@step">bitcoin-cli submitpackage '["@tx.TxHex","@cpfpTxHex"]'</code>
+                                                        @*
+                                                            The command comes from BroadcastCommand rather than being
+                                                            spelled out here, because the "send these now" list above
+                                                            renders the same decision for the same row. Two copies
+                                                            would be two chances to disagree about when a package is
+                                                            required, and the merchant runs whichever one they read
+                                                            first.
+                                                        *@
+                                                        <code class="text-break flex-grow-1" id="SparkExitPackage@step">@BroadcastCommand(tx)</code>
                                                         <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
                                                                 data-clipboard-target="#SparkExitPackage@step">
                                                             Copy
@@ -637,7 +773,7 @@
                                                         and must not be submitted alongside anything else.
                                                     </p>
                                                     <div class="d-flex align-items-start gap-2 mb-2">
-                                                        <code class="text-break flex-grow-1" id="SparkExitPackage@step">bitcoin-cli sendrawtransaction @tx.TxHex</code>
+                                                        <code class="text-break flex-grow-1" id="SparkExitPackage@step">@BroadcastCommand(tx)</code>
                                                         <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
                                                                 data-clipboard-target="#SparkExitPackage@step">
                                                             Copy
@@ -681,6 +817,30 @@
                         </form>
                     </div>
                 }
+
+                @*
+                    The check-in sits outside the branches above on purpose. It is the only control that reports
+                    progress rather than asking for an action, and it is the one thing an operator wants in
+                    *every* built state — including the empty and unreadable ones, where "what does the chain
+                    say about this record" is the question they actually have. It posts rather than being a
+                    link because it re-reads the chain and rewrites the stored statuses, and it works with this
+                    store's Spark wallet stopped, so it is not gated on the wallet.
+                *@
+                <div permission="@Policies.CanModifyStoreSettings">
+                    <form method="post" asp-action="CheckExit" asp-route-storeId="@Model.StoreId"
+                          id="SparkExitCheckForm" class="mt-3">
+                        <input type="hidden" name="recordId" value="@record.Id" />
+                        <button type="submit" class="btn btn-secondary" id="SparkExitCheck">
+                            Check progress
+                        </button>
+                        <div class="form-text">
+                            Asks the chain how far this exit has got and updates every status above.
+                            <strong>It broadcasts nothing and signs nothing</strong>, so it is safe to press as
+                            often as you like. Checking daily is the point: a step left unsent for a day or more
+                            can start paying its own fee out of the money it is recovering.
+                        </div>
+                    </form>
+                </div>
 
                 @*
                     The exit's own ending. Nothing in Phase 0 watches the chain, so the plugin cannot notice that

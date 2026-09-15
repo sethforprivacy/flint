@@ -161,11 +161,14 @@ public class UnilateralExitRecord
     /// build runs.
     /// </summary>
     /// <remarks>
-    /// Recorded because the SDK reports <c>FundingUtxoConflict</c> by outpoint, and a merchant reading that error
-    /// needs to be able to see which outpoint this exit already committed to. Never cleared once written: the
-    /// signed transactions in <see cref="TransactionsJson"/> spend exactly this outpoint, so losing it would
-    /// leave a set of transactions whose input nobody can identify. The store's update coalesces it for that
-    /// reason.
+    /// Recorded so an operator can see which outputs this exit already committed to, and because a later build
+    /// passes them back to the SDK, which follows each outpoint to whatever it became rather than rejecting a
+    /// spent one. That is the SDK's 0.25 behaviour and the reason this column is no longer merely explanatory:
+    /// the outpoints are an input to the next attempt. (It used to be recorded because the SDK reported
+    /// <c>FundingUtxoConflict</c> by outpoint; 0.25 no longer reports a conflict as an error at all.) Never
+    /// cleared once written: the signed transactions in <see cref="TransactionsJson"/> spend exactly this
+    /// outpoint, so losing it would leave a set of transactions whose input nobody can identify. The store's
+    /// update coalesces it for that reason.
     /// </remarks>
     public string? FundingUtxosJson { get; set; }
 

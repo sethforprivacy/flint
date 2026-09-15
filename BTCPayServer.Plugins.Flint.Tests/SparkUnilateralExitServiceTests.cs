@@ -672,7 +672,10 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(4, transactions.Length);
         Assert.Equal(SparkExitTxKind.Fanout, transactions[0].Kind);
         Assert.Equal(SparkExitTxKind.Sweep, transactions[^1].Kind);
-        Assert.Equal(SparkExitTxStatus.Unconfirmed, transactions[0].Status);
+        // Readiness round-trips through the column as its own enum, which is what the page switches on to decide
+        // what to tell an operator to broadcast. The default fake set is Ready, so every transaction is
+        // broadcastable — the state a fresh build is in immediately after the fan-out confirms.
+        Assert.Equal(SparkExitTxReadiness.Ready, transactions[0].Status.Readiness);
 
         var node = transactions.First(tx => tx.Kind is SparkExitTxKind.TreeNode);
         Assert.True(node.RequiresPackageBroadcast);
@@ -920,14 +923,14 @@ public class SparkUnilateralExitServiceTests
     }
 
     /// <summary>
-    /// The SDK's own funding failures arrive as readable copy on the record rather than as an exception.
+    /// The SDK's own funding shortfall arrives as readable copy on the record rather than as an exception.
     /// </summary>
     /// <remarks>
-    /// Both of these mean the operator has something to do — top up, or send fresh funds because the output was
-    /// spent from under the exit — and both leave the exit exactly where it was, because nothing was built.
+    /// It means the operator has something to do — top up the funding address — and it leaves the exit exactly
+    /// where it was, because nothing was built. The number the SDK named is what makes that copy actionable.
     /// </remarks>
     [Fact]
-    public async Task The_SDK_s_funding_failures_land_on_the_record_as_words()
+    public async Task The_SDK_s_funding_failure_lands_on_the_record_as_words()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
@@ -944,14 +947,7 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(
             UnilateralExitStatus.AwaitingFunding,
             harness.Records.Records[shortfallRecord.Id].Status);
-
-        harness.Sdk.FailExitBuildWith = new SparkExitFundingUtxoConflictException(FundingTxid, 0);
-
-        var conflict = await harness.Service.BuildAsync(StoreId, shortfallRecord.Id, Ct);
-
-        Assert.False(conflict.Success);
-        Assert.Contains(FundingTxid, conflict.Error);
-        Assert.Contains("already spent", conflict.Error);
+        Assert.Null(harness.Records.Records[shortfallRecord.Id].TransactionsJson);
     }
 
     /// <summary>A build against an unknown exit, or one that is finished, is refused.</summary>
@@ -996,6 +992,302 @@ public class SparkUnilateralExitServiceTests
         Assert.Contains("no longer derives", result.Error);
         Assert.Contains("m/84'/1'/4607060'/0/0", result.Error);
         Assert.Empty(harness.Sdk.ExitBuildCalls);
+    }
+
+    /// <summary>
+    /// A build that comes back with no transactions at all is a successful build, not a refusal.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the semantic change of the SDK bump, and the one a merchant would notice.</b> In 0.25 the SDK
+    /// reads confirmed chain state before building, so a resumed build whose steps have already gone out and
+    /// confirmed has nothing left to hand back — while the leaves it was pinned to are still perfectly well
+    /// present in the wallet. That is a successful build with an empty set, and it replaces the stored set.
+    /// </para>
+    /// <para>
+    /// The harm in getting it wrong is a trap with no way out: the exit has been force-closed on chain, the SDK
+    /// says there is nothing left to do, and a plugin that reads that as "the build failed" leaves the record at
+    /// <c>AwaitingFunding</c> asking the operator to fund an exit that is already done. It would also keep the
+    /// previous attempt's complaint on the row, so the page would show a stale error next to a finished exit.
+    /// </para>
+    /// <para>
+    /// The empty set is deliberately not the same condition as an empty <em>quote</em> — the leaves are still
+    /// pinned and still in the wallet here, which is what tells the two apart. See
+    /// <c>A_build_whose_leaves_have_vanished_is_refused_before_anything_is_signed</c> for the other side.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_build_that_returns_no_transactions_is_a_successful_build()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed(
+            leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200, lastError: "not enough on the funding address");
+        harness.Explorer(Utxo(10_000));
+
+        // The leaves are exactly where they were; what has changed is that the chain already has every step
+        // this exit planned, so the SDK has nothing left to sign.
+        harness.Sdk.ExitBuildsNoTransactions = true;
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(result.Success, result.Error);
+
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, stored.Status);
+        // An empty array rather than null: "built, with nothing left to broadcast" and "never built" are
+        // different states and the page renders them differently.
+        Assert.Equal("[]", stored.TransactionsJson);
+        // The previous attempt's complaint does not sit next to a successful build.
+        Assert.Null(stored.LastError);
+    }
+
+    /// <summary>
+    /// A build that returns fewer transactions than the stored set replaces it rather than merging into it.
+    /// </summary>
+    /// <remarks>
+    /// <b>A merge here would be actively dangerous rather than merely untidy.</b> The transaction a later build
+    /// leaves out is one the chain says is already confirmed or already superseded; keeping it in the stored set
+    /// means the page keeps rendering it as a step to broadcast, and an operator who broadcasts a stale
+    /// transaction from a superseded exit is publishing a transaction that competes with, or spends an output
+    /// already claimed by, the exit that actually went through. The statuses would also be a mixture of two
+    /// different reads of the chain, which is a set no single moment ever produced.
+    /// </remarks>
+    [Fact]
+    public async Task A_partial_rebuild_replaces_the_stored_set_rather_than_merging_with_it()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
+        var first = JsonSerializer.Deserialize<SparkExitTransaction[]>(
+            harness.Records.Records[record.Id].TransactionsJson!)!;
+        Assert.Equal(4, first.Length);
+        Assert.Contains(first, tx => tx.Txid == "txid:node:leaf-b");
+
+        // leaf-b's branch has confirmed on chain, so the next build has nothing to do for it.
+        harness.Sdk.ExitLeaves.RemoveAll(leaf => leaf.LeafId == "leaf-b");
+
+        Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
+
+        var second = JsonSerializer.Deserialize<SparkExitTransaction[]>(
+            harness.Records.Records[record.Id].TransactionsJson!)!;
+
+        Assert.Equal(3, second.Length);
+        Assert.DoesNotContain(second, tx => tx.Txid == "txid:node:leaf-b");
+        // The transaction the rebuild dropped is gone from the row, not left behind as a step to broadcast.
+        Assert.NotEqual(4, second.Length);
+        Assert.Contains(second, tx => tx.Txid == "txid:node:leaf-a");
+    }
+
+    #endregion
+
+    #region Checking a built exit against the chain
+
+    /// <summary>
+    /// Checking refreshes the stored statuses from what the chain reports.
+    /// </summary>
+    /// <remarks>
+    /// <b>The stored statuses are the only thing that turns "here are twelve transactions" into a schedule.</b>
+    /// A built set is a snapshot of a chain that has since moved: the fan-out has confirmed, a node's timelock
+    /// has matured, the sweep is still waiting. An operator who reloads the page has to be told which of those
+    /// is true now, and the only source is the SDK's own read — so a check that answers without writing the
+    /// refreshed set back leaves the page rendering yesterday's readiness for ever, which is how an operator ends
+    /// up rebroadcasting a transaction that is already mined or waiting on one that is not.
+    /// </remarks>
+    [Fact]
+    public async Task Checking_a_built_exit_persists_the_refreshed_transactions()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = await BuiltExit(harness);
+
+        // The chain has moved since the build: everything is now waiting on the fan-out's confirmation.
+        harness.Sdk.ExitReadiness = SparkExitTxReadiness.Waiting;
+        harness.Sdk.ExitSpendableAtHeight = 810_000;
+
+        var result = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+
+        Assert.True(result.Success, result.Error);
+        Assert.Single(harness.Sdk.ExitCheckCalls);
+
+        var refreshed = JsonSerializer.Deserialize<SparkExitTransaction[]>(
+            harness.Records.Records[record.Id].TransactionsJson!)!;
+        Assert.All(
+            refreshed,
+            tx => Assert.Equal(SparkExitTxReadiness.Waiting, tx.Status.Readiness));
+        // The height that makes "not yet" a number travels with the status, so the page can say when.
+        Assert.Equal(810_000u, refreshed[0].Status.SpendableAtHeight);
+    }
+
+    /// <summary>
+    /// The verdict comes back on the result and is deliberately not written to the row.
+    /// </summary>
+    /// <remarks>
+    /// The verdict is the SDK's reading of the chain at the instant of the call. Stored, it would be rendered
+    /// later as a live claim about a chain nothing has re-read — an operator would see "on track" on a page
+    /// served from a row written days ago. The refreshed <em>transactions</em> are stored because they are what
+    /// the operator broadcasts against; the verdict is not, because it is only ever an answer to a question
+    /// somebody just asked.
+    /// </remarks>
+    [Fact]
+    public async Task The_check_verdict_is_reported_but_not_persisted()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = await BuiltExit(harness);
+
+        // The SDK's own scripted progression: this refresh says on track, the next says finished.
+        harness.Sdk.CheckVerdict = SparkExitVerdict.Done;
+
+        var done = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+
+        Assert.True(done.Success, done.Error);
+        Assert.Equal(SparkExitVerdict.Done, done.Verdict);
+
+        // Nothing on the row carries it: the record's own columns are about the exit, not about the last time
+        // anybody asked the chain.
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, stored.Status);
+        Assert.Null(stored.LastError);
+
+        // And the next call asks again rather than replaying the stored answer.
+        harness.Sdk.CheckVerdict = SparkExitVerdict.Redo;
+        var redo = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.Equal(SparkExitVerdict.Redo, redo.Verdict);
+        Assert.Equal(2, harness.Sdk.ExitCheckCalls.Count);
+    }
+
+    /// <summary>
+    /// Checking an exit that was never built is refused: there is nothing on chain to ask about.
+    /// </summary>
+    /// <remarks>
+    /// <b>The refusal is what keeps the verdict honest.</b> A check on an unbuilt row has no transaction set to
+    /// hand the SDK, and the SDK judges the exit it is given — so answering it at all would mean either inventing
+    /// a set or reporting a verdict about an exit that does not exist. Either way the page would show a chain
+    /// verdict next to an exit that has not been built, and an operator would read "on track" as "the funding
+    /// arrived and it is working".
+    /// </remarks>
+    [Fact]
+    public async Task Checking_an_exit_that_is_not_built_is_refused()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+
+        var awaiting = harness.Seed(id: "exit-waiting", leafIds: ["leaf-a"]);
+        var notBuilt = await harness.Service.CheckAsync(StoreId, awaiting.Id, Ct);
+
+        Assert.False(notBuilt.Success);
+        Assert.Contains("not been built", notBuilt.Error);
+        Assert.Null(notBuilt.Verdict);
+
+        var abandoned = harness.Seed(id: "exit-abandoned", status: UnilateralExitStatus.Abandoned);
+        var gone = await harness.Service.CheckAsync(StoreId, abandoned.Id, Ct);
+
+        Assert.False(gone.Success);
+        Assert.Contains("abandoned", gone.Error);
+
+        Assert.Equal(
+            SparkUnilateralExitService.ExitNotFound,
+            (await harness.Service.CheckAsync(StoreId, "exit-nowhere", Ct)).Error);
+
+        // Nothing reached the SDK on the way to any of those refusals.
+        Assert.Empty(harness.Sdk.ExitCheckCalls);
+    }
+
+    /// <summary>
+    /// Checking builds nothing, signs nothing and spends nothing — it is a read of the chain.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the property that makes the button safe to press as often as an operator likes.</b> A check
+    /// that took a quote, re-priced the leaves or asked the SDK to build would commit a fresh funding output and
+    /// produce a second signed set over an exit that is already part-way through being broadcast — and the
+    /// operator would have no way to tell from the page that pressing "check" had signed anything at all. It must
+    /// also work from a record alone: the whole reason the check exists is following an exit whose wallet is
+    /// gone.
+    /// </remarks>
+    [Fact]
+    public async Task Checking_a_built_exit_builds_and_spends_nothing()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = await BuiltExit(harness);
+
+        var quotesAfterBuild = harness.Sdk.ExitQuoteCalls.Count;
+        var buildsAfterBuild = harness.Sdk.ExitBuildCalls.Count;
+
+        var result = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+
+        Assert.True(result.Success, result.Error);
+        Assert.Single(harness.Sdk.ExitCheckCalls);
+        // No re-price, no re-quote, no second build: the count is unchanged from what the build itself did.
+        Assert.Equal(quotesAfterBuild, harness.Sdk.ExitQuoteCalls.Count);
+        Assert.Equal(buildsAfterBuild, harness.Sdk.ExitBuildCalls.Count);
+        // And it did not need the store's seed at all, which is what makes a lost wallet recoverable.
+        harness.Settings.Settings[StoreId]!.ProtectedMnemonic = "not something this keyring can unprotect";
+        Assert.True((await harness.Service.CheckAsync(StoreId, record.Id, Ct)).Success);
+    }
+
+    /// <summary>
+    /// A check whose answer cannot be written lands as a refusal rather than as a silent success.
+    /// </summary>
+    /// <remarks>
+    /// The refreshed set is the point of the call. Reporting success while the compare-and-set missed would tell
+    /// an operator the page is showing what the chain says when the row still holds the build-time statuses —
+    /// and the comparison is not paranoia: an abandon or a completion from another tab between the read and the
+    /// write is exactly what it is there for.
+    /// </remarks>
+    [Fact]
+    public async Task A_check_that_cannot_write_its_refresh_back_reports_a_refusal()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = await BuiltExit(harness);
+
+        harness.Records.RefuseUpdates = true;
+
+        var result = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Equal(SparkUnilateralExitService.ExitChangedUnderneath, result.Error);
+    }
+
+    /// <summary>
+    /// A check whose chain read blows up leaves the stored set exactly as it was.
+    /// </summary>
+    /// <remarks>
+    /// "Spark could not read the chain" and "the chain says every transaction is waiting" are opposite answers,
+    /// and an operator who acted on the second when the first was true would rebroadcast a set they have already
+    /// broadcast. So a failed check writes nothing, and says so.
+    /// </remarks>
+    [Fact]
+    public async Task A_check_that_fails_leaves_the_stored_set_untouched()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = await BuiltExit(harness);
+        var before = harness.Records.Records[record.Id].TransactionsJson;
+
+        harness.Sdk.FailCheckWith = new InvalidOperationException("the chain service is down");
+
+        var result = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("could not read the chain", result.Error);
+        Assert.Equal(before, harness.Records.Records[record.Id].TransactionsJson);
+        Assert.Equal(
+            UnilateralExitStatus.Built,
+            harness.Records.Records[record.Id].Status);
     }
 
     #endregion
@@ -1560,6 +1852,26 @@ public class SparkUnilateralExitServiceTests
     }
 
     #endregion
+
+    /// <summary>
+    /// Seeds a funded exit and builds it, returning the row as the build left it.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the check tests, which all start from "an exit that is Built and whose transaction set is on the
+    /// row" — reaching that state through <see cref="ISparkUnilateralExitService.BuildAsync"/> rather than by
+    /// writing a JSON column by hand, so a check test cannot pass against a row shape the build would never
+    /// produce.
+    /// </remarks>
+    private static async Task<UnilateralExitRecord> BuiltExit(Harness harness)
+    {
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        var built = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+        Assert.True(built.Success, built.Error);
+        return record;
+    }
 
     /// <summary>One entry of an esplora <c>/address/{address}/utxo</c> response.</summary>
     private static string Utxo(long valueSat, uint vout = 0, bool confirmed = true) =>

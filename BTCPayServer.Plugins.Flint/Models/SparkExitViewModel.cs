@@ -132,6 +132,61 @@ public class SparkExitViewModel
     /// </remarks>
     public string? EsploraApiUrl { get; set; }
 
+    /// <summary>
+    /// The stored transactions the service still reports as ready to broadcast, or null for none.
+    /// </summary>
+    /// <remarks>
+    /// Null and empty are the same answer here — "nothing to send right now" — and the page treats them
+    /// identically, so nothing downstream can read an empty list as a failure. This is a convenience copy of
+    /// rows that are <em>already</em> in <see cref="Transactions"/>, kept so an operator opening this page a
+    /// day later does not have to read the whole set to find the one actionable row. It is deliberately not a
+    /// second source of truth: the hex, the txid and the package decision all come from the entries here, and
+    /// the section that lists them is only ever a filter over the table below.
+    /// </remarks>
+    [ValidateNever]
+    public IReadOnlyList<SparkExitTransaction>? PendingBroadcast { get; set; }
+
+    /// <summary>
+    /// The verdict from the operator's last check-in with the chain, or null when none has just run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deliberately not TempData.</b> A verdict of <see cref="SparkExitVerdict.Redo"/> has to be read
+    /// beside the table it is about — the transactions below are the ones that can no longer finish — and a
+    /// status banner survives a redirect but shows a detached summary of a state the operator would then have
+    /// to match up by hand. Held on the model, it renders in the section it belongs to and disappears on the
+    /// next read of the page.
+    /// </para>
+    /// <para>
+    /// A verdict, not the whole <see cref="SparkExitProgress"/>: the refreshed transaction set is already
+    /// persisted by the service and arrives here as <see cref="Transactions"/> and
+    /// <see cref="PendingBroadcast"/>, so carrying a second copy would be two sources of truth for the same
+    /// rows in one render.
+    /// </para>
+    /// </remarks>
+    [ValidateNever]
+    public SparkExitVerdict? CheckResult { get; set; }
+
+    /// <summary>Whether an exit-state backup blob is currently stored for this store. Presence only.</summary>
+    /// <remarks>
+    /// The blob itself is never rendered back into the page, for the same reason the Breez API key is not:
+    /// it carries every leaf and its transactions, so it discloses the balance, how it is split and the
+    /// history. The Advanced page therefore shows only whether one exists, and an operator who wants a copy
+    /// asks for a fresh export.
+    /// </remarks>
+    public bool HasExitStateBackup { get; set; }
+
+    /// <summary>
+    /// A freshly exported exit-state blob, held for one render so the operator can copy it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Never a stored blob.</b> This is set only by the export action, from a live SDK call, and is
+    /// discarded with the response — there is no path that reads the stored backup and puts it in a page.
+    /// Set as its own field rather than appended to <see cref="HasExitStateBackup"/> so a render cannot
+    /// confuse "a backup exists" with "here is the backup".
+    /// </remarks>
+    public string? ExportedExitState { get; set; }
+
     /// <summary>The chain this server runs on, named in the copy that depends on it.</summary>
     public string NetworkName { get; set; } = string.Empty;
 

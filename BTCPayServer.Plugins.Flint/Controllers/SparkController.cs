@@ -88,6 +88,7 @@ public class SparkController : Controller
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
     private readonly ISparkUnilateralExitService _unilateralExit;
+    private readonly ISparkStoreRuntime _storeRuntime;
     private readonly CrossChainCatalog _crossChainCatalog;
     private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<SparkController> _logger;
@@ -103,6 +104,7 @@ public class SparkController : Controller
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
         ISparkUnilateralExitService unilateralExit,
+        ISparkStoreRuntime storeRuntime,
         CrossChainCatalog crossChainCatalog,
         IAuthorizationService authorizationService,
         ILogger<SparkController> logger)
@@ -117,6 +119,7 @@ public class SparkController : Controller
         _deposits = deposits;
         _stableBalance = stableBalance;
         _unilateralExit = unilateralExit;
+        _storeRuntime = storeRuntime;
         _crossChainCatalog = crossChainCatalog;
         _authorizationService = authorizationService;
         _logger = logger;
@@ -787,7 +790,12 @@ public class SparkController : Controller
             // Presence only — the key itself never leaves the settings blob for this page. Nobody else should
             // be using a store's key even though Breez does not treat it as a secret, so the page has no
             // business printing it into the DOM.
-            HasApiKeyOverride = !string.IsNullOrEmpty(settings?.ApiKeyOverride)
+            HasApiKeyOverride = !string.IsNullOrEmpty(settings?.ApiKeyOverride),
+            // Same discipline for the exit-state backup, and for the same reason at a higher severity: the
+            // blob describes the whole wallet's tree. Gated on the experiment too, so the block that would
+            // display it is never told there is one on a server where that block does not render.
+            HasExitStateBackup = Constants.UnilateralExitEnabled
+                && !string.IsNullOrEmpty(settings?.UnilateralExit.ExitStateBackup)
         };
     }
 
@@ -1000,6 +1008,172 @@ public class SparkController : Controller
     }
 
     /// <summary>
+    /// Asks the chain how far the built exit has got, and re-renders the page with the answer and the
+    /// refreshed transactions.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Renders instead of redirecting, and this is the only action in the region that does.</b> The answer
+    /// belongs to this page's own table: a verdict that the stored set can no longer finish is only legible
+    /// beside the transactions it is about, and the refreshed statuses have to be on screen in the same
+    /// response the operator learns them from. A redirect would drop it into a status banner and show a table
+    /// that is still one read behind. The service has already persisted the refreshed set, so the re-read
+    /// below is showing what is stored, not a second opinion.
+    /// </para>
+    /// <para>
+    /// The service's refusal, if any, still goes through <see cref="RelayExitResult"/> — a check that could not
+    /// run is a banner, not a verdict, and the page must not invent one.
+    /// </para>
+    /// </remarks>
+    [HttpPost("exit/check")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> CheckExit(
+        [FromRoute] string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .CheckAsync(storeId, recordId, cancellationToken)
+            .ConfigureAwait(false);
+
+        var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var model = BuildExitViewModel(storeId, page, settings);
+
+        // Read after the write, so the banner and the table describe the same moment. Verdict is not
+        // persisted by the service — it is a snapshot of the chain at the moment of this call — so it is
+        // carried on the model for this render and gone on the next read of the page. A check that refused
+        // carries no verdict, and the banner below says why rather than the page inventing one.
+        model.CheckResult = result.Success ? result.Verdict : null;
+
+        if (!result.Success)
+            RelayExitResult(result, string.Empty);
+
+        return View(nameof(Exit), model);
+    }
+
+    /// <summary>
+    /// Exports this store's exit data and shows it once, for the operator to copy somewhere safe.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The blob goes into the view model and never into <c>TempData</c>.</b> It is a live SDK call that can
+    /// fail, so it cannot be a GET — but a redirect carrying it in a status message would print it into a
+    /// banner that survives navigation and redisplay, and the operator would have no way to tell which of the
+    /// store's pages was holding it. Rendered from the model, it exists for exactly one response.
+    /// </para>
+    /// <para>
+    /// Lives under the Advanced page because it is wallet infrastructure rather than one exit's business: it
+    /// is something a merchant should collect <em>before</em> they need it, and an exit built from data
+    /// collected while Spark was still reachable is the only kind that works with the operators gone.
+    /// </para>
+    /// <para>
+    /// <b>This is the one action in the controller that resolves the store's live wallet itself</b>, because
+    /// the export has no service method — <see cref="ISparkUnilateralExitService"/> exposes the check and the
+    /// backup <em>store</em>, not the export, and the exit service is the wrong owner for an operation that is
+    /// about the wallet rather than one exit. It goes through <see cref="ISparkStoreRuntime"/>, the same seam
+    /// every service uses, so no SDK type is opened here: a null client is the ordinary "your wallet is not
+    /// running" answer and is reported as one, and any failure from the call is relayed through
+    /// <see cref="SparkErrors.Describe"/> exactly as the exit service relays its own.
+    /// </para>
+    /// </remarks>
+    [HttpPost("advanced/exit-state/export")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> ExportExitState([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var status = await _statusReader.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+        if (!status.Configured)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var model = await BuildAdvancedViewModel(storeId, status, input: null, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Rendering rather than redirecting on every outcome, so the operator stays on the section they
+        // pressed the button in and the blob (when there is one) is never re-served by a replay of a
+        // redirect target.
+        var sdk = await _storeRuntime.GetSdkClientAsync(storeId).ConfigureAwait(false);
+        if (sdk is null)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "This store's Spark wallet is not running, so its exit data cannot be read. Start the wallet "
+                + "and export again.";
+            return View("Advanced", model);
+        }
+
+        try
+        {
+            model.ExportedExitState = await sdk
+                .ExportUnilateralExitStateAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The message is the SDK's own, put through the same scrubber every other SDK failure goes
+            // through: this path prints its result into a page, so an unscrubbed payload would be a leak with
+            // a textarea around it.
+            _logger.LogWarning(ex, "Store {StoreId}: could not export unilateral-exit state", storeId);
+            TempData[WellKnownTempData.ErrorMessage] =
+                "Spark could not export this wallet's exit data: " + SparkErrors.Describe(ex)
+                + ". Nothing was changed; try again, and check the server log if it keeps failing.";
+        }
+
+        return View("Advanced", model);
+    }
+
+    /// <summary>
+    /// Stores a pasted exit-state blob, replacing whatever was there.
+    /// </summary>
+    /// <remarks>
+    /// The blob is written for the next restart to import, not imported now: an import overwrites the wallet's
+    /// view of its own chains, and doing it under a running wallet would race the SDK. Nothing here inspects
+    /// the string — whether it is a well-formed blob at all is the SDK's judgement at import time, and a
+    /// plugin-side shape check would only be a second, weaker parser in front of the real one.
+    /// </remarks>
+    [HttpPost("advanced/exit-state")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> SetExitStateBackup(
+        [FromRoute] string storeId,
+        SparkAdvancedViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var result = await _unilateralExit
+            .SetExitStateBackupAsync(storeId, vm.ExitStateBackup, cancellationToken)
+            .ConfigureAwait(false);
+
+        RelayExitResult(
+            result,
+            string.IsNullOrWhiteSpace(vm.ExitStateBackup)
+                ? "No exit-state backup is stored for this store now, so a restart will not import one."
+                : "Exit-state backup stored. It is imported automatically when this store's wallet next "
+                  + "starts, so it must be one the wallet can use.");
+        return RedirectToAction(nameof(Advanced), new { storeId });
+    }
+
+    /// <summary>
     /// Abandons the record so the store can quote again.
     /// </summary>
     /// <remarks>
@@ -1162,7 +1336,16 @@ public class SparkController : Controller
             FundingKeyPath = page.FundingKeyPath,
             Transactions = page.Transactions ?? [],
             TransactionsUnreadable = page.TransactionsUnreadable,
+            // Carried as the service reported it, without an empty-list normalisation: the page gates the
+            // whole "send these now" section on it being non-null and non-empty, so turning a service that
+            // said "nothing is ready" into an empty list here would change nothing — but turning a service
+            // that said "I could not tell" into one would put an action block on screen for an unknown set.
+            PendingBroadcast = page.PendingBroadcast,
             EsploraApiUrl = settings?.UnilateralExit.EsploraApiUrl,
+            // Presence only, and only behind the feature gate — the section that shows this is gated too, and
+            // a store on a server with the experiment off has no exit data for the flag to be about.
+            HasExitStateBackup = Constants.UnilateralExitEnabled
+                && !string.IsNullOrEmpty(settings?.UnilateralExit.ExitStateBackup),
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };
