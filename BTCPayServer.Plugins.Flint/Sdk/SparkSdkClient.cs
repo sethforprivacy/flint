@@ -432,6 +432,21 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 .ClaimDeposit(new ClaimDepositRequest(txId, vout, ToSdkMaxFee(maxFee)))
                 .ConfigureAwait(false);
 
+            // Null-checked rather than passed straight to the mapper, which throws on null. Since 0.25 the
+            // binding marks this field nullable, and the difference matters here: every other response on this
+            // class carries a payment that is always present, so the shape invites an assumption. A claim that
+            // returned no payment is a claim the SDK did not complete, and reporting it as an ordinary failure
+            // is right — the money is still in the deposit, and the merchant can retry at a different ceiling.
+            if (response.payment is null)
+            {
+                _logger.LogWarning(
+                    "Store {StoreId}: claiming deposit {TxId}:{Vout} returned no payment, so the claim did not "
+                    + "complete", _storeId, txId, vout);
+                return new SparkClaimDepositResult(
+                    null, "Spark claimed the deposit but reported no payment for it, so it is unclear whether "
+                          + "the claim happened. The deposit is still listed; check it before retrying.");
+            }
+
             return new SparkClaimDepositResult(
                 SparkPaymentMapper.Map(response.payment, _bolt11Parser), null);
         }
