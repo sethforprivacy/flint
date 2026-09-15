@@ -85,6 +85,59 @@ public interface ISparkUnilateralExitService
     Task<UnilateralExitOpResult> MarkCompletedAsync(string storeId, string recordId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Asks the chain how far a built exit has got, refreshes the record's stored transaction statuses from the
+    /// answer, and reports the SDK's verdict on the caller's result.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Safe to call as often as an operator likes: it broadcasts nothing and signs nothing.</b> It reads the
+    /// chain and nothing else — no wallet, no leaves, no funding, no signer — which is what makes a built exit
+    /// followable from a stored record alone, days after the build, on a plugin that has been restarted since.
+    /// </para>
+    /// <para>
+    /// The refreshed transactions are persisted in place of the stored set, replacing the statuses with what the
+    /// chain now reports. The <see cref="SparkExitVerdict"/> is deliberately <b>not</b> persisted: it is derived
+    /// state, recomputed by the SDK from the chain on every call, and a stored copy would be a claim about the
+    /// chain that goes stale the moment it is written — an operator would see "on track" on a page rendered from
+    /// a row nothing has refreshed. It travels back on <see cref="UnilateralExitOpResult.Verdict"/> instead.
+    /// </para>
+    /// <para>
+    /// Refused for anything that is not <see cref="UnilateralExitStatus.Built"/>: there is no transaction set to
+    /// check before a build, and nothing to say about one after it has been completed or abandoned.
+    /// </para>
+    /// </remarks>
+    Task<UnilateralExitOpResult> CheckAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Stores an exported unilateral-exit backup blob on the store's exit settings, or clears it when the
+    /// argument is null or blank.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The blob is sensitive and must never be logged or rendered.</b> It carries every leaf of the wallet and
+    /// the transactions under them, so it discloses the balance, how that balance is split and what the wallet
+    /// has received and spent. Anything that shows it — an error message, a log line, a page — leaks the
+    /// store's financial history to whoever can read that surface.
+    /// </para>
+    /// <para>
+    /// <b>The format is not validated here, deliberately.</b> It is the SDK's own opaque encoding and the SDK is
+    /// the only thing that can judge whether a value is usable; a validator invented on this side would reject
+    /// valid backups from a future SDK, which is the one input that has to keep working — the operator pasting it
+    /// is doing so because the wallet's own storage is already lost. Only an absurd size is refused, because the
+    /// SDK documents a real wallet's backup as reaching several megabytes, so a value past the cap is a paste
+    /// error rather than a backup.
+    /// </para>
+    /// </remarks>
+    /// <param name="exitState">The exported blob, or null/blank to clear what is stored.</param>
+    Task<UnilateralExitOpResult> SetExitStateBackupAsync(
+        string storeId,
+        string? exitState,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Stores the explorer override used for funding discovery. Null or blank clears it. This is the
     /// feature's one piece of real configuration, so it is settable from the page that reports it
     /// missing; validation (absolute http/https URL) is here, not in the controller.
@@ -97,7 +150,17 @@ public interface ISparkUnilateralExitService
 /// exactly when <paramref name="Success"/> is false; <paramref name="Record"/> is the record the
 /// attempt created or updated, when one exists either way.
 /// </summary>
-public sealed record UnilateralExitOpResult(bool Success, string? Error, UnilateralExitRecord? Record);
+/// <remarks>
+/// <see cref="Verdict"/> is set by <see cref="ISparkUnilateralExitService.CheckAsync"/> and by nothing
+/// else; every other path leaves it null, which is why it defaults. It is a <b>snapshot of the chain at
+/// the moment of the call</b> and is deliberately not persisted — the SDK recomputes it from the chain
+/// on every check, so a stored copy would be a stale claim about the chain rendered as if it were live.
+/// </remarks>
+public sealed record UnilateralExitOpResult(
+    bool Success,
+    string? Error,
+    UnilateralExitRecord? Record,
+    SparkExitVerdict? Verdict = null);
 
 /// <summary>
 /// Everything the exit page renders in one read. The service is the only reader and writer of the
@@ -133,6 +196,12 @@ public sealed record UnilateralExitOpResult(bool Success, string? Error, Unilate
 /// True when a built record's transaction column could not be read back as a well-formed set — malformed
 /// syntax or structurally null members. The page renders that as an explanation, never as an exception.
 /// </param>
+/// <param name="PendingBroadcast">
+/// The subset of <paramref name="Transactions"/> whose status says it may be broadcast right now, in the
+/// SDK's own order — the transactions the page tells the operator to send, and the reason it exists is that
+/// a built exit runs to a dozen rows of which at most one or two are actionable at any moment. Null when
+/// there is no built set, or when the set read back was empty.
+/// </param>
 public sealed record UnilateralExitPageData(
     bool WalletRunning,
     bool DisclosureAcknowledged,
@@ -144,4 +213,5 @@ public sealed record UnilateralExitPageData(
     int? LeafCount,
     string? FundingKeyPath,
     IReadOnlyList<SparkExitTransaction>? Transactions,
-    bool TransactionsUnreadable);
+    bool TransactionsUnreadable,
+    IReadOnlyList<SparkExitTransaction>? PendingBroadcast);

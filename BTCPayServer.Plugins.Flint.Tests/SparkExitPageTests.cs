@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
@@ -290,7 +289,9 @@ public class SparkExitPageTests
         Assert.Equal("cpfphex", node.CpfpTxHex);
         Assert.Equal(144u, node.CsvTimelockBlocks);
         Assert.Equal(["aa11"], node.DependsOn);
-        Assert.Equal(SparkExitTxStatus.Unconfirmed, node.Status);
+        // The readiness travels with the transaction and is what the page switches on to say whether it may be
+        // broadcast yet — the difference between "send this package" and "wait for the timelock".
+        Assert.Equal(SparkExitTxReadiness.Waiting, node.Status.Readiness);
     }
 
     [Fact]
@@ -335,6 +336,50 @@ public class SparkExitPageTests
         Assert.False(model.TransactionsUnreadable);
     }
 
+    /// <summary>
+    /// The transactions that may be sent right now reach the page as their own list, in the SDK's order.
+    /// </summary>
+    /// <remarks>
+    /// <b>A built exit is a dozen rows of which one or two are ever actionable, and the page leads with them.</b>
+    /// The service computes the subset from each transaction's readiness; the controller's only job is to carry
+    /// it across. Collapsing it away — or worse, substituting the whole set — would put a "send these now" block
+    /// on screen listing a transaction whose timelock has not matured, and the operator would broadcast it and be
+    /// rejected by the network with no explanation the page had not already given them.
+    /// </remarks>
+    [Fact]
+    public async Task The_actionable_slice_of_a_built_exit_reaches_the_page_in_order()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var record = Built();
+        var transactions = SignedExit();
+        var exit = new StubExitService
+        {
+            // Only the fan-out is ready; the node is waiting on its timelock, which is the state a set is in one
+            // block after the fan-out confirms.
+            Page = Page(
+                activeRecord: record,
+                transactions: transactions,
+                pendingBroadcast: [transactions[0]])
+        };
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+
+        Assert.NotNull(model.PendingBroadcast);
+        var ready = Assert.Single(model.PendingBroadcast!);
+        Assert.Equal("aa11", ready.Txid);
+        Assert.True(ready.Status.CanBroadcast);
+        // The full set is still there, so the table below can show what is waiting and what it waits for.
+        Assert.Equal(2, model.Transactions.Count);
+
+        // And the page renders the slice as a send-now block rather than a second copy of the table.
+        var view = ExitTemplate();
+        Assert.Contains("Model.PendingBroadcast is { Count: > 0 } pending", view);
+        Assert.Contains("id=\"SparkExitPendingBroadcast\"", view);
+    }
+
     #endregion
 
     #region What the template does with it
@@ -359,26 +404,40 @@ public class SparkExitPageTests
     {
         // The hex is enough on its own to move this store's balance to the destination already baked into it,
         // so it belongs to whoever may modify the store, not to whoever may read the page. Asserted
-        // structurally — the wrapper has to open immediately before the table — because a `permission`
+        // structurally — the table has to sit inside a permission-wrapped region — because a `permission`
         // attribute somewhere else in the file would satisfy a plain Contains while leaving the hex public.
         var view = ExitTemplate();
 
-        Assert.Matches(
-            new Regex(
-                "<div permission=\"@Policies\\.CanModifyStoreSettings\">\\s*"
-                + "<table class=\"table\" id=\"SparkExitTransactions\""),
-            view);
+        // The wrapper opens at the table's own permission guard and closes at the nearest matching `</div>`
+        // after it. The actionable-slice block that now sits between them is inside the same guard, which is
+        // what this pins: it renders the same hex, so it cannot be outside it.
+        var tableAt = view.IndexOf("<table class=\"table\" id=\"SparkExitTransactions\"", StringComparison.Ordinal);
+        Assert.InRange(tableAt, 0, view.Length);
+
+        var wrapper = view.LastIndexOf(
+            "<div permission=\"@Policies.CanModifyStoreSettings\">", tableAt, StringComparison.Ordinal);
+        Assert.InRange(wrapper, 0, tableAt);
+
+        // The wrapper's own matching close, by counting nested `<div>`s — a bare IndexOf("</div>") would find the
+        // first nested div and stop short of the rows it is meant to bound.
+        var closeAt = MatchingClose(view, wrapper);
+        Assert.InRange(closeAt, tableAt, view.Length);
 
         // And view-only access gets told why the table is missing rather than being shown an empty page.
         Assert.Contains("id=\"SparkExitTransactionsRestricted\"", view);
         Assert.Contains("not-permission=\"@Policies.CanModifyStoreSettings\"", view);
 
-        // Every id that carries hex or a command lives after the wrapper opens and before it closes.
-        var wrapper = view.IndexOf(
-            "<div permission=\"@Policies.CanModifyStoreSettings\">", StringComparison.Ordinal);
-        Assert.InRange(wrapper, 0, view.Length);
-        foreach (var carrier in new[] { "SparkExitPackage@step", "SparkExitTxHex@step", "SparkExitCpfpHex@step" })
-            Assert.True(view.IndexOf(carrier, StringComparison.Ordinal) > wrapper, carrier);
+        // Every id that carries hex or a command lives after the wrapper opens, and before the wrapper's own
+        // close — including the "send these now" slice, which renders a broadcast command of its own.
+        foreach (var carrier in new[]
+                 {
+                     "SparkExitPackage@step", "SparkExitTxHex@step", "SparkExitCpfpHex@step",
+                     "SparkExitPendingBroadcast"
+                 })
+        {
+            var at = view.IndexOf(carrier, StringComparison.Ordinal);
+            Assert.InRange(at, wrapper, closeAt);
+        }
     }
 
     [Fact]
@@ -648,7 +707,8 @@ public class SparkExitPageTests
         int? leafCount = null,
         string? fundingKeyPath = null,
         IReadOnlyList<SparkExitTransaction>? transactions = null,
-        bool transactionsUnreadable = false) =>
+        bool transactionsUnreadable = false,
+        IReadOnlyList<SparkExitTransaction>? pendingBroadcast = null) =>
         new(
             walletRunning,
             disclosureAcknowledged,
@@ -660,7 +720,8 @@ public class SparkExitPageTests
             leafCount,
             fundingKeyPath,
             transactions,
-            transactionsUnreadable);
+            transactionsUnreadable,
+            pendingBroadcast);
 
     private static UnilateralExitRecord AwaitingFunding() => new()
     {
@@ -685,14 +746,20 @@ public class SparkExitPageTests
     }
 
     /// <summary>
-    /// A minimal but shaped-like-the-real-thing exit: a fan-out that broadcasts alone, and one tree node that
-    /// only works as a package with its CPFP child.
+    /// A minimal but shaped-like-the-real-thing exit: a fan-out that broadcasts alone and is ready to go, and
+    /// one tree node that only works as a package with its CPFP child and is still waiting on its timelock.
     /// </summary>
+    /// <remarks>
+    /// The two statuses differ on purpose, because a set where everything shares one readiness cannot express
+    /// the thing the page exists to render: which of a dozen rows an operator may send right now, and which they
+    /// have to wait for.
+    /// </remarks>
     private static SparkExitTransaction[] SignedExit() =>
     [
-        new(SparkExitTxKind.Fanout, null, "aa11", "fanouthex", null, null, [], SparkExitTxStatus.Unconfirmed),
+        new(SparkExitTxKind.Fanout, null, "aa11", "fanouthex", null, null, [],
+            new SparkExitTxStatus(SparkExitTxReadiness.Ready)),
         new(SparkExitTxKind.TreeNode, "node-1", "bb22", "nodehex", "cpfphex", 144u, ["aa11"],
-            SparkExitTxStatus.Unconfirmed)
+            new SparkExitTxStatus(SparkExitTxReadiness.Waiting, SpendableAtHeight: 812_345))
     ];
 
     /// <summary>
@@ -735,7 +802,8 @@ public class SparkExitPageTests
         public UnilateralExitPageData Page { get; set; } =
             new(WalletRunning: true, DisclosureAcknowledged: false, BalanceSats: 0,
                 ActiveRecord: null, History: [], FundingReceivedSat: null, FundingLargestOutputSat: null,
-                LeafCount: null, FundingKeyPath: null, Transactions: null, TransactionsUnreadable: false);
+                LeafCount: null, FundingKeyPath: null, Transactions: null, TransactionsUnreadable: false,
+                PendingBroadcast: null);
 
         public UnilateralExitOpResult Result { get; set; } = new(true, null, null);
 
@@ -786,12 +854,61 @@ public class SparkExitPageTests
             return Task.FromResult(Result);
         }
 
+        public Task<UnilateralExitOpResult> CheckAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default)
+        {
+            Calls.Add($"Check:{recordId}");
+            return Task.FromResult(Result);
+        }
+
+        public Task<UnilateralExitOpResult> SetExitStateBackupAsync(
+            string storeId, string? exitState, CancellationToken cancellationToken = default)
+        {
+            Calls.Add($"ExitState:{exitState ?? "(null)"}");
+            return Task.FromResult(Result);
+        }
+
         public Task<UnilateralExitOpResult> SetExplorerUrlAsync(
             string storeId, string? esploraApiUrl, CancellationToken cancellationToken = default)
         {
             Calls.Add($"Explorer:{esploraApiUrl ?? "(null)"}");
             return Task.FromResult(Result);
         }
+    }
+
+    /// <summary>
+    /// The offset of the <c>&lt;/div&gt;</c> that closes the <c>&lt;div&gt;</c> opening at
+    /// <paramref name="divStart"/>.
+    /// </summary>
+    /// <remarks>
+    /// Depth-counted rather than a bare search for the next close tag, because the region being bounded contains
+    /// nested divs of its own — and a structural assertion that stopped at the first one would pass while the
+    /// markup it is meant to bound sat outside the guard.
+    /// </remarks>
+    private static int MatchingClose(string view, int divStart)
+    {
+        var depth = 0;
+        for (var i = divStart; i < view.Length;)
+        {
+            var open = view.IndexOf("<div", i, StringComparison.Ordinal);
+            var close = view.IndexOf("</div>", i, StringComparison.Ordinal);
+            if (close < 0)
+                return -1;
+
+            if (open >= 0 && open < close)
+            {
+                depth++;
+                i = open + 4;
+                continue;
+            }
+
+            if (--depth == 0)
+                return close;
+
+            i = close + 6;
+        }
+
+        return -1;
     }
 
     /// <summary>The exit template's own text, for the assertions no unrendered view model can carry.</summary>

@@ -56,4 +56,39 @@ public class SparkAdvancedViewModel
     /// is what the form looks like when nothing was touched.
     /// </summary>
     public bool UseBuiltInKey { get; set; }
+
+    /// <summary>
+    /// Whether an exit-state backup is currently stored for this store.
+    /// </summary>
+    /// <remarks>
+    /// Presence only. <b>The stored blob is never rendered back into this page.</b> It carries every leaf and
+    /// its transactions for the wallet, so it discloses the balance, how that balance is split and the
+    /// wallet's history — it is the one blob in the plugin that is worth more to a reader than the account it
+    /// describes. An operator who wants a copy asks for a fresh export.
+    /// </remarks>
+    [BindNever]
+    public bool HasExitStateBackup { get; set; }
+
+    /// <summary>
+    /// A blob to store, inbound only. The stored blob is never written into this model.
+    /// </summary>
+    /// <remarks>
+    /// Outbound it is bound but never populated; empty posted to the set action clears the stored backup,
+    /// matching the explorer override's pattern. This is typed as string rather than annotated with
+    /// <c>[DataType]</c> because it is opaque to this page by design: nothing validates its shape here, since
+    /// whether it is a usable blob is settled by the SDK when it is imported.
+    /// </remarks>
+    [Display(Name = "Exit-state backup")]
+    public string? ExitStateBackup { get; set; }
+
+    /// <summary>
+    /// A freshly exported blob, for one render, so the operator can copy it.
+    /// </summary>
+    /// <remarks>
+    /// Its own field beside <see cref="HasExitStateBackup"/> so a render cannot confuse "a backup exists"
+    /// with "here is that backup": only the export action sets this, and what it sets is what the SDK just
+    /// returned.
+    /// </remarks>
+    [BindNever]
+    public string? ExportedExitState { get; set; }
 }

@@ -53,7 +53,8 @@ public class SparkSettingsSerializationTests
             UnilateralExit = new UnilateralExitSettings
             {
                 DisclosureAcknowledged = true,
-                EsploraApiUrl = "http://localhost:3002/api"
+                EsploraApiUrl = "http://localhost:3002/api",
+                ExitStateBackup = "opaque-sdk-backup-blob"
             }
         };
 
@@ -75,6 +76,9 @@ public class SparkSettingsSerializationTests
         Assert.Equal("bcrt1qtxwcjjvf4ny9wsw9emgnpazey2vde3xhnyqpw0", read.Sweep.StaticAddress);
         Assert.True(read.UnilateralExit.DisclosureAcknowledged);
         Assert.Equal("http://localhost:3002/api", read.UnilateralExit.EsploraApiUrl);
+        // The one field here whose loss is unrecoverable from anywhere else: it is the wallet's exit data, and
+        // without it a leaf cannot be forced on-chain once the Spark operators stop answering.
+        Assert.Equal("opaque-sdk-backup-blob", read.UnilateralExit.ExitStateBackup);
     }
 
     [Fact]
@@ -208,7 +212,8 @@ public class SparkSettingsSerializationTests
             UnilateralExit = new UnilateralExitSettings
             {
                 DisclosureAcknowledged = true,
-                EsploraApiUrl = "http://esplora.internal/api"
+                EsploraApiUrl = "http://esplora.internal/api",
+                ExitStateBackup = "opaque-sdk-backup-blob"
             }
         };
 
@@ -216,13 +221,18 @@ public class SparkSettingsSerializationTests
 
         Assert.True(clone.UnilateralExit.DisclosureAcknowledged);
         Assert.Equal("http://esplora.internal/api", clone.UnilateralExit.EsploraApiUrl);
+        Assert.Equal("opaque-sdk-backup-blob", clone.UnilateralExit.ExitStateBackup);
         Assert.NotSame(source.UnilateralExit, clone.UnilateralExit);
 
         clone.UnilateralExit.DisclosureAcknowledged = false;
         clone.UnilateralExit.EsploraApiUrl = "http://elsewhere/api";
+        clone.UnilateralExit.ExitStateBackup = null;
 
         Assert.True(source.UnilateralExit.DisclosureAcknowledged);
         Assert.Equal("http://esplora.internal/api", source.UnilateralExit.EsploraApiUrl);
+        // An alias here would mean clearing the backup on a clone that was rolled back cleared the real one too —
+        // and the backup is the only copy of the data an operator can exit a leaf with when the operators are gone.
+        Assert.Equal("opaque-sdk-backup-blob", source.UnilateralExit.ExitStateBackup);
     }
 
     [Fact]
@@ -235,7 +245,8 @@ public class SparkSettingsSerializationTests
             new[]
             {
                 nameof(UnilateralExitSettings.DisclosureAcknowledged),
-                nameof(UnilateralExitSettings.EsploraApiUrl)
+                nameof(UnilateralExitSettings.EsploraApiUrl),
+                nameof(UnilateralExitSettings.ExitStateBackup)
             },
             typeof(UnilateralExitSettings)
                 .GetProperties(BindingFlags.Public | BindingFlags.Instance)

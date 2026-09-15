@@ -370,7 +370,8 @@ public sealed class SparkSurfaceHarness
                     LeafCount: null,
                     FundingKeyPath: null,
                     Transactions: null,
-                    TransactionsUnreadable: false));
+                    TransactionsUnreadable: false,
+                    PendingBroadcast: null));
 
         public Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
             string storeId, CancellationToken cancellationToken = default) => Task.FromResult(Refused);
@@ -391,6 +392,14 @@ public sealed class SparkSurfaceHarness
 
         public Task<UnilateralExitOpResult> MarkCompletedAsync(
             string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> CheckAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> SetExitStateBackupAsync(
+            string storeId, string? exitState, CancellationToken cancellationToken = default) =>
             Task.FromResult(Refused);
 
         public Task<UnilateralExitOpResult> SetExplorerUrlAsync(

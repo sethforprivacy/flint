@@ -1080,6 +1080,19 @@ public class SparkSettlementReconcilerTests
                 feeRateSatPerVbyte, destinationAddress, leafIds, fundingUtxos, fundingSecretKey, approveQuote,
                 cancellationToken);
 
+        public Task<SparkExitProgress> CheckUnilateralExitAsync(
+            SparkExitResult exit,
+            CancellationToken cancellationToken = default) =>
+            _inner.CheckUnilateralExitAsync(exit, cancellationToken);
+
+        public Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default) =>
+            _inner.ExportUnilateralExitStateAsync(cancellationToken);
+
+        public Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+            string exitState,
+            CancellationToken cancellationToken = default) =>
+            _inner.ImportUnilateralExitStateAsync(exitState, cancellationToken);
+
         public Task DisconnectAsync() => _inner.DisconnectAsync();
 
         public void Dispose() => _inner.Dispose();

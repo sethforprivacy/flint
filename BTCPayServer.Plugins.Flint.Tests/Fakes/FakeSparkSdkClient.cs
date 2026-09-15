@@ -1207,6 +1207,100 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>Every build this fake has been asked for, in order.</summary>
     public List<ExitBuildCall> ExitBuildCalls { get; } = [];
 
+    /// <summary>Every check this fake has been asked for, in order.</summary>
+    public List<ExitCheckCall> ExitCheckCalls { get; } = [];
+
+    /// <summary>Every export this fake has been asked for, in order.</summary>
+    public List<string> ExitExportCalls { get; } = [];
+
+    /// <summary>Every import this fake has been asked for, in order, with the blob it was handed.</summary>
+    public List<string> ExitImportCalls { get; } = [];
+
+    /// <summary>
+    /// The status the build gives every transaction it hands back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Defaults to <see cref="SparkExitTxReadiness.Ready"/>, not to a single "unconfirmed".</b> SDK 0.25
+    /// replaced the flat status enum with a union because the useful question stopped being "is it mined" and
+    /// became "may I broadcast it yet", so one status for the whole set is precisely the shape that cannot
+    /// express the states the page and the service now have to handle. A test that wants a mixed set — some
+    /// ready, some waiting on a timelock at a known height, some confirmed — sets this per case.
+    /// </para>
+    /// <para>
+    /// The transaction whose readiness differs most usefully is the tree node: it is the one with a CSV timelock,
+    /// so <see cref="ExitReadiness"/> set to <see cref="SparkExitTxReadiness.Waiting"/> with
+    /// <see cref="ExitSpendableAtHeight"/> is what a real set looks like one block after the fan-out confirms.
+    /// </para>
+    /// </remarks>
+    public SparkExitTxReadiness ExitReadiness { get; set; } = SparkExitTxReadiness.Ready;
+
+    /// <summary>
+    /// When set, the build returns the quote's leaves but <b>no transactions at all</b>.
+    /// </summary>
+    /// <remarks>
+    /// This is a distinct state from an empty <em>quote</em>, and the difference is the whole point. An empty
+    /// quote means the leaves the operator pinned are no longer in the wallet, which is a refusal. An empty
+    /// transaction set means the leaves are still there and the SDK has already seen every step this exit
+    /// planned confirm on chain — a resumed build with nothing left to do, which is a success. Reproducing it
+    /// means keeping <see cref="ExitLeaves"/> populated while suppressing the set, so a caller cannot confuse
+    /// the two.
+    /// </remarks>
+    public bool ExitBuildsNoTransactions { get; set; }
+
+    /// <summary>Block height stamped on a <see cref="SparkExitTxReadiness.Confirmed"/> transaction.</summary>
+    public uint? ExitConfirmedAtHeight { get; set; }
+
+    /// <summary>Height stamped on a <see cref="SparkExitTxReadiness.Waiting"/> transaction.</summary>
+    public uint? ExitSpendableAtHeight { get; set; }
+
+    /// <summary>
+    /// The verdict <see cref="CheckUnilateralExitAsync"/> reports, overriding <see cref="NextCheckVerdict"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SparkExitVerdict.Valid"/> and deliberately <b>not</b> <see cref="SparkExitVerdict.Done"/>: a
+    /// check whose default answer is "this exit is finished" would let a caller treat every refresh as success
+    /// without ever reading the verdict, and no test would catch it. "On track" is the unremarkable answer; a
+    /// test that wants Done asks for it.
+    /// </remarks>
+    public SparkExitVerdict CheckVerdict { get; set; } = SparkExitVerdict.Valid;
+
+    /// <summary>
+    /// Consumed once by the next <see cref="CheckUnilateralExitAsync"/>, then cleared, so a test can script
+    /// Valid → Done across two refreshes of the same exit.
+    /// </summary>
+    public SparkExitVerdict? NextCheckVerdict { get; set; }
+
+    /// <summary>Thrown by a check when set, instead of answering.</summary>
+    public Exception? FailCheckWith { get; set; }
+
+    /// <summary>Thrown by an export when set, instead of answering.</summary>
+    public Exception? FailExportWith { get; set; }
+
+    /// <summary>Thrown by an import when set, instead of answering.</summary>
+    public Exception? FailImportWith { get; set; }
+
+    /// <summary>
+    /// The blob <see cref="ExportUnilateralExitStateAsync"/> hands back.
+    /// </summary>
+    /// <remarks>
+    /// A short opaque string by default, because that is all any caller may do with it: the format is the SDK's
+    /// own and nothing in the plugin may interpret it. A test that asserted on its shape would be pinning an
+    /// encoding this side is not allowed to know.
+    /// </remarks>
+    public string ExitStateToExport { get; set; } = "exit-state-blob";
+
+    /// <summary>
+    /// What <see cref="ImportUnilateralExitStateAsync"/> reports having restored.
+    /// </summary>
+    /// <remarks>
+    /// All zeros by default, so <see cref="SparkExitStateImport.RestoredNothing"/> is true for a test that did
+    /// not configure it. That is the answer a caller must not render as "your backup is in place":
+    /// <c>ImportUnilateralExitStateResponse</c> with nothing imported is a perfectly successful call that
+    /// restored nothing, and a fake defaulting to a cheerful count would hide a caller that never read it.
+    /// </remarks>
+    public SparkExitStateImport ExitStateImportResult { get; set; } = new(0, 0, 0, 0);
+
     /// <summary>Thrown by a prepare when set, before any quote is produced.</summary>
     public Exception? FailExitQuoteWith { get; set; }
 
@@ -1287,11 +1381,23 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
 
         // Signed and inert. Nothing in this fake, and nothing in the real SDK, broadcasts any of it.
+        //
+        // The shape is the real one: a fan-out that goes out first and alone, one tree node per leaf carrying a
+        // CPFP child and the CSV timelock, and a sweep that depends on every node. Each transaction's status is
+        // derived from ExitReadiness rather than fixed, because a set where everything reports the same readiness
+        // cannot express what the page has to render: at most the fan-out is broadcastable and everything below
+        // it is waiting on a confirmation or a timelock.
+        // A resumed build whose every planned step is already confirmed on chain hands back no transactions at all.
+        // The leaves come back with the quote, so this is distinguishable from "the leaves are gone" — which is
+        // the case the caller refuses on.
+        if (ExitBuildsNoTransactions)
+            return Task.FromResult(new SparkExitResult(
+                quote.RecoverableValueSat, quote.TotalFeeSat, [], quote.Leaves));
+
         var sweepDependsOn = quote.Leaves.Select(leaf => $"txid:node:{leaf.LeafId}").ToList();
         var transactions = new List<SparkExitTransaction>
         {
-            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [],
-                SparkExitTxStatus.Unconfirmed)
+            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [], ExitStatus())
         };
 
         transactions.AddRange(quote.Leaves.Select(leaf => new SparkExitTransaction(
@@ -1304,14 +1410,78 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             $"0200cpfp{leaf.LeafId}",
             1_008,
             ["txid:fanout"],
-            SparkExitTxStatus.Unconfirmed)));
+            ExitStatus())));
 
         transactions.Add(new SparkExitTransaction(
-            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn,
-            SparkExitTxStatus.Unconfirmed));
+            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn, ExitStatus()));
 
         return Task.FromResult(new SparkExitResult(
             quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
+    }
+
+    /// <summary>One transaction status, derived from the readiness this fake is configured with.</summary>
+    /// <remarks>
+    /// The two heights travel with the readiness exactly as the SDK reports them, and each is attached only to
+    /// the case it belongs to — a <c>Confirmed</c> transaction with a <c>spendableAtHeight</c> or a waiting one
+    /// with a block height is a shape the union cannot produce.
+    /// </remarks>
+    private SparkExitTxStatus ExitStatus() => ExitReadiness switch
+    {
+        SparkExitTxReadiness.Confirmed => new SparkExitTxStatus(
+            SparkExitTxReadiness.Confirmed, BlockHeight: ExitConfirmedAtHeight),
+        SparkExitTxReadiness.Waiting => new SparkExitTxStatus(
+            SparkExitTxReadiness.Waiting, SpendableAtHeight: ExitSpendableAtHeight),
+        _ => new SparkExitTxStatus(ExitReadiness)
+    };
+
+    public Task<SparkExitProgress> CheckUnilateralExitAsync(
+        SparkExitResult exit,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ArgumentNullException.ThrowIfNull(exit);
+        ExitCheckCalls.Add(new ExitCheckCall(exit));
+
+        if (FailCheckWith is not null)
+            throw FailCheckWith;
+
+        // Consumed once, so a test can script Valid → Done across two refreshes rather than flipping the
+        // memorable property and losing the first answer.
+        var verdict = NextCheckVerdict ?? CheckVerdict;
+        NextCheckVerdict = null;
+
+        // The transactions are handed back with this fake's configured readiness rather than with the statuses
+        // they came in with, which is what the SDK does: it reads the chain and replaces them. A check that
+        // echoed its input would let a caller appear to refresh the stored set without the read ever happening.
+        return Task.FromResult(new SparkExitProgress(
+            verdict,
+            exit.RecoverableValueSat,
+            exit.TotalFeeSat,
+            exit.Transactions
+                .Select(transaction => transaction with { Status = ExitStatus() })
+                .ToList()));
+    }
+
+    public Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ExitExportCalls.Add("export");
+
+        return FailExportWith is not null
+            ? Task.FromException<string>(FailExportWith)
+            : Task.FromResult(ExitStateToExport);
+    }
+
+    public Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+        string exitState,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ExitImportCalls.Add(exitState);
+
+        return FailImportWith is not null
+            ? Task.FromException<SparkExitStateImport>(FailImportWith)
+            : Task.FromResult(ExitStateImportResult);
     }
 
     /// <remarks>
@@ -1353,6 +1523,14 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         List<SparkExitFundingUtxo> FundingUtxos,
         int FundingSecretKeyLength,
         string? Rejection);
+
+    /// <summary>One <see cref="CheckUnilateralExitAsync"/> call, with the whole exit it was handed.</summary>
+    /// <remarks>
+    /// The reconstruction, not just a count. What the SDK is handed is the plugin's own record rebuilt into the
+    /// SDK's response, and "the check was called" says nothing about whether the thing it was asked to judge
+    /// still had its transactions in it.
+    /// </remarks>
+    public sealed record ExitCheckCall(SparkExitResult Exit);
 
     #endregion
 
