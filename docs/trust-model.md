@@ -5,13 +5,41 @@
 Spark is a 2-of-3 statechain system operated by Lightspark, Breez and Flashnet. Funds held on Spark
 are not held in your own custody in the way an on-chain UTXO or a Lightning channel you own is:
 every Lightning receive rides Lightspark's service provider, and unilateral exit is a multi-day last
-resort that requires reachable operators and an external UTXO. Keeping the auto-sweep threshold low
+resort that needs an external UTXO and an exit-state backup taken while the operators were still
+reachable. Keeping the auto-sweep threshold low
 is the best available mitigation, since it bounds how much is ever exposed on the L2.
 
-The plugin performs **cooperative exits only** (owner decision). It offers no unilateral-exit path, so if the
-Spark operators were to become unavailable or refuse to process an exit, recovering funds would mean using
-the store's recovery phrase with another Spark wallet implementation. Set the sweep threshold according to
-how much you are willing to have depend on those operators; sweeping is the only thing that reduces it.
+Every sweep this plugin makes is a **cooperative exit**, and that is the only automated path off Spark: the
+operators build and broadcast one Bitcoin transaction for a flat fee, and it lands in seconds. Set the sweep
+threshold according to how much you are willing to have depend on those operators; sweeping is the only thing
+that reduces it.
+
+There is now an **experimental unilateral exit**, and it is deliberately hard to reach: it appears on the
+store's Advanced page only when the server operator sets `FLINT_EXPERIMENTAL_UNILATERAL_EXIT=1` in BTCPay's
+environment, and without that variable the page shows nothing and the routes do not exist. Read what it is
+before counting on it:
+
+- **The plugin never broadcasts.** It asks the SDK to build and sign the statechain's timelocked transaction
+  tree and then shows you the raw transactions; pushing them, in dependency order, with `submitpackage` where
+  a transaction and its fee-bumping child go together, is your job.
+- **It works with the operators gone only if you prepared.** An exit is quoted and built from data the SDK
+  holds locally, so it no longer needs the operators to be reachable — but only for leaves whose data was
+  collected while they still were. The exit-state backup on the Advanced page is that copy: a wallet whose
+  own storage is lost and has no backup cannot rebuild its exit data from anywhere once the operators are
+  gone, and a leaf is only exitable this way once its chain has been synced at least once.
+- **You have to fund it on-chain first.** The tree transactions cannot pay their own fees, so the exit is
+  bumped by CPFP from a native-SegWit UTXO you send to an address the plugin derives from the store's seed at
+  its own hardened account. Too little there and nothing gets built.
+- **It settles in days, not seconds.** The outputs are behind CSV timelocks measured in blocks; the money is
+  spendable when the last one expires, not when the transactions are signed. That window has a cost: about 50
+  blocks after a step becomes valid, Spark's watchtowers can broadcast their own version of that step, whose
+  fee comes out of the leaf rather than the funding UTXO — so a step left unbroadcast for a day or more pays
+  part of its own cost out of the money being recovered. The exit page reports each step's readiness, and the
+  operator is expected to check it daily.
+
+So it is a last resort that costs days and attention, not a second sweep destination. If the operators
+became unavailable and this path did not get you out, recovering funds still means using the store's recovery
+phrase with another Spark wallet implementation.
 
 **Stable Balance adds a second counterparty, and a different kind.** Holding the store's balance in USDB
 means holding a token issued by a regulated stablecoin issuer whose metadata says it is **freezable**: the

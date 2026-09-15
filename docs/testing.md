@@ -273,6 +273,26 @@ plugin's fee guard correctly refuses any remainder much smaller than that, which
 after the sweep test. Without it the leftover is stranded in a wallet whose storage `down.sh` destroys, and
 one measured pair of runs took the SSP from 500,000 to 382,000.
 
+**`Category=LocalRegtestExit` is the exception, and it is not revenue-neutral.** That category holds the
+end-to-end unilateral exit (`SparkLocalRegtestExitTests`), which runs the whole exit against real operators:
+it quotes, derives and funds the plugin's CPFP key from `bitcoind`, builds and signs, then broadcasts the
+transactions exactly as the exit page instructs — fan-out and sweep alone, tree nodes as packages via
+`submitpackage`, mining between rounds so every CSV timelock matures — and asserts the destination address
+receives `recoverable + unspent funding − total fee`. It passes in CI in about 1m 40s.
+
+It costs the SSP a whole wallet, because an exit converts that wallet's balance to on-chain Bitcoin at a
+destination address and the return leg cannot undo that. Measured: repeated runs take a stack from 500,000
+to 0 in a handful of runs, after which fixture setup fails with `amount cannot be represented by available
+leaves without creating a child below the configured split floor`. Hence teardown does not restore it and
+`local-regtest.yml` tops the SSP up explicitly before running the category. Locally, top up with
+`cashu-regtest/docker-scripts.sh`'s `cashu-spark-fund-ssp` (500,000 per call) before each run.
+
+It is also deliberately separated in CI rather than folded into `Category=LocalRegtest`, for two measured
+reasons: it cannot share the suite's wallet (it exits the balance, and whichever ran first would decide
+whether the other tests had any money), and it cannot share the *stack* (a second wallet funded from the
+same SSP while the suite ran produced a failure in the suite's Lightning send, reported as `Error:` with an
+empty message). So it runs as its own step, after the suite and after the top-up.
+
 Observed figures from a green run, for calibration: 150,000 sats deposited, **140,100 credited** (a
 9,900-sat claim fee at ~100 sat/vB, auto-claimed by the SDK's own worker), and a sweep of 125,100 delivering
 105,400 for a **19,700-sat exit fee** — 18.7% of what the destination received, inside the store's 40%

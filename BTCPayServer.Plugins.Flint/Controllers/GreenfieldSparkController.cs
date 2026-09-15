@@ -59,6 +59,7 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// <b>Exit paths.</b> Every sweep this API can cause is a cooperative exit, by owner decision. There is no
 /// unilateral-exit endpoint, no parameter that selects one, and no way to
 /// reach one; "drain" in the sweep settings means the SDK's <c>FeesIncluded</c> fee policy and nothing else.
+/// The plugin's experimental unilateral-exit flow is deliberately UI-only and stays unreachable from here.
 /// </para>
 /// <para>
 /// <b>Not on the graph BTCPay builds at startup.</b> A controller is constructed per request, so nothing here
@@ -364,7 +365,7 @@ public class GreenfieldSparkController : ControllerBase
     /// minute and the engine re-quotes on a real sweep, so it is an estimate.
     /// </para>
     /// <para>
-    /// <b>Always a cooperative exit.</b> There is no parameter here or anywhere else in this plugin that selects a
+    /// <b>Always a cooperative exit.</b> There is no parameter here or anywhere else in this API that selects a
     /// unilateral exit.
     /// </para>
     /// <para>

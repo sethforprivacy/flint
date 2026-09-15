@@ -365,6 +365,193 @@ public interface ISparkSdkClient : IDisposable
 
     #endregion
 
+    #region Unilateral exit
+
+    /// <summary>
+    /// Quotes a unilateral exit — what a forced, non-cooperative withdrawal from the statechain would recover
+    /// and cost — without building or signing anything.
+    /// </summary>
+    /// <param name="feeRateSatPerVbyte">
+    /// The rate every transaction in the exit is built at. It is a single rate for the whole tree, so it also
+    /// decides which leaves are worth exiting at all, and there is no per-level override.
+    /// </param>
+    /// <param name="destinationAddress">
+    /// Where the final sweep pays. Validated by the SDK, not here; the caller is still expected to have parsed
+    /// it for the store's own network first, because a mainnet-shaped address is a valid regtest string.
+    /// </param>
+    /// <param name="leafIds">
+    /// Null or empty selects automatically (the SDK's <c>ExitLeafSelection.Auto</c>): the SDK picks whichever
+    /// leaves are worth exiting at this fee rate. Anything else pins the selection to exactly those leaves
+    /// (<c>Specific</c>), which is how a resume re-quotes the <em>same</em> exit — see
+    /// <see cref="SparkExitLeaf"/>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>An empty result is a normal answer.</b> With automatic selection the SDK returns no leaves at all when
+    /// nothing clears the fee rate, and that must reach the merchant as "nothing worth exiting right now"
+    /// rather than as a failure.
+    /// </para>
+    /// <para>
+    /// <b>Cheap, free of side effects, and made from what the wallet already holds locally.</b> Unlike the send
+    /// paths it reserves nothing, expires nothing and mints no quote id. Since SDK 0.25 it also reads each
+    /// leaf's pre-signed transaction chain out of local storage rather than from the operators, which is what
+    /// makes an exit quotable at all in the situation the feature exists for. What it cannot do is obtain that
+    /// data: a leaf can be exited this way only once its chain has been collected, which happens on
+    /// <see cref="SyncWalletAsync"/> and in the background as funds arrive.
+    /// </para>
+    /// <para>
+    /// The quote is a description of the wallet's tree at one moment and the tree moves as payments settle, so
+    /// a quote is not carried across a request boundary. <see cref="UnilateralExitAsync"/> takes its own.
+    /// </para>
+    /// </remarks>
+    Task<SparkExitQuote> PrepareUnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Quotes and then builds a unilateral exit in one call, giving the caller a veto on the quote in between.
+    /// Returns signed transactions and <b>broadcasts nothing</b>.
+    /// </summary>
+    /// <param name="leafIds">
+    /// As on <see cref="PrepareUnilateralExitAsync"/>. A build resuming a previously quoted exit passes the ids
+    /// the operator funded for, so the leaves and the funding requirement cannot drift apart underneath them.
+    /// </param>
+    /// <param name="fundingUtxos">
+    /// Confirmed P2WPKH outputs that will pay every fee in the exit. Must be non-empty. The SDK accepts
+    /// several and judges their combined value, but the reliable shape for a fresh exit is what
+    /// <see cref="SparkExitQuote.SingleUtxoFundingSat"/> quotes: <b>one</b> output of at least that amount,
+    /// which the SDK fans out across branches — the service layer passes exactly one for that reason. A
+    /// shortfall surfaces as <see cref="SparkExitFundingShortfallException"/>.
+    /// </param>
+    /// <param name="fundingSecretKey">
+    /// The private key for those outputs, used to build a one-shot signer for the CPFP transactions. Held only
+    /// for the duration of this call and never logged. The array is the caller's to own and is not cleared here.
+    /// </param>
+    /// <param name="approveQuote">
+    /// Called with the quote this build is about to commit to, and before anything is built. Return null to
+    /// proceed or a human-readable refusal, which is raised as <see cref="SparkExitRefusedException"/>. Must not
+    /// throw. This is where the "is this still worth doing" guard belongs: the quote passed here is the fresh
+    /// one, not whatever a page rendered minutes ago.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>Quote and build are one call, and since 0.25 that is a property of the SDK rather than a choice
+    /// here.</b> The prepared response is what the build consumes — it carries the tree walk the build works
+    /// from — so a caller cannot hold one across a request boundary even if it wanted to. The reason it would
+    /// not want to is unchanged: the leaf set is a function of the wallet's tree, which moves as payments
+    /// settle, so a build against a quote taken earlier can commit to a different set of leaves than the
+    /// operator funded for.
+    /// </para>
+    /// <para>
+    /// <b>Nothing is broadcast, by the SDK or by this plugin.</b> The returned transactions are signed and
+    /// inert; an operator pushes them out by hand. Which of them may go out <em>now</em> is read off each
+    /// transaction's <see cref="SparkExitTransaction.Status"/>, not derived here: since 0.25 the SDK reports
+    /// readiness per transaction (ready, waiting on a dependency, waiting on a timelock, already confirmed,
+    /// or unverifiable) and that is authoritative. That is also what makes the failure modes here benign:
+    /// every exception this can throw has moved no coins.
+    /// </para>
+    /// <para>
+    /// A later call is how a stuck exit is recovered. Because the SDK reads confirmed chain state, steps that
+    /// have already confirmed are not rebuilt, and everything still outstanding is rebuilt at the fee rate
+    /// passed here — which replaces the earlier version on the network. A partial or empty transaction set is
+    /// a valid outcome of that, not a failure.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="SparkExitRefusedException"><paramref name="approveQuote"/> returned a refusal.</exception>
+    /// <exception cref="SparkExitFundingShortfallException">
+    /// The funding outputs do not cover the exit's fees. Carries what the SDK said was needed.
+    /// </exception>
+    Task<SparkExitResult> UnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Asks the chain how far a built exit has got, and what to do about it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This reads the chain and nothing else</b> — no wallet, no leaves, no signer, no funding — which is
+    /// what makes an exit followable on a device that has lost everything but the stored response. An exit runs
+    /// for days, so this is called after each broadcast and whenever a page wants to show progress.
+    /// </para>
+    /// <para>
+    /// The statuses it reports <em>replace</em> the ones in <paramref name="exit"/>. The verdict is what the
+    /// caller switches on: <see cref="SparkExitVerdict.Valid"/> means carry on broadcasting whatever is ready,
+    /// <see cref="SparkExitVerdict.Done"/> means the money is at the destination address,
+    /// <see cref="SparkExitVerdict.Redo"/> means this transaction set can no longer finish as it stands and the
+    /// exit has to be quoted and built again from the same leaves. The funds are not lost in that case — they
+    /// are still in the tree, or in an output the plugin controls — but nothing can be salvaged from the stored
+    /// set, so a caller must not present "redo" as a pause.
+    /// </para>
+    /// <para>
+    /// A caller that has persisted the exit can rebuild the response this needs from its own record; see
+    /// <see cref="SparkExitResult"/>. Broadcasting an already-confirmed transaction is harmless, so a caller
+    /// never has to remember what it sent.
+    /// </para>
+    /// </remarks>
+    Task<SparkExitProgress> CheckUnilateralExitAsync(
+        SparkExitResult exit,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Exports the SDK's unilateral-exit backup blob for this wallet.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The transactions an exit is built from live in the SDK's local storage. While the operators are
+    /// reachable they can be fetched again, so a wallet restored from its seed rebuilds them; when that storage
+    /// is gone and the operators are unreachable they cannot be recovered from anywhere, and the leaves they
+    /// cover cannot be exited. This is the way to keep that data somewhere the wallet's own storage cannot take
+    /// with it, and it works for every leaf the wallet holds, not just the ones an exit has been quoted for.
+    /// </para>
+    /// <para>
+    /// <b>The value is sensitive and the caller owns protecting it.</b> Carrying every leaf and its
+    /// transactions, it discloses the wallet's balance, how that balance is split, and the history of what the
+    /// wallet received and spent. It can reach several megabytes. Whatever stores it has to encrypt it, and it
+    /// must never be logged or shown.
+    /// </para>
+    /// </remarks>
+    Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Puts an exported blob back into this wallet's storage.
+    /// </summary>
+    /// <param name="exitState">
+    /// A value from <see cref="ExportUnilateralExitStateAsync"/> on the <b>same network</b>, and the same
+    /// wallet: a leaf is taken only when the exit state records this wallet as its owner, and the rest are
+    /// reported back in <see cref="SparkExitStateImport.SkippedForeignLeaves"/>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// It does not contact the operators, so it works while they are unreachable — which is the whole point of
+    /// having the backup. A restart of the plugin does this on its own when a store has one configured.
+    /// </para>
+    /// <para>
+    /// Imports never make a leaf <em>less</em> exitable: an exported value carries no mark of when it was
+    /// taken, so the wallet keeps whatever usable exit data it already has and the imported copy is used only
+    /// for a leaf it has nothing for, and only when that copy is complete on its own.
+    /// <see cref="SparkExitStateImport.SkippedConflictingLeaves"/> is the one count that means data could not
+    /// be put back, because the copy disagrees with a node the wallet already holds on a value that cannot
+    /// change.
+    /// </para>
+    /// <para>
+    /// An out-of-date value can restore leaves that have since been spent, so the reported balance may read
+    /// high until the next sync reconciles it with the operators.
+    /// </para>
+    /// </remarks>
+    Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+        string exitState,
+        CancellationToken cancellationToken = default);
+
+    #endregion
+
     /// <summary>
     /// Detaches the event listener and stops the background sync loop.
     /// </summary>
