@@ -204,6 +204,41 @@ jobs:
           --configuration Release --no-build --filter "Category=LocalRegtest"
           --output Detailed
 
+      # The unilateral exit, in a step and a category of its own, and both halves of that are load-bearing.
+      #
+      # It cannot share the suite's wallet: this test exits the balance, because that is what an exit is, so on
+      # a shared fixture whichever ran first would decide whether the other tests had any money. Hence its own
+      # collection and its own 150,000-sat deposit.
+      #
+      # It cannot share the stack either, which is the less obvious half. A second wallet funded out of the
+      # same SSP while the main suite is running through it produced a measured failure in the suite's Lightning
+      # send — a payout reported as Error with an empty message — so this runs after the suite has finished
+      # rather than beside it.
+      #
+      # And it cannot rely on the suite's leftovers, because an exit converts its wallet to on-chain Bitcoin at
+      # a destination address: the fixture's return leg (which pays a wallet's remainder back over Lightning)
+      # cannot undo that, so each run permanently costs the SSP a wallet's worth. Hence the explicit top-up,
+      # which is the same command e2e/local-regtest/README.md documents under "Liquidity is the consumable".
+      # 500,000 per invocation; two leaves is what the README measured as the floor for a working suite, and
+      # this adds headroom for the exit on top.
+      - name: Top the SSP up for the exit test
+        run: |
+          set -euo pipefail
+          cd e2e/local-regtest/cashu-regtest
+          export COMPOSE_PROJECT_NAME=cashu COMPOSE_PROFILES=spark
+          # shellcheck disable=SC1091
+          . ./docker-scripts.sh
+          cashu-spark-fund-ssp
+          cashu-spark-fund-ssp
+
+      - name: Unilateral exit suite
+        env:
+          SPARK_LOCAL_REGTEST_NETWORK: ${{ github.workspace }}/e2e/local-regtest/network.json
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=LocalRegtestExit"
+          --output Detailed
+
       # Stage 2 starts here: the same stack, now with the product on top of it. e2e/btcpay/up.sh builds
       # the plugin, starts BTCPay Server + NBXplorer + Postgres joined to the fixture's own docker network
       # (so NBXplorer talks to the fixture's bitcoind), side-loads the plugin, provisions an admin, a store
