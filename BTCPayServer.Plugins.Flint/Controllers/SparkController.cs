@@ -1411,8 +1411,19 @@ public class SparkController : Controller
         };
 
         if (page.ActiveRecord is not { } record)
+        {
+            // Nothing in flight, so the quote form is what renders and its rate field is otherwise empty. The
+            // recommendation when the explorer gave one, and the plugin's own floor when it did not — off mainnet
+            // with no override, or an explorer that could not be read. Either way the operator gets a rate to
+            // quote at rather than a field they have to fill in blind, and either way they can type another one.
+            model.FeeRateSatPerVbyte = page.RecommendedFeeRateSatPerVbyte
+                                       ?? SparkUnilateralExitService.DefaultFeeRateSatPerVbyte;
             return model;
+        }
 
+        // A record wins, and it is not a preference: this field is pre-filled with the rate the exit in front of
+        // the operator was actually quoted and funded at. A market rate that has moved since would offer them a
+        // number the record's own quote — and any transaction built from it — does not honour.
         model.FeeRateSatPerVbyte = record.FeeRateSatPerVbyte;
         model.DestinationAddress = record.DestinationAddress;
 

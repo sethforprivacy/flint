@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -128,6 +129,18 @@ public sealed class SparkExitFundingExplorer
     /// </remarks>
     public const long MaxResponseBytes = 4L * 1024 * 1024;
 
+    /// <summary>
+    /// How long a recommended fee rate is reused before the explorer is asked for another one.
+    /// </summary>
+    /// <remarks>
+    /// <b>Cached rather than fetched per render, because the exit page is a GET that any store viewer can reload in
+    /// a loop.</b> A rate is not a per-viewer fact, and a third party's endpoint should not see one request per page
+    /// view — nor should a page wait on the network when it already holds an answer from moments ago. Five minutes
+    /// is about one block: short enough that the number still tracks a moving market, long enough that an operator
+    /// reloading the page is answered from memory.
+    /// </remarks>
+    public static readonly TimeSpan RecommendedFeeRateTtl = TimeSpan.FromMinutes(5);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         // esplora spells everything lower case; being insensitive also survives an instance that does not.
@@ -135,13 +148,33 @@ public sealed class SparkExitFundingExplorer
     };
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<SparkExitFundingExplorer> _logger;
 
+    /// <summary>
+    /// The recommended rate last read from each explorer URL.
+    /// </summary>
+    /// <remarks>
+    /// Keyed by base URL because that is what an answer belongs to: two stores pointed at different esplora
+    /// instances are asking different questions, and the process-wide mempool.space default must not answer for an
+    /// operator's self-hosted explorer. The map is bounded by the distinct explorer URLs configured on the server,
+    /// which is a handful, and an entry past its window is dropped as the next one is written — so a URL that stops
+    /// being used does not sit here for the life of the process.
+    /// </remarks>
+    private readonly ConcurrentDictionary<string, CachedFeeRate> _recommendedFeeRates =
+        new(StringComparer.Ordinal);
+
+    /// <param name="timeProvider">
+    /// Read for the cache window alone. Injected rather than taken from <see cref="TimeProvider.System"/> so a test
+    /// can step over the window instead of waiting it out.
+    /// </param>
     public SparkExitFundingExplorer(
         IHttpClientFactory httpClientFactory,
+        TimeProvider timeProvider,
         ILogger<SparkExitFundingExplorer> logger)
     {
         _httpClientFactory = httpClientFactory;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -299,6 +332,165 @@ public sealed class SparkExitFundingExplorer
     }
 
     /// <summary>
+    /// The rate the explorer would put a transaction in the next few blocks at, clamped to what the quote form
+    /// accepts, or null when no recommendation can be had.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The half-hour estimate, deliberately, not the fastest one on offer.</b> An exit is not one transaction: it
+    /// is a chain of dozens the operator broadcasts by hand over hours to days, every one of them paying whatever
+    /// rate was chosen here. The fastest rate overpays on all of them; a floor rate risks the one failure this flow
+    /// cannot recover from, a half-broadcast exit whose fan-out is already spent and whose tree will not relay until
+    /// a fee the operator cannot easily raise arrives. The half-hour estimate is the middle of that tradeoff — it
+    /// confirms while the operator is still at the keyboard for the part of the exit where that matters, without
+    /// pricing every transaction in the tree like an emergency.
+    /// </para>
+    /// <para>
+    /// <b>Null means "no recommendation", never "zero".</b> Off mainnet with no override there is no explorer to ask,
+    /// and a fetch that fails is an ordinary state of the world rather than an error: the caller falls back to
+    /// <see cref="SparkUnilateralExitService.DefaultFeeRateSatPerVbyte"/> and the exit stays usable. So every
+    /// failure — unreachable host, timeout, HTTP error, unparseable body, oversized body — returns null instead of
+    /// throwing, and nothing about the exit page depends on a third party being up.
+    /// </para>
+    /// </remarks>
+    public async Task<long?> RecommendFeeRateSatPerVbyteAsync(
+        bool mainnet,
+        UnilateralExitSettings? settings,
+        CancellationToken cancellationToken = default)
+    {
+        // Off mainnet with no override this refuses, which is expected — mempool.space has no regtest — and the
+        // caller's fallback is what makes it harmless here. See TryResolveBaseUrl.
+        if (!TryResolveBaseUrl(settings, mainnet, out var baseUrl, out _))
+            return null;
+
+        if (TryReadCachedFeeRate(baseUrl!, out var cached))
+            return cached;
+
+        var recommended = await FetchRecommendedFeeRateAsync(baseUrl!, cancellationToken).ConfigureAwait(false);
+
+        // Stored whether or not there was an answer. A fetch that failed is precisely the one that must not be
+        // repeated on every render while the explorer is down.
+        RememberFeeRate(baseUrl!, recommended);
+
+        return recommended;
+    }
+
+    /// <summary>
+    /// The cached answer for one explorer URL, when one arrived inside the last
+    /// <see cref="RecommendedFeeRateTtl"/>.
+    /// </summary>
+    /// <remarks>
+    /// A clock that moves backwards keeps the answer rather than discarding it: the entry is only stale when the
+    /// measured age reaches the window, so a negative age reads as fresh, which is the harmless direction to be
+    /// wrong in.
+    /// </remarks>
+    private bool TryReadCachedFeeRate(string baseUrl, out long? satPerVbyte)
+    {
+        satPerVbyte = null;
+
+        if (!_recommendedFeeRates.TryGetValue(baseUrl, out var cached))
+            return false;
+
+        if (_timeProvider.GetUtcNow() - cached.FetchedAt >= RecommendedFeeRateTtl)
+            return false;
+
+        satPerVbyte = cached.SatPerVbyte;
+        return true;
+    }
+
+    /// <summary>
+    /// Remembers one answer for one URL, dropping the entries that have already outlived the window.
+    /// </summary>
+    /// <remarks>
+    /// The sweep on write is what keeps this map from becoming a permanent record of every explorer URL the process
+    /// has ever been pointed at. It costs a walk over a handful of entries, on an operation that happens at most
+    /// once per window per URL.
+    /// </remarks>
+    private void RememberFeeRate(string baseUrl, long? satPerVbyte)
+    {
+        var now = _timeProvider.GetUtcNow();
+
+        foreach (var (url, entry) in _recommendedFeeRates)
+        {
+            if (now - entry.FetchedAt >= RecommendedFeeRateTtl)
+                _recommendedFeeRates.TryRemove(url, out _);
+        }
+
+        _recommendedFeeRates[baseUrl] = new CachedFeeRate(satPerVbyte, now);
+    }
+
+    /// <summary>
+    /// One HTTP round trip to an esplora instance's recommended-fee endpoint.
+    /// </summary>
+    /// <returns>
+    /// The half-hour rate clamped into the bounds the quote form enforces, or null when no usable rate could be
+    /// read — including every failure the caller must not see as an exception.
+    /// </returns>
+    private async Task<long?> FetchRecommendedFeeRateAsync(string baseUrl, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(baseUrl);
+
+        var url = string.Format(
+            CultureInfo.InvariantCulture,
+            "{0}/v1/fees/recommended",
+            baseUrl.TrimEnd('/'));
+
+        try
+        {
+            using var deadline = new CancellationTokenSource(RequestTimeout);
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken, deadline.Token);
+
+            var client = _httpClientFactory.CreateClient(HttpClientName);
+
+            using var response = await client
+                .GetAsync(url, HttpCompletionOption.ResponseHeadersRead, bounded.Token)
+                .ConfigureAwait(false);
+
+            response.EnsureSuccessStatusCode();
+
+            await using var body = await response.Content
+                .ReadAsStreamAsync(bounded.Token)
+                .ConfigureAwait(false);
+
+            var payload = await ReadBoundedAsync(body, bounded.Token).ConfigureAwait(false);
+            var reported = JsonSerializer.Deserialize<RecommendedFees>(payload, JsonOptions);
+
+            var rate = reported?.HalfHourFee;
+
+            // Zero or negative is not a rate, it is a body that says nothing about the market: a zeroed
+            // placeholder, or a number that arrived in a shape the parse left empty. Refused rather than clamped up,
+            // because clamping would turn "the explorer told us nothing" into "the explorer said one satoshi".
+            if (rate is null or <= 0)
+            {
+                _logger.LogWarning(
+                    "The block explorer at {Url} reported no usable half-hour fee rate", baseUrl);
+                return null;
+            }
+
+            // Only the ceiling is ever reached: anything under the floor is zero or negative, refused just above.
+            return Math.Clamp(
+                rate.Value,
+                SparkUnilateralExitService.MinFeeRateSatPerVbyte,
+                SparkUnilateralExitService.MaxFeeRateSatPerVbyte);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Warning rather than error: nothing is broken by this, and the page still offers a rate to quote at.
+            _logger.LogWarning(ex, "Could not read a recommended fee rate from {Url}", baseUrl);
+
+            return null;
+        }
+    }
+
+    /// <summary>One explorer URL's last answer, and when it arrived.</summary>
+    private readonly record struct CachedFeeRate(long? SatPerVbyte, DateTimeOffset FetchedAt);
+
+    /// <summary>
     /// The one HTTP round trip both public methods share: the address's confirmed outputs, untagged.
     /// </summary>
     /// <returns>
@@ -421,6 +613,18 @@ public sealed class SparkExitFundingExplorer
         JsonException => "the explorer's answer was not in the expected format",
         _ => exception.Message
     };
+
+    /// <summary>
+    /// The one field of esplora's <c>GET /v1/fees/recommended</c> this plugin reads, out of the five it reports.
+    /// </summary>
+    /// <remarks>
+    /// Only the half-hour estimate is bound, because it is the one <see cref="RecommendFeeRateSatPerVbyteAsync"/>
+    /// chose and binding the others would suggest a policy this class does not have. Nullable so a body that omits
+    /// the field is a null rather than a zero; a body that spells it as something other than a number fails the
+    /// parse, which the caller treats the same way — see the remarks on that method.
+    /// </remarks>
+    private sealed record RecommendedFees(
+        [property: JsonPropertyName("halfHourFee")] long? HalfHourFee);
 
     /// <summary>One entry of esplora's <c>GET /address/{address}/utxo</c>.</summary>
     /// <remarks>

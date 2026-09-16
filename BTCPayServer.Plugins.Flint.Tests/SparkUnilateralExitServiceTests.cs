@@ -1710,6 +1710,36 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(0, harness.ExplorerRequests);
     }
 
+    /// <summary>The quote form's opening rate is fetched while nothing is in flight, and not once something is.</summary>
+    /// <remarks>
+    /// A store with an exit already in flight has the rate it was quoted at on the record, and the page shows that
+    /// one — so fetching a market rate on every view of that page would be an external round trip that decides
+    /// nothing, from a page any store viewer can reload. The recommendation travels as null rather than as a number
+    /// in that case: the service has no basis for one, and the fallback belongs to whoever renders the field.
+    /// </remarks>
+    [Fact]
+    public async Task The_page_carries_a_recommendation_only_while_nothing_is_in_flight()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.ExplorerBody("""{"halfHourFee":7}""");
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.Null(page.ActiveRecord);
+        Assert.Equal(7, page.RecommendedFeeRateSatPerVbyte);
+        Assert.Equal(1, harness.ExplorerRequests);
+
+        harness.Seed(status: UnilateralExitStatus.Built);
+        var inFlight = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.NotNull(inFlight.ActiveRecord);
+        Assert.Null(inFlight.RecommendedFeeRateSatPerVbyte);
+        // Still one request in total, and a built exit asks for nothing at all — see
+        // A_built_exit_reports_no_funding_balance — so this counts the recommendation and nothing else.
+        Assert.Equal(1, harness.ExplorerRequests);
+    }
+
     #endregion
 
     #region The funding key
@@ -1851,6 +1881,157 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(4_200, page.FundingReceivedSat);
     }
 
+    /// <summary>
+    /// A well-formed answer is the half-hour estimate, and it is clamped to what the quote form will accept.
+    /// </summary>
+    /// <remarks>
+    /// The half-hour estimate and not the fastest rate on offer, because this one number is paid by every
+    /// transaction in a chain of dozens: pricing all of them at the panic rate overpays on each, and pricing them at
+    /// a floor risks the failure this flow cannot recover from — a half-broadcast exit whose fan-out is already
+    /// spent. The ceiling matters from the other side: a fee spike must not produce a rate the quote form's own
+    /// bounds refuse, which would show an operator a number that cannot be submitted.
+    /// </remarks>
+    [Fact]
+    public async Task A_well_formed_answer_is_the_half_hour_rate_clamped_to_the_form_bounds()
+    {
+        using var harness = Harness.Create();
+        harness.ExplorerBody(
+            """{"fastestFee":40,"halfHourFee":7,"hourFee":5,"economyFee":3,"minimumFee":1}""");
+
+        Assert.Equal(7, await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
+            mainnet: true, new UnilateralExitSettings(), Ct));
+
+        // The path, asserted because it is this plugin's contract with a third party rather than an internal
+        // choice: {base}/v1/fees/recommended under the same default base URL the funding lookups use.
+        Assert.Equal(
+            SparkExitFundingExplorer.MainnetDefaultApiUrl + "/v1/fees/recommended",
+            Assert.Single(harness.ExplorerUrls));
+
+        // A fee spike, read after the cache window has passed — which is what an operator reloading the page
+        // minutes later gets. The rate is what the form can quote at, not what the explorer said.
+        harness.Time.Advance(SparkExitFundingExplorer.RecommendedFeeRateTtl);
+        harness.ExplorerBody(
+            """{"fastestFee":4000,"halfHourFee":900,"hourFee":800,"economyFee":700,"minimumFee":600}""");
+
+        Assert.Equal(
+            SparkUnilateralExitService.MaxFeeRateSatPerVbyte,
+            await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
+                mainnet: true, new UnilateralExitSettings(), Ct));
+    }
+
+    /// <summary>
+    /// Every way the lookup can fail is a null rate rather than an exception.
+    /// </summary>
+    /// <remarks>
+    /// The exit page has to render on a server with no outbound network at all, so an unreachable explorer cannot
+    /// travel as an exception: it would take down a GET whose worst honest answer is "no recommendation, quote at
+    /// the fallback". The endless response is here because it is the failure that does not look like one — a 200
+    /// with no end to it, where only the read ceiling can stop the wait.
+    /// </remarks>
+    [Fact]
+    public async Task A_lookup_that_fails_is_null_rather_than_an_exception()
+    {
+        var settings = new UnilateralExitSettings { EsploraApiUrl = "http://explorer.test/api" };
+
+        using (var offline = Harness.Create())
+        {
+            offline.ExplorerOffline();
+            Assert.Null(await offline.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        }
+
+        using (var refused = Harness.Create())
+        {
+            // An explorer rate-limiting this plugin, which is the answer that most needs to not become a retry.
+            refused.ExplorerFails(HttpStatusCode.TooManyRequests);
+            Assert.Null(await refused.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        }
+
+        using (var junk = Harness.Create())
+        {
+            // A captive portal or a proxy's error page: a 200 whose body is not this API's JSON.
+            junk.ExplorerBody("<html><body>maintenance</body></html>");
+            Assert.Null(await junk.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        }
+
+        using (var endless = Harness.Create())
+        {
+            endless.ExplorerEndless();
+            Assert.Null(await endless.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        }
+    }
+
+    /// <summary>
+    /// A body with no usable half-hour rate is null, whatever shape the rate is missing in.
+    /// </summary>
+    /// <remarks>
+    /// Zero and negative are the dangerous ones: a zeroed placeholder, or a field the parse emptied, would render as
+    /// a rate an operator accepts — in a form whose own minimum is one satoshi — and no transaction in the exit
+    /// would relay at it. A non-number fails the parse instead, which has to reach the caller as the same "no
+    /// recommendation" rather than as an exception on a page render.
+    /// </remarks>
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{"fastestFee":12,"minimumFee":1}""")]
+    [InlineData("""{"halfHourFee":null}""")]
+    [InlineData("""{"halfHourFee":"7"}""")]
+    [InlineData("""{"halfHourFee":0}""")]
+    [InlineData("""{"halfHourFee":-3}""")]
+    public async Task A_body_with_no_usable_rate_is_null(string body)
+    {
+        using var harness = Harness.Create();
+        harness.ExplorerBody(body);
+
+        Assert.Null(await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
+            true, new UnilateralExitSettings(), Ct));
+    }
+
+    /// <summary>
+    /// Off mainnet with no override there is no recommendation, and nothing is even asked.
+    /// </summary>
+    /// <remarks>
+    /// mempool.space has no regtest, which is why the URL resolution refuses here — and for the recommendation the
+    /// refusal has to cost nothing: the caller falls back to the plugin's own rate and the field still renders. The
+    /// call count is the behaviour under test: a fetch attempted here would be a request to a third party that
+    /// cannot answer the question, on every render of a regtest exit page.
+    /// </remarks>
+    [Fact]
+    public async Task Off_mainnet_with_no_override_a_recommendation_is_not_even_attempted()
+    {
+        using var harness = Harness.Create();
+
+        Assert.Null(await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
+            mainnet: false, new UnilateralExitSettings(), Ct));
+
+        Assert.Equal(0, harness.ExplorerRequests);
+    }
+
+    /// <summary>
+    /// The recommendation is cached for its window instead of being fetched on every render.
+    /// </summary>
+    /// <remarks>
+    /// The exit page is a GET any store viewer can reload in a loop, and a market rate is not a per-viewer fact:
+    /// one request per page view would turn refreshing a page into load on a third party's endpoint and would make
+    /// the field's presence depend on their latency. Once the window is out the market is asked again, because an
+    /// operator about to fund an exit must not be shown an old rate as if it were current.
+    /// </remarks>
+    [Fact]
+    public async Task The_recommendation_is_cached_rather_than_fetched_per_render()
+    {
+        using var harness = Harness.Create();
+        var settings = new UnilateralExitSettings();
+        harness.ExplorerBody("""{"halfHourFee":7}""");
+
+        Assert.Equal(7, await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        Assert.Equal(7, await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        Assert.Equal(1, harness.ExplorerRequests);
+
+        harness.Time.Advance(SparkExitFundingExplorer.RecommendedFeeRateTtl);
+        harness.ExplorerBody("""{"halfHourFee":9}""");
+
+        Assert.Equal(9, await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
+        Assert.Equal(2, harness.ExplorerRequests);
+    }
+
     #endregion
 
     /// <summary>
@@ -1907,22 +2088,38 @@ public class SparkUnilateralExitServiceTests
             Protector = new SparkMnemonicProtector(new EphemeralDataProtectionProvider());
             Runtime.Clients[StoreId] = Sdk;
 
+            Time = new StubTimeProvider(Now);
+            ExplorerClient = new SparkExitFundingExplorer(
+                new ExplorerClientFactory(_handler),
+                Time,
+                NullLogger<SparkExitFundingExplorer>.Instance);
+
             Service = new SparkUnilateralExitService(
                 Settings,
                 Runtime,
                 Records,
                 Protector,
-                new SparkExitFundingExplorer(
-                    new ExplorerClientFactory(_handler),
-                    NullLogger<SparkExitFundingExplorer>.Instance),
+                ExplorerClient,
                 Network.RegTest,
-                new StubTimeProvider(Now),
+                Time,
                 NullLogger<SparkUnilateralExitService>.Instance);
         }
 
         public static Harness Create(bool featureEnabled = true) => new(featureEnabled);
 
         public DateTimeOffset Now { get; } = new(2026, 8, 20, 12, 0, 0, TimeSpan.Zero);
+
+        /// <summary>
+        /// The clock the service and the explorer both read, so a test can step over the recommendation's cache
+        /// window rather than wait for it.
+        /// </summary>
+        public StubTimeProvider Time { get; }
+
+        /// <summary>
+        /// The explorer instance the service was handed, exposed so the fetch rules can be exercised without the
+        /// service in the way — and so a test can tell a fetch the service made from one it did not.
+        /// </summary>
+        public SparkExitFundingExplorer ExplorerClient { get; }
 
         public FakeSparkSdkClient Sdk { get; } = new();
 
@@ -1936,6 +2133,12 @@ public class SparkUnilateralExitServiceTests
 
         /// <summary>How many lookups actually reached the explorer.</summary>
         public int ExplorerRequests => _handler.Requests;
+
+        /// <summary>The URLs the explorer was asked for, in order, so a test can tell the two endpoints apart.</summary>
+        public IReadOnlyList<string> ExplorerUrls => _handler.Urls;
+
+        /// <summary>An explorer that answers with a body that never ends: the response no header warned about.</summary>
+        public void ExplorerEndless() => _handler.Endless = true;
 
         public SparkUnilateralExitService Service { get; }
 
@@ -2064,7 +2267,12 @@ public class SparkUnilateralExitServiceTests
 
             public bool Offline { get; set; }
 
+            /// <summary>Answers with an endless chunked body, so only the read ceiling can stop it.</summary>
+            public bool Endless { get; set; }
+
             public int Requests { get; private set; }
+
+            public List<string> Urls { get; } = [];
 
             protected override Task<HttpResponseMessage> SendAsync(
                 HttpRequestMessage request,
@@ -2072,10 +2280,21 @@ public class SparkUnilateralExitServiceTests
             {
                 Requests++;
 
+                lock (Urls)
+                    Urls.Add(request.RequestUri?.ToString() ?? string.Empty);
+
                 if (Offline)
                 {
                     return Task.FromException<HttpResponseMessage>(
                         new HttpRequestException("no route to host"));
+                }
+
+                if (Endless)
+                {
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StreamContent(new EndlessStream())
+                    });
                 }
 
                 return Task.FromResult(new HttpResponseMessage(Status)

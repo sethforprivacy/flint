@@ -170,6 +170,15 @@ public sealed record UnilateralExitOpResult(
 /// <param name="WalletRunning">False hides every form: nothing can be quoted without a live wallet.</param>
 /// <param name="DisclosureAcknowledged">Gates the quote form behind the disclosure form.</param>
 /// <param name="BalanceSats">The wallet balance, for context next to the quote form.</param>
+/// <param name="RecommendedFeeRateSatPerVbyte">
+/// A rate fetched from the block explorer for the quote form to open at, or null when there is no recommendation
+/// to be had — off mainnet with no explorer override, or the explorer was unreachable. Populated only while no
+/// exit is in flight, because that is the only time the form renders and its rate is the only thing the answer
+/// would decide. <b>Null is not zero and is not a default:</b> the caller falls back to
+/// <see cref="SparkUnilateralExitService.DefaultFeeRateSatPerVbyte"/>, and a service that invented a rate the
+/// explorer did not report would be putting a claim about the fee market in front of an operator who is about to
+/// fund an exit at it.
+/// </param>
 /// <param name="ActiveRecord">The store's one in-flight exit (awaiting funding or built), or null.</param>
 /// <param name="History">Newest-first <b>terminal</b> records (completed/abandoned), bounded, with the
 /// heavy JSON columns left unloaded — the history table renders five scalar columns and must not drag
@@ -206,6 +215,7 @@ public sealed record UnilateralExitPageData(
     bool WalletRunning,
     bool DisclosureAcknowledged,
     long BalanceSats,
+    long? RecommendedFeeRateSatPerVbyte,
     UnilateralExitRecord? ActiveRecord,
     IReadOnlyList<UnilateralExitRecord> History,
     long? FundingReceivedSat,

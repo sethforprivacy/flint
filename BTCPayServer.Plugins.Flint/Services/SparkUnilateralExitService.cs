@@ -66,6 +66,20 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// </remarks>
     internal const long MaxFeeRateSatPerVbyte = 500;
 
+    /// <summary>
+    /// The rate the quote form opens at when no recommendation could be had.
+    /// </summary>
+    /// <remarks>
+    /// Two sat/vB, and it is a floor rather than a guess: one is the lowest rate this plugin will quote at all and
+    /// is also the usual mempool minimum, so a quote priced at exactly one sits on the boundary where a small rise
+    /// in the minimum makes every transaction in the tree non-relayable — and the exit is a chain of dozens, so a
+    /// rate that stops relaying halfway is the failure mode this whole flow is built to avoid. Two clears that
+    /// boundary while still costing an operator almost nothing, which is the right way to be wrong when the
+    /// alternative is no number at all. It is used off mainnet with no explorer override, and whenever the
+    /// explorer cannot be read — the operator sees a usable rate and can always type another one.
+    /// </remarks>
+    internal const long DefaultFeeRateSatPerVbyte = 2;
+
     internal const string FeatureDisabled =
         "Unilateral exit is not enabled on this server.";
 
@@ -84,8 +98,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         "Another unilateral-exit operation for this store is already running. Try again in a moment.";
 
     internal const string NothingWorthExiting =
-        "There is nothing worth exiting at this fee rate. Spark selected no leaves, which means every one of them "
-        + "would cost more to force on-chain than it holds. A lower fee rate may select some.";
+        "No leaves are large enough to exit properly at the selected fee-rate. Please reduce the fee-rate and "
+        + "try again, or wait for fees to drop so you can do so.";
 
     internal const string ExitNotFound =
         "This store has no exit with that reference.";
@@ -145,7 +159,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// shape where two "empty" literals drift apart from one another.
     /// </remarks>
     private static UnilateralExitPageData AbsentFeature =>
-        new(false, false, 0, null, [], null, null, null, null, null, false, null);
+        new(false, false, 0, null, null, [], null, null, null, null, null, false, null);
 
     private readonly ISparkStoreSettingsStore _settingsStore;
     private readonly ISparkStoreRuntime _runtime;
@@ -250,6 +264,19 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             keyPath = DescribeKeyPath(active);
         }
 
+        // Only when the quote form will actually render, which is only when nothing is in flight. A store with an
+        // exit already awaiting funding or built has its rate on the record, so asking the explorer for a market
+        // rate here would be an external round trip on every page view that decides nothing — and the exit page is
+        // reachable from any store view. Null, not the fallback, when there is no recommendation: the fallback is
+        // the caller's decision, and a service that returned a market rate it did not have would be claiming one.
+        long? recommendedFeeRate = null;
+        if (active is null)
+        {
+            recommendedFeeRate = await _explorer
+                .RecommendFeeRateSatPerVbyteAsync(Mainnet, exitSettings, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         // Read back and checked here rather than anywhere above: the page renders these, and a malformed column
         // has to become an explanation on the page instead of an exception in a view.
         var readable = TryReadTransactions(active, out var transactions);
@@ -270,6 +297,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             sdk is not null,
             exitSettings.DisclosureAcknowledged,
             balance,
+            recommendedFeeRate,
             active,
             history,
             funding.TotalSat,

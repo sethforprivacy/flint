@@ -96,6 +96,12 @@ services:
       # is the --docker descriptor, mounted below; it carries in-network addresses, so it is only
       # meaningful to a process on this network.
       SPARK_LOCAL_REGTEST_NETWORK: /datadir/spark-network.json
+      # The experimental unilateral exit, on for this stack on purpose. It is off by default and every
+      # exit route 404s without it, so leaving it unset would mean the one stack that runs the real
+      # product against real operators is also the one where the exit cannot be seen at all — and the
+      # exit is the feature whose whole point is that it has to work when nothing else does. Nothing
+      # here moves money that the suite did not ask for: quoting is read-only, and a build only signs.
+      FLINT_EXPERIMENTAL_UNILATERAL_EXIT: "1"
     ports:
       # Loopback only. The tests drive it from the host over this port.
       - "127.0.0.1:${FLINT_BTCPAY_E2E_PORT:-14142}:49392"

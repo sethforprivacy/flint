@@ -188,10 +188,6 @@
                 asked for, and it can quite legitimately come back with none of them.
             *@
             <h3 class="mb-3">Quote an exit</h3>
-            <p class="text-secondary">
-                Nothing is signed, funded or sent by quoting. It prices which of this store's leaves are worth
-                forcing on-chain at the fee rate you name, and tells you what funding the exit would need.
-            </p>
 
             <table class="table table-sm">
                 <tbody>
@@ -222,9 +218,9 @@
                         </div>
                         <span asp-validation-for="FeeRateSatPerVbyte" class="text-danger"></span>
                         <div class="form-text">
-                            Every transaction in the tree is priced at this rate, and the tree is many
-                            transactions. A rate that will not confirm strands the exit half-broadcast; a rate
-                            far above the mempool wastes your own funding.
+                            Set the fee rate to use for the entire exit chain. Be sure to set it higher than
+                            the current mempool minimum, as it will be used for the entire exit chain over the
+                            course of several hours or even days.
                         </div>
                     </div>
                 </div>
@@ -235,9 +231,8 @@
                            id="SparkExitDestination" />
                     <span asp-validation-for="DestinationAddress" class="text-danger"></span>
                     <div class="form-text">
-                        Where the recovered coins end up. It is signed into the final transaction and
-                        <strong>cannot be changed afterwards</strong> — an exit built to the wrong address has to
-                        be abandoned and re-funded from scratch.
+                        The address your funds will end up in. Please be sure to choose an address you have
+                        proper access to, as changing this address after starting the exit will be costly!
                     </div>
                 </div>
 

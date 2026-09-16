@@ -116,11 +116,12 @@
             *@
             <h4 class="mt-4 mb-3">Exit-state backup</h4>
             <p>
-                This wallet keeps the data an exit is built from in its own storage on this server. While
-                Spark's operators are reachable that data can be fetched again, so a wallet restored from its
-                recovery phrase rebuilds it. <strong>When they are gone and this server's storage is lost, it
-                cannot be recovered from anywhere</strong> — and the leaves it covered can no longer be exited.
-                Export it here, keep the copy somewhere safe, and an exit built from it goes ahead with the
+                This wallet keeps the data an exit is built from in its own storage on this server, and
+                collecting that data needs Spark's operators to be reachable. So the moment you need an exit
+                is the moment you can no longer collect it. <strong>If this server's storage is lost while the
+                operators are gone, the data goes with it and those leaves can never be exited.</strong> A
+                backup taken now is not an alternative to exiting — it is what keeps exiting possible at all.
+                Export it, keep the copy somewhere safe, and an exit built from it goes ahead with the
                 operators gone.
             </p>
             <div class="alert alert-warning" role="alert" id="SparkExitStateBackupWarning">

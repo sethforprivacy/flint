@@ -363,6 +363,7 @@ public sealed class SparkSurfaceHarness
                     WalletRunning: false,
                     DisclosureAcknowledged: false,
                     BalanceSats: 0,
+                    RecommendedFeeRateSatPerVbyte: null,
                     ActiveRecord: null,
                     History: [],
                     FundingReceivedSat: null,

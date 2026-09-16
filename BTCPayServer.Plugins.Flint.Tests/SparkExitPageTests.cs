@@ -151,11 +151,38 @@ public class SparkExitPageTests
         Assert.True(model.DisclosureAcknowledged);
         Assert.Null(model.ActiveRecord);
 
-        // Nothing pre-filled from a previous exit, because there is no previous exit to pre-fill from.
-        Assert.Equal(0, model.FeeRateSatPerVbyte);
+        // Nothing pre-filled from a previous exit, because there is no previous exit to pre-fill from. The fee
+        // rate is the exception and is deliberately not zero: there is no earlier exit to take it from, so it
+        // opens at the value the exit service decided on (see the rate tests below), and a zero in a form whose
+        // own bounds start at one is a field no submission would accept.
+        Assert.Equal(SparkUnilateralExitService.DefaultFeeRateSatPerVbyte, model.FeeRateSatPerVbyte);
         Assert.Null(model.DestinationAddress);
         Assert.Null(model.LeafCount);
         Assert.Null(model.FundingKeyPath);
+    }
+
+    /// <summary>
+    /// The quote form opens at the recommended rate, and at the plugin's own floor when there is none.
+    /// </summary>
+    /// <remarks>
+    /// Both halves matter and they are the same feature: the field is a number the operator may accept or replace,
+    /// and the failure this defends against is the empty one it used to be. A recommendation that could not be
+    /// fetched — off mainnet with no explorer override, or an explorer that was unreachable — must still leave the
+    /// form usable rather than blank, because an operator has no way to tell a page that offered them nothing from
+    /// one whose value failed to render.
+    /// </remarks>
+    [Theory]
+    [InlineData(7L, 7L)]
+    [InlineData(null, SparkUnilateralExitService.DefaultFeeRateSatPerVbyte)]
+    public async Task The_quote_form_opens_at_the_recommended_rate_or_the_plugin_floor(
+        long? recommended, long expected)
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService { Page = Page(recommendedFeeRateSatPerVbyte: recommended) };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        Assert.Equal(expected, (await RenderExit(h)).FeeRateSatPerVbyte);
     }
 
     [Fact]
@@ -175,7 +202,12 @@ public class SparkExitPageTests
                 fundingReceivedSat: 6_000,
                 fundingLargestOutputSat: 2_500,
                 leafCount: 2,
-                fundingKeyPath: "m/84'/1'/4607060'/0/3")
+                fundingKeyPath: "m/84'/1'/4607060'/0/3",
+                // A live recommendation is carried alongside the record on purpose, and it disagrees with the
+                // record's 12 sat/vB. The rate this exit was quoted at is the one the form must show: the record
+                // is the thing being funded, and a market rate that moved since would offer the operator a number
+                // the quoted leaves, their fees and their funding requirement were not computed at.
+                recommendedFeeRateSatPerVbyte: 7)
         };
 
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
@@ -692,7 +724,7 @@ public class SparkExitPageTests
     /// One service read, with every field named.
     /// </summary>
     /// <remarks>
-    /// The page data has eleven members and most tests care about two of them. Named optional parameters keep
+    /// The page data has thirteen members and most tests care about two of them. Named optional parameters keep
     /// each test's fixture to the fields it is actually about, and — unlike a positional constructor call —
     /// a field added to the record does not silently shift what an existing test was asserting.
     /// </remarks>
@@ -700,6 +732,7 @@ public class SparkExitPageTests
         bool walletRunning = true,
         bool disclosureAcknowledged = true,
         long balanceSats = 0,
+        long? recommendedFeeRateSatPerVbyte = null,
         UnilateralExitRecord? activeRecord = null,
         IReadOnlyList<UnilateralExitRecord>? history = null,
         long? fundingReceivedSat = null,
@@ -713,6 +746,7 @@ public class SparkExitPageTests
             walletRunning,
             disclosureAcknowledged,
             balanceSats,
+            recommendedFeeRateSatPerVbyte,
             activeRecord,
             history ?? [],
             fundingReceivedSat,
@@ -801,6 +835,7 @@ public class SparkExitPageTests
     {
         public UnilateralExitPageData Page { get; set; } =
             new(WalletRunning: true, DisclosureAcknowledged: false, BalanceSats: 0,
+                RecommendedFeeRateSatPerVbyte: null,
                 ActiveRecord: null, History: [], FundingReceivedSat: null, FundingLargestOutputSat: null,
                 LeafCount: null, FundingKeyPath: null, Transactions: null, TransactionsUnreadable: false,
                 PendingBroadcast: null);
