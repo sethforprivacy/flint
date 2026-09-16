@@ -112,8 +112,8 @@ public interface ISparkUnilateralExitService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Stores an exported unilateral-exit backup blob on the store's exit settings, or clears it when the
-    /// argument is null or blank.
+    /// Stores an exported unilateral-exit backup blob where the automatic backups are kept (see
+    /// <see cref="IExitStateBackupStore"/>), or clears it when the argument is null or blank.
     /// </summary>
     /// <remarks>
     /// <para>

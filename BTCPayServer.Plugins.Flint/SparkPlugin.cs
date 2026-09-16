@@ -142,6 +142,13 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ISparkStoreSettingsStore>(provider => provider.GetRequiredService<SparkService>());
         services.AddSingleton<ISparkStoreRuntime>(provider => provider.GetRequiredService<SparkService>());
 
+        // Automatic unilateral-exit backups: the owner-only file each store's backup lives in, the
+        // debounce/safety-net decisions, and the pass that applies them. Registered unconditionally like
+        // the rest of the exit surface — the gate is enforced inside the pass, not by whether the
+        // types exist.
+        services.AddSingleton<IExitStateBackupStore, FileExitStateBackupStore>();
+        services.AddSingleton<ExitStateBackupScheduler>();
+
         // The setup flow's decisions, kept out of the controller so they can be tested.
         services.AddSingleton<SparkStoreProvisioner>();
 
@@ -285,6 +292,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
                 provider.GetRequiredService<IUnilateralExitRecordStore>(),
                 provider.GetRequiredService<SparkMnemonicProtector>(),
                 provider.GetRequiredService<SparkExitFundingExplorer>(),
+                provider.GetRequiredService<IExitStateBackupStore>(),
                 SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType),
                 provider.GetRequiredService<TimeProvider>(),
                 provider.GetRequiredService<ILogger<SparkUnilateralExitService>>());
@@ -340,6 +348,12 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // token, when it holds one). See StablecoinPaymentService for the flow and StablecoinQuoteMatcher for how an
         // arrival is attributed to the invoice it paid.
         AddStablecoinPayments(services);
+
+        // Automatic exit-state backups. The task is the passive half: the interesting timing lives in
+        // ExitStateBackupScheduler, and a pass whose only new work is asking ShouldTake costs one
+        // dictionary read per store. One minute matches the resolution every other pass here works at,
+        // and it is what bounds the latency of a debounced post-deposit backup.
+        services.AddScheduledTask<ExitStateBackupTask>(Constants.ExitStateBackupInterval);
 
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");

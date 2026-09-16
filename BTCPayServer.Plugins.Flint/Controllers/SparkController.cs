@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
@@ -89,6 +90,7 @@ public class SparkController : Controller
     private readonly SparkStableBalanceService _stableBalance;
     private readonly ISparkUnilateralExitService _unilateralExit;
     private readonly ISparkStoreRuntime _storeRuntime;
+    private readonly IExitStateBackupStore _exitStateBackupStore;
     private readonly CrossChainCatalog _crossChainCatalog;
     private readonly StablecoinPaymentService _stablecoins;
     private readonly IAuthorizationService _authorizationService;
@@ -106,6 +108,7 @@ public class SparkController : Controller
         SparkStableBalanceService stableBalance,
         ISparkUnilateralExitService unilateralExit,
         ISparkStoreRuntime storeRuntime,
+        IExitStateBackupStore exitStateBackupStore,
         CrossChainCatalog crossChainCatalog,
         StablecoinPaymentService stablecoins,
         IAuthorizationService authorizationService,
@@ -122,6 +125,7 @@ public class SparkController : Controller
         _stableBalance = stableBalance;
         _unilateralExit = unilateralExit;
         _storeRuntime = storeRuntime;
+        _exitStateBackupStore = exitStateBackupStore;
         _crossChainCatalog = crossChainCatalog;
         _stablecoins = stablecoins;
         _authorizationService = authorizationService;
@@ -851,11 +855,12 @@ public class SparkController : Controller
             // be using a store's key even though Breez does not treat it as a secret, so the page has no
             // business printing it into the DOM.
             HasApiKeyOverride = !string.IsNullOrEmpty(settings?.ApiKeyOverride),
-            // Same discipline for the exit-state backup, and for the same reason at a higher severity: the
-            // blob describes the whole wallet's tree. Gated on the experiment too, so the block that would
-            // display it is never told there is one on a server where that block does not render.
-            HasExitStateBackup = Constants.UnilateralExitEnabled
-                && !string.IsNullOrEmpty(settings?.UnilateralExit.ExitStateBackup)
+            // When the stored backup was last written. Read from the store rather than the settings blob
+            // because the plugin refreshes this file on its own as the wallet's leaves change — this page is
+            // showing the operator how current the automation is, not asking whether they want a backup.
+            ExitStateBackupTakenAt = Constants.UnilateralExitEnabled
+                ? await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false)
+                : null
         };
     }
 
@@ -1181,6 +1186,20 @@ public class SparkController : Controller
             model.ExportedExitState = await sdk
                 .ExportUnilateralExitStateAsync(cancellationToken)
                 .ConfigureAwait(false);
+
+            // The same blob goes into the store, so the copy the operator just read and the copy the plugin
+            // keeps cannot disagree. Without this, pressing Export would hand out bytes *newer* than the
+            // stored backup and leave the page's "last taken" stamp behind them — which is precisely the
+            // staleness the automatic refresh exists to remove, reintroduced by the button that reads the
+            // wallet directly.
+            if (model.ExportedExitState is { Length: > 0 } exported)
+            {
+                await _exitStateBackupStore.WriteAsync(storeId, exported, cancellationToken)
+                    .ConfigureAwait(false);
+                model.ExitStateBackupTakenAt = await _exitStateBackupStore
+                    .TakenAtAsync(storeId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (Exception ex)
         {
@@ -1194,6 +1213,59 @@ public class SparkController : Controller
         }
 
         return View("Advanced", model);
+    }
+
+    /// <summary>
+    /// Downloads the stored exit-state backup.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The automatic refresh means an operator never has to remember to take a backup; this is how they
+    /// still <i>get</i> one off this server, which is the only thing that makes the automatic copy worth
+    /// anything. It serves whatever is stored — the same bytes the next restart will import — rather than
+    /// exporting afresh, so what lands on disk is exactly what the plugin is holding.
+    /// </para>
+    /// <para>
+    /// POST rather than GET. This hands out the most sensitive blob the plugin holds, and a GET would put
+    /// the act of taking it into the URL, the access log, and anything that follows a link.
+    /// </para>
+    /// </remarks>
+    [HttpPost("advanced/exit-state/download")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> DownloadExitStateBackup(
+        [FromRoute] string storeId,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var backup = await _exitStateBackupStore.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+        if (backup is null)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "No exit-state backup is stored for this store yet. One is written automatically as the "
+                + "wallet's leaves change; Export takes one now.";
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
+        var takenAt = await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Store {StoreId}: served the stored exit-state backup ({Length:N0} characters, taken {TakenAt:u})",
+            storeId, backup.Length, takenAt);
+
+        // The timestamp is in the name because the file is the artifact the operator is storing off-box, and
+        // a directory of identical names is one they cannot tell apart a year from now.
+        var name = takenAt is { } at
+            ? $"exit-state-backup-{storeId}-{at:yyyyMMdd-HHmmss}.txt"
+            : $"exit-state-backup-{storeId}.txt";
+
+        return File(Encoding.UTF8.GetBytes(backup), "application/octet-stream", name);
     }
 
     /// <summary>
@@ -1402,10 +1474,6 @@ public class SparkController : Controller
             // that said "I could not tell" into one would put an action block on screen for an unknown set.
             PendingBroadcast = page.PendingBroadcast,
             EsploraApiUrl = settings?.UnilateralExit.EsploraApiUrl,
-            // Presence only, and only behind the feature gate — the section that shows this is gated too, and
-            // a store on a server with the experiment off has no exit data for the flag to be about.
-            HasExitStateBackup = Constants.UnilateralExitEnabled
-                && !string.IsNullOrEmpty(settings?.UnilateralExit.ExitStateBackup),
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };

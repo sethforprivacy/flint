@@ -334,9 +334,13 @@ public class RenderExitScreensTests
     {
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
 
-        // Presence is all the page is told, and all it can be: the blob itself is never written into the model.
-        h.Settings.Settings[Store]!.UnilateralExit.ExitStateBackup =
-            storedBackup ? """{"version":1,"leaves":[]}""" : null;
+        // Presence is all the page is told, and all it can be: the controller hands the view a timestamp and
+        // never the blob, so this scripts the file store a real backup would have left behind.
+        if (storedBackup)
+        {
+            await h.ExitStateBackups.WriteAsync(Store, """{"version":1,"leaves":[]}""", CancellationToken.None);
+            h.ExitStateBackups.TakenAt = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
+        }
 
         var view = Assert.IsType<ViewResult>(await h.Mvc.Advanced(Store, CancellationToken.None));
         var model = Assert.IsType<SparkAdvancedViewModel>(view.Model);
@@ -817,6 +821,7 @@ internal static class ExitScreenRenderer
             ["AdvancedSweep"] = "advanced/sweep",
             ["AdvancedApiKey"] = "advanced/api-key",
             ["ExportExitState"] = "advanced/exit-state/export",
+            ["DownloadExitStateBackup"] = "advanced/exit-state/download",
             ["SetExitStateBackup"] = "advanced/exit-state"
         };
 

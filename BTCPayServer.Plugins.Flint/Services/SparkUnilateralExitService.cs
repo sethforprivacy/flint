@@ -171,6 +171,14 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private readonly ILogger<SparkUnilateralExitService> _logger;
 
     /// <summary>
+    /// Where a stored exit-state backup actually lives: one owner-only file per store, outside the
+    /// settings blob. The settings write below is gone from this path deliberately — a several-megabyte
+    /// value in the store's settings is deserialized on every settings read, and storing one there
+    /// tore down and reconnected the store's wallet.
+    /// </summary>
+    private readonly IExitStateBackupStore _backups;
+
+    /// <summary>
     /// Stores with an exit operation in progress. Membership is the lock, and there is deliberately no queueing:
     /// see the class remarks.
     /// </summary>
@@ -188,6 +196,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         IUnilateralExitRecordStore records,
         SparkMnemonicProtector mnemonicProtector,
         SparkExitFundingExplorer explorer,
+        IExitStateBackupStore backups,
         Network? network,
         TimeProvider timeProvider,
         ILogger<SparkUnilateralExitService> logger)
@@ -197,6 +206,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         _records = records;
         _mnemonicProtector = mnemonicProtector;
         _explorer = explorer;
+        _backups = backups;
         _network = network ?? Network.Main;
         _timeProvider = timeProvider;
         _logger = logger;
@@ -560,26 +570,69 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             if (settings is null)
                 return Refuse(NotConfigured);
 
-            var current = (settings.UnilateralExit ?? new UnilateralExitSettings()).ExitStateBackup;
-            if (string.Equals(current, normalised, StringComparison.Ordinal))
+            // Read the stored value only to answer "does this press change anything" — a full read of a
+            // multi-megabyte blob, on a press an operator makes rarely at most, and what it buys is that a
+            // re-paste cannot move the file's timestamp: a rewrite would report the backup as taken at a
+            // moment when nothing was actually learned about the wallet. A failed read is not a refusal —
+            // "unchanged" has to be earned from a read that answered, so this press just proceeds to its
+            // own write, which is the same failure or success the comparison was guarding.
+            string? current = null;
+            var compared = false;
+            try
             {
-                // No write for a press that changes nothing: storing settings tears down and reconnects the
-                // store's wallet, which is not a thing to do to confirm the status quo. Compared by value rather
-                // than by reference, so a re-paste of the same blob is also a no-op.
+                current = await _backups.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+                compared = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Store {StoreId}: its stored exit-state backup could not be read before a save, so the "
+                    + "write proceeded without comparing to what was there",
+                    storeId);
+            }
+
+            if (compared && string.Equals(current, normalised, StringComparison.Ordinal))
+            {
+                // No write for a press that changes nothing, and the comparison is by value rather than
+                // by reference so a re-paste of the same blob is also a no-op. This used to be required
+                // because a settings write reconnected the wallet; it is kept because a write that moves
+                // the TakenAt of a backup that did not change lies about the backup, not just about cost.
                 return new UnilateralExitOpResult(true, null, null);
             }
 
-            // The subject and the log's description deliberately say nothing about the value: it discloses the
-            // store's balance and history, and this method is the one place in the plugin that handles it.
-            return await SaveExitSettingsAsync(
+            // The subject and the log's description deliberately say nothing about the value: it discloses
+            // the store's balance and history, and this method is one of the two places in the plugin
+            // that handles it.
+            try
+            {
+                if (normalised is null)
+                {
+                    await _backups.DeleteAsync(storeId, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation(
+                        "Store {StoreId}: the stored exit-state backup was cleared", storeId);
+                }
+                else
+                {
+                    await _backups.WriteAsync(storeId, normalised, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation(
+                        "Store {StoreId}: stored an exit-state backup from the page ({Length} characters)",
+                        storeId, normalised.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Store {StoreId}: could not store {What} ({Reason})",
                     storeId,
-                    settings,
-                    exit => exit.ExitStateBackup = normalised,
                     normalised is null
                         ? "the unilateral-exit state backup being cleared"
                         : "a unilateral-exit state backup",
-                    "The exit-state backup")
-                .ConfigureAwait(false);
+                    SparkErrors.Describe(ex));
+
+                return Refuse($"The exit-state backup could not be saved: {SparkErrors.Describe(ex)}");
+            }
+
+            return new UnilateralExitOpResult(true, null, null);
         }
         finally
         {

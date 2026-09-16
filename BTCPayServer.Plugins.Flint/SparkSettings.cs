@@ -531,26 +531,24 @@ public class UnilateralExitSettings
     public string? EsploraApiUrl { get; set; }
 
     /// <summary>
-    /// A backup of the SDK's unilateral-exit state, as produced by its export and accepted by its import. Null
-    /// when none has been stored.
+    /// Deprecated. Where an exit-state backup used to live; it now lives in an owner-only file in
+    /// BTCPay's data directory (<see cref="Services.FileExitStateBackupStore"/>), and nothing new is
+    /// ever written here. Null for any store written by the current version.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>What this is for:</b> the transactions an exit is built from live only in the SDK's local storage.
-    /// While the operators are reachable they can be fetched again; when that storage is gone and the operators
-    /// are not, they cannot be recovered from anywhere and the leaves they cover can no longer be exited. This
-    /// blob is the copy that survives the device.
+    /// <b>It exists only so an upgrade cannot lose a backup.</b> A store provisioned by an earlier
+    /// plugin version may still hold its only copy of the blob in this slot, and if it were not
+    /// deserialized the adoption path would have nothing to read — an upgrade that silently dropped
+    /// an operator's backup is exactly the loss this field's own contents guard against. The value is
+    /// adopted, imported, moved to the file, and cleared on the first connect after an upgrade
+    /// (<c>SparkService.AdoptLegacyBackupAsync</c>).
     /// </para>
     /// <para>
-    /// <b>It is sensitive and the plugin treats it as such.</b> It carries every leaf of the wallet and its
-    /// transactions, which discloses the balance, how it is split and what the wallet has received and spent. It
-    /// must never be written to a log, echoed in an error, or sent back to a page.
-    /// </para>
-    /// <para>
-    /// Its content is <b>not</b> validated on the way in. The encoding is the SDK's own and the SDK is the only
-    /// thing that can judge it; a check invented here would reject a valid backup from a future SDK, and a
-    /// rejected backup is a lost exit. Only its length is bounded, because a value past the SDK's own few
-    /// megabytes is a paste error rather than a backup.
+    /// It was moved because it is a multi-megabyte secret and the settings blob is deserialized on
+    /// every settings read. Nothing may treat a non-null value here as "a backup is stored": the file
+    /// is the only answer after a connect has run, and before it neither is complete. Nothing may
+    /// write a live value here either — the page and the automation both use the file store.
     /// </para>
     /// </remarks>
     public string? ExitStateBackup { get; set; }

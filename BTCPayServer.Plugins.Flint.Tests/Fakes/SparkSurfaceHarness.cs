@@ -61,9 +61,11 @@ public sealed class SparkSurfaceHarness
         SparkDepositService depositService,
         SparkStableBalanceService stableBalanceService,
         CrossChainCatalog crossChainCatalog,
-        StubHttpMessageHandler crossChainRequests)
+        StubHttpMessageHandler crossChainRequests,
+        FakeExitStateBackupStore exitStateBackups)
     {
         CrossChainCatalog = crossChainCatalog;
+        ExitStateBackups = exitStateBackups;
         CrossChainRequests = crossChainRequests;
         Protector = protector;
         SweepEngine = sweepEngine;
@@ -141,6 +143,13 @@ public sealed class SparkSurfaceHarness
 
     /// <summary>The USDC/USDT path the MVC controller's switch goes through, over in-memory fakes.</summary>
     public StablecoinHarness Stablecoins { get; private init; } = null!;
+
+    /// <summary>
+    /// The exit-state backup store the controller reports <c>ExitStateBackupTakenAt</c> from — empty
+    /// unless a test stores one, which is what a harness that stored nothing should answer.
+    /// </summary>
+    public FakeExitStateBackupStore ExitStateBackups { get; }
+
 
     public FakeSparkSdkClient VictimWallet => (FakeSparkSdkClient)Runtime.Clients[VictimStore];
 
@@ -277,9 +286,14 @@ public sealed class SparkSurfaceHarness
         // a plausible-looking empty page.
         var exit = unilateralExit ?? new UnavailableUnilateralExitService();
 
+        // The Advanced page reads the backup's TakenAt from the same singleton the service writes, so the
+        // harness hands one instance to both and lets a page test script it.
+        var exitStateBackups = new FakeExitStateBackupStore();
+
         var mvc = new SparkController(
             settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
-            depositService, stableBalanceService, exit, crossChainCatalog, stablecoins.Service,
+            depositService, stableBalanceService, exit, runtime, exitStateBackups,
+            crossChainCatalog, stablecoins.Service,
             new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
         var api = new GreenfieldSparkController(
@@ -296,7 +310,7 @@ public sealed class SparkSurfaceHarness
         return new SparkSurfaceHarness(
             mvc, api, settings, lightning, seedReader, sweepRecords, sweepAddresses, runtime, writeLog,
             provisionerLog, protector, sweepEngine, depositService, stableBalanceService,
-            crossChainCatalog, crossChainRequests)
+            crossChainCatalog, crossChainRequests, exitStateBackups)
         {
             Stablecoins = stablecoins
         };

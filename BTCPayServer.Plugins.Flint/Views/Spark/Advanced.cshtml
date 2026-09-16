@@ -118,45 +118,62 @@
             <p>
                 This wallet keeps the data an exit is built from in its own storage on this server, and
                 collecting that data needs Spark's operators to be reachable. So the moment you need an exit
-                is the moment you can no longer collect it. <strong>If this server's storage is lost while the
-                operators are gone, the data goes with it and those leaves can never be exited.</strong> A
-                backup taken now is not an alternative to exiting — it is what keeps exiting possible at all.
-                Export it, keep the copy somewhere safe, and an exit built from it goes ahead with the
-                operators gone.
+                is the moment you can no longer collect it.
+            </p>
+            <p>
+                <strong>Flint takes this backup for you.</strong> It is rewritten on its own as this wallet's
+                leaves change, so the copy stored here is never far behind the wallet, and the next restart
+                imports it automatically. Nothing on this page has to be pressed for that to keep happening.
+                <strong>That copy is on the same server as the wallet, though, and a backup that dies with the
+                machine is not a backup.</strong> Download it and keep the file somewhere else — that is the
+                copy that lets an exit go ahead with the operators gone.
             </p>
             <div class="alert alert-warning" role="alert" id="SparkExitStateBackupWarning">
                 <strong>Treat this backup as a secret, like a key.</strong> It carries every leaf of this
                 wallet and the transactions under them, so it discloses the balance, how it is split, and the
                 history of what the store received and spent. Anyone who reads it learns your finances. Keep it
-                somewhere encrypted, and paste it into this page only when replacing it.
+                somewhere encrypted.
             </div>
             <p id="SparkExitStateBackupState">
-                @if (Model.HasExitStateBackup)
+                @if (Model.ExitStateBackupTakenAt is { } takenAt)
                 {
                     <span class="badge bg-info">Stored</span>
-                    <span>An exit-state backup is stored for this store and is imported automatically when the
-                    wallet next starts. It is not shown here — export a fresh copy if you need one. If the
-                    import itself fails, the wallet still runs and the reason is in the server log, so check
-                    there after a restart rather than assuming a stored backup was applied.</span>
+                    <span>Last written
+                    <time datetime="@takenAt.ToUniversalTime().ToString("O")">@takenAt.ToUniversalTime().ToString("yyyy-MM-dd HH:mm") UTC</time>.
+                    It is imported automatically when this store's wallet next starts; it is not applied now.
+                    If the import itself fails, the wallet still runs and the reason is in the server log, so
+                    check there after a restart rather than assuming a stored backup was applied.</span>
                 }
                 else
                 {
                     <span class="badge bg-secondary">None stored</span>
-                    <span>No exit-state backup is stored, so a restart imports nothing. Export one below and
-                    keep the copy.</span>
+                    <span>Nothing is stored yet, so a restart imports nothing. One is written automatically as
+                    soon as this wallet's leaves change; Export takes one now.</span>
                 }
             </p>
 
-            <form method="post" asp-action="ExportExitState" asp-route-storeId="@Model.StoreId"
-                  permission="@Policies.CanModifyStoreSettings">
-                <button type="submit" class="btn btn-secondary" id="SparkExportExitState">
-                    Export exit state
-                </button>
-                <div class="form-text">
-                    Reads the current data out of this store's running wallet. It <strong>changes nothing</strong>
-                    and can fail if the wallet is not running — try again once it is.
-                </div>
-            </form>
+            <div class="d-flex flex-wrap gap-2">
+                <form method="post" asp-action="DownloadExitStateBackup" asp-route-storeId="@Model.StoreId"
+                      permission="@Policies.CanModifyStoreSettings">
+                    <button type="submit" class="btn btn-primary" id="SparkDownloadExitState"
+                            disabled="@(Model.ExitStateBackupTakenAt is null)">
+                        Download backup
+                    </button>
+                </form>
+                <form method="post" asp-action="ExportExitState" asp-route-storeId="@Model.StoreId"
+                      permission="@Policies.CanModifyStoreSettings">
+                    <button type="submit" class="btn btn-secondary" id="SparkExportExitState">
+                        Export exit state
+                    </button>
+                </form>
+            </div>
+            <div class="form-text mb-3">
+                <strong>Download backup</strong> is the stored copy, as a file to keep somewhere other than
+                this server. <strong>Export exit state</strong> reads the running wallet now, refreshes that
+                stored copy, and shows it below — use it when you want one current this second, or want to
+                paste the value by hand. Exporting <strong>changes nothing</strong> and can fail if the wallet
+                is not running; try again once it is.
+            </div>
 
             @if (Model.ExportedExitState is { Length: > 0 } exported)
             {

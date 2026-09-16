@@ -297,6 +297,17 @@ public static class Constants
     public static readonly TimeSpan ConfigSweepInterval = TimeSpan.FromMinutes(30);
 
     /// <summary>
+    /// How often <c>ExitStateBackupTask</c> runs, measured from the end of the previous pass.
+    /// </summary>
+    /// <remarks>
+    /// The task is a passive walker: it asks <c>ExitStateBackupScheduler.ShouldTake</c> per store, and the
+    /// debounce and safety-net intervals there do the actual deciding. One minute matches the resolution
+    /// merchants already expect from Lightning checkout elsewhere in this plugin; the export itself costs a
+    /// live SDK call plus a multi-megabyte write per store that is actually due.
+    /// </remarks>
+    public static readonly TimeSpan ExitStateBackupInterval = TimeSpan.FromMinutes(1);
+
+    /// <summary>
     /// Wall clock a single reconciliation pass may spend before it stops starting new stores.
     /// </summary>
     /// <remarks>

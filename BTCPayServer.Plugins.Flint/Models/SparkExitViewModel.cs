@@ -167,26 +167,6 @@ public class SparkExitViewModel
     [ValidateNever]
     public SparkExitVerdict? CheckResult { get; set; }
 
-    /// <summary>Whether an exit-state backup blob is currently stored for this store. Presence only.</summary>
-    /// <remarks>
-    /// The blob itself is never rendered back into the page, for the same reason the Breez API key is not:
-    /// it carries every leaf and its transactions, so it discloses the balance, how it is split and the
-    /// history. The Advanced page therefore shows only whether one exists, and an operator who wants a copy
-    /// asks for a fresh export.
-    /// </remarks>
-    public bool HasExitStateBackup { get; set; }
-
-    /// <summary>
-    /// A freshly exported exit-state blob, held for one render so the operator can copy it.
-    /// </summary>
-    /// <remarks>
-    /// <b>Never a stored blob.</b> This is set only by the export action, from a live SDK call, and is
-    /// discarded with the response — there is no path that reads the stored backup and puts it in a page.
-    /// Set as its own field rather than appended to <see cref="HasExitStateBackup"/> so a render cannot
-    /// confuse "a backup exists" with "here is the backup".
-    /// </remarks>
-    public string? ExportedExitState { get; set; }
-
     /// <summary>The chain this server runs on, named in the copy that depends on it.</summary>
     public string NetworkName { get; set; } = string.Empty;
 

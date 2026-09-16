@@ -346,7 +346,7 @@ public class SparkServiceStartupTests
         using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
-        WithExitStateBackup(h, BackupStore, "the-stored-backup-blob");
+        await WithExitStateBackup(h, BackupStore, "the-stored-backup-blob");
 
         StartWithinTimeout(h);
 
@@ -404,7 +404,7 @@ public class SparkServiceStartupTests
         using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
-        WithExitStateBackup(h, BackupStore, secret);
+        await WithExitStateBackup(h, BackupStore, secret);
 
         StartWithinTimeout(h);
         await WaitUntil(
@@ -413,6 +413,53 @@ public class SparkServiceStartupTests
 
         Assert.DoesNotContain(secret, h.Log.AllText);
     }
+
+    /// <summary>
+    /// A backup an earlier version of the plugin left in the store's settings is adopted on connect:
+    /// imported into the wallet, moved to the plugin's own file, and the old setting cleared.
+    /// </summary>
+    /// <remarks>
+    /// <b>The upgrade path is the whole reason the deprecated setting still deserializes.</b> A store
+    /// upgrading from the old version may hold its only copy of the backup there; an upgrade that
+    /// silently stopped reading the slot — or, worse, cleared it without moving it — would lose the
+    /// exit data of every leaf that version had learned about, which is exactly the loss the backup
+    /// exists to prevent. Asserted end to end because each step commits only on the last: a build
+    /// that wrote the file before the import succeeded, or cleared the setting when the write
+    /// failed, fails one of these three assertions.
+    /// </remarks>
+    [Fact]
+    public async Task A_backup_left_in_the_old_settings_location_is_adopted_on_connect()
+    {
+        const string legacySecret = "legacy-blob-that-must-not-be-logged-4c1b";
+
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
+
+        // The shape the old version left behind: written through the store repository, not the
+        // in-memory cache, because a real upgrade's value was persisted by a previous run.
+        var settings = h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!;
+        settings.UnilateralExit = new UnilateralExitSettings { ExitStateBackup = legacySecret };
+        h.Stores.Seed(BackupStore, Constants.StoreSettingsKey, settings);
+
+        StartWithinTimeout(h);
+
+        // The one wait point after which all three commits are visible: the plugin logs the adoption
+        // only once the file has taken the value and the setting has been cleared.
+        await WaitUntil(
+            () => h.Log.AllText.Contains("adopted an exit-state backup"),
+            "the legacy backup to be adopted");
+
+        Assert.Equal([legacySecret], h.Sdk.Clients[BackupStore].ExitImportCalls);
+        Assert.Equal(legacySecret, await h.ExitStateBackups.ReadAsync(BackupStore));
+        Assert.Null(
+            h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!
+                .UnilateralExit!.ExitStateBackup);
+
+        // And the adoption line, like every other on this path, names a length and not the value.
+        Assert.DoesNotContain(legacySecret, h.Log.AllText);
+    }
+
 
     /// <summary>
     /// Turns the experimental-exit gate on for the duration of a test.
@@ -441,18 +488,17 @@ public class SparkServiceStartupTests
     }
 
     /// <summary>
-    /// Gives a seeded store an exit-state backup in its persisted settings.
+    /// Places a store's exit-state backup on the plugin's own file — the location a previous run
+    /// stored it, read back by the connect through the real file store.
     /// </summary>
     /// <remarks>
-    /// Written through the store repository rather than the in-memory cache, because the connect path reads
-    /// what a <em>previous run</em> persisted — a test that set only the cache would be testing the harness.
+    /// The harness's store is the real <c>FileExitStateBackupStore</c> over a temp data directory, so
+    /// this is not a fake agreeing with itself: the import test below reads bytes this wrote, and a
+    /// connect that looked only at its own cache would find nothing.
     /// </remarks>
-    private static void WithExitStateBackup(SparkServiceHarness h, string storeId, string backup)
-    {
-        var settings = h.Stores.Stored<SparkSettings>(storeId, Constants.StoreSettingsKey)!;
-        settings.UnilateralExit = new UnilateralExitSettings { ExitStateBackup = backup };
-        h.Stores.Seed(storeId, Constants.StoreSettingsKey, settings);
-    }
+    private static Task WithExitStateBackup(SparkServiceHarness h, string storeId, string backup) =>
+        h.ExitStateBackups.WriteAsync(storeId, backup);
+
 
     private static async Task WaitUntil(Func<bool> condition, string what)
     {

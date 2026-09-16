@@ -108,6 +108,14 @@ public class SparkUnilateralExitServiceTests
         Assert.Empty(harness.Sdk.ExitQuoteCalls);
         Assert.Empty(harness.Records.Records);
         Assert.Empty(harness.Settings.Writes);
+
+        // And the exit-state surface, whose storage is a file rather than a settings write.
+        var backupAttempt = await harness.Service.SetExitStateBackupAsync(StoreId, "opaque-blob", Ct);
+        Assert.False(backupAttempt.Success);
+        Assert.Equal(SparkUnilateralExitService.FeatureDisabled, backupAttempt.Error);
+        Assert.Empty(harness.Backups.WriteCalls);
+
+        Assert.Empty(harness.Backups.ReadCalls);
     }
 
     #endregion
@@ -1532,6 +1540,90 @@ public class SparkUnilateralExitServiceTests
 
     #endregion
 
+    #region The exit-state backup
+
+    /// <summary>
+    /// A backup the operator pastes lands in the file store and not in the settings blob — the
+    /// value is multi-megabytes and settings are read on every settings read.
+    /// </summary>
+    [Fact]
+    public async Task A_pasted_backup_lands_in_the_file_store_and_not_in_the_settings_blob()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+
+        var result = await harness.Service.SetExitStateBackupAsync(StoreId, "opaque-sdk-backup", Ct);
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal("opaque-sdk-backup", harness.Backups.Stored(StoreId));
+        // No settings write at all, on the one save action the operator triggers by hand: keeping
+        // this value out of the settings column is the entire reason the file store exists.
+        Assert.Empty(harness.Settings.Writes);
+    }
+
+    /// <summary>
+    /// A paste past the ceiling is refused before anything is stored — almost always a mis-paste,
+    /// and a file that large is neither safe to hold nor safe to import.
+    /// </summary>
+    [Fact]
+    public async Task A_pasted_backup_past_the_size_ceiling_is_refused_before_anything_is_stored()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var result = await harness.Service.SetExitStateBackupAsync(
+            StoreId, new string('x', SparkUnilateralExitService.MaxExitStateBackupChars + 1), Ct);
+
+        Assert.False(result.Success);
+        Assert.NotNull(result.Error);
+        Assert.Contains("characters", result.Error);
+        Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.DeleteCalls);
+    }
+
+    /// <summary>
+    /// Re-pasting the backup already stored does not write it again.
+    /// </summary>
+    [Fact]
+    public async Task Re_pasting_the_stored_backup_does_not_write_it_again()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+
+        Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
+        Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
+
+        // A save button pressed twice, a page reloaded with the value still in the textarea: the
+        // equality check costs one string comparison and spares the disk a multi-megabyte rewrite.
+        Assert.Single(harness.Backups.WriteCalls);
+    }
+
+    /// <summary>Clearing the backup removes the file.</summary>
+    [Fact]
+    public async Task Clearing_the_backup_removes_the_file()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        await harness.Service.SetExitStateBackupAsync(StoreId, "to-be-cleared", Ct);
+
+        Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, null, Ct)).Success);
+
+        Assert.Null(harness.Backups.Stored(StoreId));
+        Assert.Contains(StoreId, harness.Backups.DeleteCalls);
+    }
+
+    [Fact]
+    public async Task Storing_a_backup_on_an_unconfigured_store_is_refused()
+    {
+        using var harness = Harness.Create();
+
+        var result = await harness.Service.SetExitStateBackupAsync(StoreId, "some-blob", Ct);
+
+        Assert.Equal(SparkUnilateralExitService.NotConfigured, result.Error);
+        Assert.Empty(harness.Backups.WriteCalls);
+    }
+
+    #endregion
+
     #region The page read
 
     /// <summary>The read reports the wallet, the balance, the active exit and the history in one pass.</summary>
@@ -2100,6 +2192,7 @@ public class SparkUnilateralExitServiceTests
                 Records,
                 Protector,
                 ExplorerClient,
+                Backups,
                 Network.RegTest,
                 Time,
                 NullLogger<SparkUnilateralExitService>.Instance);
@@ -2128,6 +2221,9 @@ public class SparkUnilateralExitServiceTests
         public FakeSparkStoreSettingsStore Settings { get; } = new();
 
         public InMemoryUnilateralExitRecordStore Records { get; } = new();
+
+        /// <summary>Where exit-state backups land; the real one is a file per store.</summary>
+        public FakeExitStateBackupStore Backups { get; } = new();
 
         public SparkMnemonicProtector Protector { get; }
 
