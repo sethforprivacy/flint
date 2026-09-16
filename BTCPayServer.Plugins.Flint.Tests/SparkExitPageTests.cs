@@ -1,11 +1,18 @@
 using System.Runtime.CompilerServices;
+using System.Text;
 using BTCPayServer.Abstractions.Constants;
+using BTCPayServer.Plugins.Flint.Controllers;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -707,6 +714,112 @@ public class SparkExitPageTests
 
         Assert.NotNull(h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
         Assert.Null(h.Mvc.TempData[WellKnownTempData.SuccessMessage]);
+    }
+
+    #endregion
+
+    #region The stored-backup download
+
+    /// <summary>
+    /// The download hands over exactly the bytes the store holds, and its response cannot be cached.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the one action on the surface that returns the backup itself rather than a page about it, so
+    /// it is the one whose body has to be byte-identical with what the next restart will import. A download
+    /// that re-encoded, normalised or truncated the blob would put an operator off with a copy of their exit
+    /// data that fails at import time — the worst possible moment to discover it, and the reason the payload
+    /// is asserted as bytes rather than as a string the controller was handed.
+    /// </para>
+    /// <para>
+    /// <b>The caching is not asserted as a header string this controller was told to set.</b> The
+    /// controller-level <c>ResponseCache</c> attribute is MVC's filter, and it runs before the action; so
+    /// the filter is run here, in that same position, against the context the harness built, and what the
+    /// response carries afterwards is what is checked. Nothing about the download would fail if the policy
+    /// were removed — which is exactly why it is asserted rather than assumed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task The_download_returns_the_stored_bytes_and_the_response_is_not_cacheable()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        const string secret = "exit-state-blob-that-must-not-be-logged-2f7c";
+        var takenAt = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        await h.ExitStateBackups.WriteAsync(Store, secret, CancellationToken.None);
+        h.ExitStateBackups.TakenAt = takenAt;
+
+        ApplyControllerCachePolicy(h.Mvc);
+
+        var file = Assert.IsType<FileContentResult>(
+            await h.Mvc.DownloadExitStateBackup(Store, CancellationToken.None));
+
+        Assert.Equal(Encoding.UTF8.GetBytes(secret), file.FileContents);
+        Assert.Equal("application/octet-stream", file.ContentType);
+
+        // The stamp is in the name because the artifact lands in a directory the operator keeps, where two
+        // files of one name are indistinguishable a year later.
+        Assert.Equal($"exit-state-backup-{Store}-{takenAt:yyyyMMdd-HHmmss}.txt", file.FileDownloadName);
+
+        var cacheControl = h.Mvc.HttpContext.Response.Headers.CacheControl.ToString();
+        Assert.Contains("no-store", cacheControl);
+        Assert.DoesNotContain("max-age", cacheControl);
+    }
+
+    /// <summary>
+    /// A download with nothing stored redirects, and says why in the sentence the page shows.
+    /// </summary>
+    /// <remarks>
+    /// Not an empty file: a zero-byte download reads as a successful one, and a backup that imports as
+    /// nothing is worse than the honest absence — the operator believes they have a copy.
+    /// </remarks>
+    [Fact]
+    public async Task A_download_with_nothing_stored_redirects_with_the_reason()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+
+        var redirect = Assert.IsType<RedirectToActionResult>(
+            await h.Mvc.DownloadExitStateBackup(Store, CancellationToken.None));
+
+        Assert.Equal(nameof(h.Mvc.Advanced), redirect.ActionName);
+        Assert.Null(h.Mvc.TempData[WellKnownTempData.SuccessMessage]);
+
+        var message = Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
+        Assert.Contains("No exit-state backup is stored", message);
+
+        // Where one comes from, since the page's own copy says the plugin takes them automatically and the
+        // operator has just been told there is nothing to download.
+        Assert.Contains("automatically", message);
+    }
+
+    /// <summary>
+    /// Runs the controller's caching filter where MVC runs it — as an action filter, before the action.
+    /// </summary>
+    /// <remarks>
+    /// Not a re-statement of what the attribute says: this is the framework's own filter, built from the
+    /// attribute the controller actually carries, writing to the request context the harness built for it.
+    /// A file result is a body like any other to the filter, which is the property being checked.
+    /// </remarks>
+    private static void ApplyControllerCachePolicy(SparkController mvc)
+    {
+        var attribute = typeof(SparkController)
+            .GetCustomAttributes(typeof(ResponseCacheAttribute), inherit: false)
+            .Cast<ResponseCacheAttribute>()
+            .Single();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
+        services.AddSingleton(Options.Create(new MvcOptions()));
+
+        var filter = (IActionFilter)((IFilterFactory)attribute)
+            .CreateInstance(services.BuildServiceProvider());
+
+        filter.OnActionExecuting(new ActionExecutingContext(
+            mvc.ControllerContext, [], new Dictionary<string, object?>(), mvc));
     }
 
     #endregion

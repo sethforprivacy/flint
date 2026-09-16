@@ -1229,6 +1229,15 @@ public class SparkController : Controller
     /// POST rather than GET. This hands out the most sensitive blob the plugin holds, and a GET would put
     /// the act of taking it into the URL, the access log, and anything that follows a link.
     /// </para>
+    /// <para>
+    /// <b>Not cacheable, and it inherits that.</b> The response is the wallet's whole exit state, and a
+    /// stored copy of it would live on browser or proxy machinery this plugin does not control. The
+    /// controller-level <c>[ResponseCache(NoStore = true, Location = None)]</c> is what prevents it: MVC
+    /// runs that filter before the action, so the header is on the response whatever the action returns — a
+    /// file body included. Per-controller rather than per-action is this class's own convention (see the
+    /// note above the attribute); the download's share of it is pinned by a test, since it is the one
+    /// action on this controller whose body is a secret rather than a page.
+    /// </para>
     /// </remarks>
     [HttpPost("advanced/exit-state/download")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]

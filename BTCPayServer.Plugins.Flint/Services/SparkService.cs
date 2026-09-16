@@ -1005,11 +1005,9 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
     /// ever consulted when the file is absent — so a failed clear costs one retry at most.
     /// </para>
     /// <para>
-    /// The setting is rewritten through the repository, not <see cref="Set"/>: <c>Set</c> reconciles the
-    /// running instance, which would tear down and reconnect the wallet this very connect is warming up,
-    /// on a path where no operator asked for anything. A concurrent reconfiguration racing this write
-    /// rewrites the slot from a fresh read rather than a cached one for the same reason: the cached blob
-    /// may predate a change this method has no business reverting.
+    /// The clearing itself is <see cref="ClearExitStateBackupSlot"/>'s, shared with the page's own clear of
+    /// the backup — including why the row is rewritten through the repository rather than
+    /// <see cref="Set"/>.
     /// </para>
     /// <para>
     /// Logs the length and nothing else, as everywhere this blob is handled.
@@ -1034,17 +1032,7 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
 
         try
         {
-            var stored = await _storeRepository
-                .GetSettingAsync<SparkSettings>(storeId, Constants.StoreSettingsKey)
-                .ConfigureAwait(false);
-
-            if (stored?.UnilateralExit is { } exit && !string.IsNullOrEmpty(exit.ExitStateBackup))
-            {
-                exit.ExitStateBackup = null;
-                await _storeRepository
-                    .UpdateSetting(storeId, Constants.StoreSettingsKey, stored)
-                    .ConfigureAwait(false);
-            }
+            await ClearExitStateBackupSlot(storeId).ConfigureAwait(false);
 
             _logger.LogInformation(
                 "Store {StoreId}: adopted an exit-state backup left by an earlier version of this plugin "
@@ -1058,6 +1046,59 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
                 + "old setting could not be cleared; the stored file is the copy that counts",
                 storeId);
         }
+    }
+
+    /// <summary>
+    /// Clears a store's deprecated <see cref="UnilateralExitSettings.ExitStateBackup"/> slot — the
+    /// persisted row and the cached instance alike.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Both, or the clear did not happen.</b> The cached instance is what every reader gets:
+    /// <see cref="Get"/> hands back a clone of it, and both whole-settings writers rebuild from that clone
+    /// — <c>SparkUnilateralExitService.SaveExitSettingsAsync</c> clones the settings and the exit section
+    /// before storing, and <c>SparkStoreProvisioner</c> carries the previous exit settings across a
+    /// re-provision. A row cleared while the cache kept the blob is therefore a row the next disclosure
+    /// acknowledgement fills back in, and adoption is never consulted again once the file exists.
+    /// </para>
+    /// <para>
+    /// <b>The row is read fresh rather than taken from the cache, and written through the repository rather
+    /// than through <see cref="Set"/>.</b> <c>Set</c> reconciles the running instance, which would tear
+    /// down and reconnect a wallet on a path where no operator asked for anything — the connect that is
+    /// adopting right now, or a merchant's browser. A concurrent reconfiguration racing this write
+    /// rewrites the slot from a fresh read rather than a cached one for the same reason: the cached blob
+    /// may predate a change this method has no business reverting.
+    /// </para>
+    /// <para>
+    /// <b>The cache is cleared in place, not dropped.</b> A store missing from the cache reads as "no
+    /// Spark configuration" to every reader — <see cref="Get"/>, <see cref="Resolve"/>,
+    /// <see cref="HasAnyStoreProvisioned"/> — so invalidating the entry would trade a stale field for a
+    /// lie about the store existing at all.
+    /// </para>
+    /// <para>
+    /// Row first, cache second, the way <see cref="Set"/> orders the same two steps: a process that died
+    /// between them converges on the stored row at the next startup. Nothing names the value; it is the
+    /// wallet's whole exit state.
+    /// </para>
+    /// </remarks>
+    private async Task ClearExitStateBackupSlot(string storeId)
+    {
+        var stored = await _storeRepository
+            .GetSettingAsync<SparkSettings>(storeId, Constants.StoreSettingsKey)
+            .ConfigureAwait(false);
+
+        if (stored?.UnilateralExit is { } exit && !string.IsNullOrEmpty(exit.ExitStateBackup))
+        {
+            exit.ExitStateBackup = null;
+            await _storeRepository
+                .UpdateSetting(storeId, Constants.StoreSettingsKey, stored)
+                .ConfigureAwait(false);
+        }
+
+        // Unconditionally, not only when the row moved: an empty row and a populated cache is a state this
+        // method has been called to end regardless of which half is holding it.
+        if (_settings.TryGetValue(storeId, out var cached) && cached.UnilateralExit is { } cachedExit)
+            cachedExit.ExitStateBackup = null;
     }
 
     /// <summary>
@@ -1743,6 +1784,10 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
     /// <inheritdoc />
     Task<SparkSettingsApplied> ISparkStoreSettingsStore.SetAsync(string storeId, SparkSettings? settings) =>
         Set(storeId, settings);
+
+    /// <inheritdoc />
+    Task ISparkStoreSettingsStore.ClearExitStateBackupSlotAsync(string storeId) =>
+        ClearExitStateBackupSlot(storeId);
 
     /// <inheritdoc />
     string ISparkStoreRuntime.GetStorageDirectory(string storeId) => GetWorkDir(storeId);

@@ -548,7 +548,10 @@ public class UnilateralExitSettings
     /// It was moved because it is a multi-megabyte secret and the settings blob is deserialized on
     /// every settings read. Nothing may treat a non-null value here as "a backup is stored": the file
     /// is the only answer after a connect has run, and before it neither is complete. Nothing may
-    /// write a live value here either — the page and the automation both use the file store.
+    /// write a live value here either — the page and the automation both use the file store, and
+    /// clearing the backup from the page empties this slot with it
+    /// (<c>SparkService.ClearExitStateBackupSlot</c>), because a leftover here would be adopted back
+    /// over the cleared file on the next connect.
     /// </para>
     /// </remarks>
     public string? ExitStateBackup { get; set; }

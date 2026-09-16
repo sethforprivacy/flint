@@ -94,15 +94,20 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
         // Written to a sibling rather than in place, then renamed over the target. The overwrite flag is
         // what makes the move a replace: without it the second backup for a store would throw on the
         // existing file.
-        await File.WriteAllTextAsync(temporary, backup, cancellationToken).ConfigureAwait(false);
-
+        //
+        // The guard covers the write as well as the rename, because a half-written backup is debris
+        // whichever of the two failed: a full disk, an IO error mid-write, or a cancellation part way
+        // through a multi-megabyte blob all leave a partial copy of the secret behind, and nothing else
+        // ever removes it. The target is only ever reached by the rename, so a failed pass here leaves the
+        // backup that was stored before it exactly as it was — old or new, never a mixture.
         try
         {
+            await File.WriteAllTextAsync(temporary, backup, cancellationToken).ConfigureAwait(false);
             File.Move(temporary, path, overwrite: true);
         }
         catch
         {
-            // The half-written temp has no value once the replace failed, and leaving it beside every
+            // The temp has no value once the write or the replace failed, and leaving it beside every
             // store's real backup is how a directory of secrets accumulates debris.
             TryDelete(temporary);
             throw;

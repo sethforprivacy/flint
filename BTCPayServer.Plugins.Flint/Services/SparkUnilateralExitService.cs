@@ -591,7 +591,12 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     storeId);
             }
 
-            if (compared && string.Equals(current, normalised, StringComparison.Ordinal))
+            // A clear never takes this shortcut. "Nothing stored" is what the file answers for a store whose
+            // deprecated settings slot still holds a blob — upgraded while the feature was off, or not yet
+            // reconnected since, or a file write that failed during adoption — and the press that empties
+            // one location has to empty the other with it.
+            if (compared && normalised is not null &&
+                string.Equals(current, normalised, StringComparison.Ordinal))
             {
                 // No write for a press that changes nothing, and the comparison is by value rather than
                 // by reference so a re-paste of the same blob is also a no-op. This used to be required
@@ -608,6 +613,13 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 if (normalised is null)
                 {
                     await _backups.DeleteAsync(storeId, cancellationToken).ConfigureAwait(false);
+
+                    // Both locations, or the word "cleared" is a promise the next connect breaks:
+                    // RestoreExitStateAsync adopts from the deprecated slot whenever the file is empty, so a
+                    // store that still holds a value there takes back the blob this press removed — under a
+                    // banner telling the operator a restart will import nothing.
+                    await _settingsStore.ClearExitStateBackupSlotAsync(storeId).ConfigureAwait(false);
+
                     _logger.LogInformation(
                         "Store {StoreId}: the stored exit-state backup was cleared", storeId);
                 }

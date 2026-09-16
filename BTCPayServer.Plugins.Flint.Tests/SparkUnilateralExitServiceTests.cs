@@ -1611,6 +1611,37 @@ public class SparkUnilateralExitServiceTests
         Assert.Contains(StoreId, harness.Backups.DeleteCalls);
     }
 
+    /// <summary>
+    /// A clear press clears the deprecated settings slot as well, without a whole-blob settings write.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The banner the operator is shown is the thing at stake.</b> Clearing reports that no backup is
+    /// stored now and that a restart will import none — and the connect adopts from the deprecated slot
+    /// whenever the file is empty. So a store that still held a value there (upgraded while the feature was
+    /// off, or not reconnected since, or adoption's file write having failed) took the blob back on its next
+    /// connect, under that sentence.
+    /// </para>
+    /// <para>
+    /// Nothing is stored here before the press, which is the state the defect needed: a file that already
+    /// reads as empty is what the unchanged-value comparison answers about, and the press used to stop there
+    /// having touched nothing. The empty <c>Writes</c> is the other half — writing the whole settings blob to
+    /// null one field would reconcile the store's wallet, and a press that stores nothing must not.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Clearing_the_backup_clears_the_deprecated_slot_without_a_settings_write()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup = "legacy-blob";
+
+        Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, null, Ct)).Success);
+
+        Assert.Null(harness.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup);
+        Assert.Empty(harness.Settings.Writes);
+    }
+
     [Fact]
     public async Task Storing_a_backup_on_an_unconfigured_store_is_refused()
     {

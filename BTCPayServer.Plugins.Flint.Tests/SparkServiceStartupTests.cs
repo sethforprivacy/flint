@@ -462,6 +462,53 @@ public class SparkServiceStartupTests
 
 
     /// <summary>
+    /// An adopted backup leaves no copy reachable from the settings cache either.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The database being clear is only half the clear.</b> Every reader gets the cached instance —
+    /// <c>SparkService.Get</c> hands back a clone of it — and both whole-settings writers rebuild from that
+    /// clone: <c>SparkUnilateralExitService.SaveExitSettingsAsync</c> clones the settings and the exit
+    /// section before storing, and a re-provision carries the previous exit settings across. A cache still
+    /// holding the blob is therefore a blob the next disclosure acknowledgement writes back into the
+    /// settings column, where it stays for good — adoption is never consulted again once the file exists,
+    /// which is precisely when nothing is left to clear it.
+    /// </para>
+    /// <para>
+    /// The two are read through different doors on purpose: the repository for the row, the service for the
+    /// cache. A fake repository that handed back the very instance the cache holds would let an
+    /// implementation that cleared neither pass this.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_adopted_backup_leaves_no_copy_behind_in_the_settings_cache()
+    {
+        const string legacySecret = "legacy-blob-that-must-not-be-logged-7d22";
+
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
+
+        var seeded = h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!;
+        seeded.UnilateralExit = new UnilateralExitSettings { ExitStateBackup = legacySecret };
+        h.Stores.Seed(BackupStore, Constants.StoreSettingsKey, seeded);
+
+        StartWithinTimeout(h);
+        await WaitUntil(
+            () => h.Log.AllText.Contains("adopted an exit-state backup"),
+            "the legacy backup to be adopted");
+
+        Assert.Null(
+            h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!
+                .UnilateralExit!.ExitStateBackup);
+
+        // The read every later whole-settings write is built from.
+        var cached = await h.Service.Get(BackupStore);
+        Assert.NotNull(cached);
+        Assert.Null(cached.UnilateralExit!.ExitStateBackup);
+    }
+
+    /// <summary>
     /// Turns the experimental-exit gate on for the duration of a test.
     /// </summary>
     /// <remarks>
