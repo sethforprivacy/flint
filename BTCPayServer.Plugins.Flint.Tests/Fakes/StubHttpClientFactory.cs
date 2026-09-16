@@ -7,7 +7,7 @@ namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 /// An <see cref="IHttpClientFactory"/> that hands out one client over a handler a test controls.
 /// </summary>
 /// <remarks>
-/// The alternative — letting the catalogue reach the real endpoint — would make the suite depend on a third
+/// The alternative - letting the catalogue reach the real endpoint - would make the suite depend on a third
 /// party's uptime to answer a question about this plugin's own caching, and would make "the fetch failed" a
 /// scenario nobody could arrange on purpose.
 /// </remarks>
@@ -55,6 +55,14 @@ public sealed class StubHttpMessageHandler : HttpMessageHandler
     /// <summary>Completes when the first request arrives, so a test need not poll for it.</summary>
     public Task Started => _started.Task;
 
+    /// <summary>
+    /// Routes every request through <paramref name="respond"/>, letting a test inspect the request and
+    /// decide the response. Use when the default factory methods do not expose enough control.
+    /// </summary>
+    public static StubHttpMessageHandler Capture(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond) =>
+        new(respond);
+
     /// <summary>Answers every request with <paramref name="body"/> as <c>200 application/json</c>.</summary>
     public static StubHttpMessageHandler Returning(string body) =>
         new((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
@@ -70,6 +78,34 @@ public sealed class StubHttpMessageHandler : HttpMessageHandler
     public static StubHttpMessageHandler Offline() =>
         new((_, _) => Task.FromException<HttpResponseMessage>(
             new HttpRequestException("no route to host")));
+
+    /// <summary>
+    /// Returns responses from <paramref name="statuses"/> in order, then repeats the last one for any
+    /// subsequent requests. Useful for testing retry logic: pass e.g. 503, 503, 200 to get two failures
+    /// followed by a success.
+    /// </summary>
+    public static StubHttpMessageHandler Sequence(params HttpStatusCode[] statuses)
+    {
+        var index = 0;
+        return new StubHttpMessageHandler((_, _) =>
+        {
+            var i = Math.Min(Interlocked.Increment(ref index) - 1, statuses.Length - 1);
+            return Task.FromResult(new HttpResponseMessage(statuses[i]));
+        });
+    }
+
+    /// <summary>
+    /// Fails the first request with a network exception, then returns 200 for every request after.
+    /// The inverse of <see cref="OnceThenOffline"/>: useful for testing retry logic where the
+    /// first attempt hits a transient network error and the second one succeeds.
+    /// </summary>
+    public static StubHttpMessageHandler FailOnceThenOK()
+    {
+        var called = 0;
+        return new StubHttpMessageHandler((_, _) => Interlocked.Increment(ref called) == 1
+            ? Task.FromException<HttpResponseMessage>(new HttpRequestException("connection refused"))
+            : Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
+    }
 
     /// <summary>Answers the first request and refuses every one after it: an endpoint that goes away.</summary>
     public static StubHttpMessageHandler OnceThenOffline(string body)
@@ -88,7 +124,7 @@ public sealed class StubHttpMessageHandler : HttpMessageHandler
     /// Answers with a body that starts like the real one and then never stops.
     /// </summary>
     /// <remarks>
-    /// Chunked, so there is no <c>Content-Length</c> to check — which is why the ceiling has to be applied while
+    /// Chunked, so there is no <c>Content-Length</c> to check - which is why the ceiling has to be applied while
     /// reading rather than off a header. This is the shape of the failure worth defending against: not a large
     /// response, but one that has no end.
     /// </remarks>
@@ -190,7 +226,7 @@ public static class RecordedPayloads
     /// <remarks>
     /// <para>
     /// Every route object is verbatim from the live response, field for field. It is a <em>subset</em>: all 114
-    /// routes whose source chain is Spark — which is everything the projection can possibly keep — plus twenty
+    /// routes whose source chain is Spark - which is everything the projection can possibly keep - plus twenty
     /// sourced elsewhere, so the source filter has something to filter. Eight of those twenty are the tokenised
     /// equities that reach Robinhood Chain from other sources and never from Spark; they are in the recording
     /// on purpose, because they are what an unfiltered projection would put in a merchant's sweep picker. The

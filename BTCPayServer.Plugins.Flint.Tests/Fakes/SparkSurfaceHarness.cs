@@ -271,8 +271,10 @@ public sealed class SparkSurfaceHarness
         var api = new GreenfieldSparkController(
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
-            depositService, stableBalanceService,
-            NullLogger<GreenfieldSparkController>.Instance);
+            runtime, depositService, stableBalanceService,
+            NullLogger<GreenfieldSparkController>.Instance,
+            // Server-level settings (GET/PUT /api/v1/server/spark) are not exercised by this harness.
+            null!);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };
 

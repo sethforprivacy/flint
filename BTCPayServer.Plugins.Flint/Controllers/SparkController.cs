@@ -538,7 +538,7 @@ public class SparkController : Controller
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
         var result = await _sweepEngine
-            .RunAsync(storeId, SweepTrigger.Manual, cancellationToken)
+            .RunAsync(storeId, SweepTrigger.Manual, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         TempData[result.Succeeded ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] =

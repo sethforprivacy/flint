@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
+using BTCPayServer.Plugins.Flint;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Client;
 using BTCPayServer.Data;
@@ -11,12 +13,14 @@ using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
+using BTCPayServer.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Logging;
+using NBitcoin;
 using Newtonsoft.Json.Serialization;
 
 namespace BTCPayServer.Plugins.Flint.Controllers;
@@ -83,9 +87,11 @@ public class GreenfieldSparkController : ControllerBase
     private readonly SparkStoreStatusReader _statusReader;
     private readonly SparkSweepSettingsService _sweepSettings;
     private readonly SparkSweepEngine _sweepEngine;
+    private readonly ISparkStoreRuntime _runtime;
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
     private readonly ILogger<GreenfieldSparkController> _logger;
+    private readonly SettingsRepository _serverSettingsRepository;
 
     public GreenfieldSparkController(
         ISparkStoreSettingsStore settingsStore,
@@ -94,9 +100,11 @@ public class GreenfieldSparkController : ControllerBase
         SparkStoreStatusReader statusReader,
         SparkSweepSettingsService sweepSettings,
         SparkSweepEngine sweepEngine,
+        ISparkStoreRuntime runtime,
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
-        ILogger<GreenfieldSparkController> logger)
+        ILogger<GreenfieldSparkController> logger,
+        SettingsRepository serverSettingsRepository)
     {
         _settingsStore = settingsStore;
         _provisioner = provisioner;
@@ -104,9 +112,11 @@ public class GreenfieldSparkController : ControllerBase
         _statusReader = statusReader;
         _sweepSettings = sweepSettings;
         _sweepEngine = sweepEngine;
+        _runtime = runtime;
         _deposits = deposits;
         _stableBalance = stableBalance;
         _logger = logger;
+        _serverSettingsRepository = serverSettingsRepository;
     }
 
     #region Status
@@ -373,6 +383,32 @@ public class GreenfieldSparkController : ControllerBase
     /// are not reported as an error status.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// One sweep record, by its idempotency key.
+    /// </summary>
+    [Authorize(Policy = Policies.CanViewStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpGet("~/api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}")]
+    public async Task<IActionResult> GetSweepRecord(
+        [FromRoute] string storeId,
+        [FromRoute] string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+            return NotConfigured();
+
+        var record = await _sweepSettings
+            .ReadRecordAsync(store.Id, idempotencyKey, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (record is null)
+            return NotFound(new { Code = "sweep-record-not-found", Message = "No sweep record with that idempotency key." });
+
+        return Ok(SparkSweepRecordData.From(record));
+    }
+
     [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
     [HttpPost("~/api/v1/stores/{storeId}/spark/sweep")]
     public async Task<IActionResult> Sweep(
@@ -395,8 +431,26 @@ public class GreenfieldSparkController : ControllerBase
             return Ok(ToModel(preview));
         }
 
+        if (request?.DestinationAddress is not null)
+        {
+            try
+            {
+                BitcoinAddress.Create(request.DestinationAddress, _sweepSettings.Network);
+            }
+            catch
+            {
+                return this.CreateAPIError(422, "invalid-destination",
+                    $"'{request.DestinationAddress}' is not a valid Bitcoin address on {_sweepSettings.Network.ChainName}.");
+            }
+        }
+
         var result = await _sweepEngine
-            .RunAsync(store.Id, SweepTrigger.Manual, cancellationToken)
+            .RunAsync(
+                store.Id,
+                SweepTrigger.Manual,
+                force: request?.Force ?? false,
+                destinationOverride: request?.DestinationAddress,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(SparkSweepResultData.From(result));
@@ -606,6 +660,97 @@ public class GreenfieldSparkController : ControllerBase
 
     #endregion
 
+    #region Balance sync
+
+    /// <summary>
+    /// Forces a wallet sync and returns the current Spark balance.
+    /// </summary>
+    /// <remarks>
+    /// The balance reported by other endpoints is read from the SDK cache without forcing a sync and may lag
+    /// settlement by up to 20 seconds. This endpoint forces an explicit sync before reading, so the returned
+    /// value is current at call time. It does not trigger or preview a sweep.
+    /// </remarks>
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPost("~/api/v1/stores/{storeId}/spark/sync")]
+    public async Task<IActionResult> SyncBalance([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+            return NotConfigured();
+
+        var sdk = await _runtime.GetSdkClientAsync(store.Id).ConfigureAwait(false);
+
+        if (sdk is null)
+        {
+            return Ok(new SparkBalanceSyncData
+            {
+                WalletRunning = false,
+                BalanceSats = 0,
+                SyncedAt = DateTimeOffset.UtcNow
+            });
+        }
+
+        await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
+        var info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+
+        return Ok(new SparkBalanceSyncData
+        {
+            WalletRunning = true,
+            BalanceSats = info.BalanceSats,
+            SyncedAt = DateTimeOffset.UtcNow
+        });
+    }
+
+    #endregion
+
+    #region Server settings
+
+    /// <summary>Flint server-level settings (shared across all stores).</summary>
+    [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpGet("~/api/v1/server/spark")]
+    public async Task<IActionResult> GetServerSettings(CancellationToken cancellationToken)
+    {
+        var settings = await _serverSettingsRepository
+            .GetSettingAsync<SparkServerSettings>()
+            .ConfigureAwait(false) ?? new SparkServerSettings();
+
+        return Ok(new SparkServerSettingsData { UpdateWebhookUrl = settings.UpdateWebhookUrl });
+    }
+
+    /// <summary>Update Flint server-level settings.</summary>
+    [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPut("~/api/v1/server/spark")]
+    public async Task<IActionResult> UpdateServerSettings(
+        [FromBody] SparkServerSettingsRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(request?.UpdateWebhookUrl))
+        {
+            if (!Uri.TryCreate(request.UpdateWebhookUrl, UriKind.Absolute, out var uri)
+                || uri.Scheme is not ("http" or "https"))
+            {
+                return this.CreateAPIError(422, "invalid-update-webhook-url",
+                    $"'{request.UpdateWebhookUrl}' is not a valid http/https URL.");
+            }
+        }
+
+        var settings = await _serverSettingsRepository
+            .GetSettingAsync<SparkServerSettings>()
+            .ConfigureAwait(false) ?? new SparkServerSettings();
+
+        settings.UpdateWebhookUrl = string.IsNullOrWhiteSpace(request?.UpdateWebhookUrl)
+            ? null
+            : request.UpdateWebhookUrl;
+
+        await _serverSettingsRepository.UpdateSetting(settings).ConfigureAwait(false);
+
+        return Ok(new SparkServerSettingsData { UpdateWebhookUrl = settings.UpdateWebhookUrl });
+    }
+
+    #endregion
+
     #region Mapping
 
     private SparkStatusData ToModel(SparkStoreStatus status) => new()
@@ -622,19 +767,40 @@ public class GreenfieldSparkController : ControllerBase
         StorageDirectory = status.StorageDirectoryFor(User)
     };
 
-    private SparkSweepConfigurationData ToModel(SparkSweepSettingsView view, SparkSweepHistoryPage history) => new()
+    private SparkSweepConfigurationData ToModel(SparkSweepSettingsView view, SparkSweepHistoryPage history)
     {
-        Settings = view.Settings,
-        WalletRunning = view.WalletRunning,
-        BalanceSats = view.BalanceSats,
-        StoreWalletStatus = view.StoreWalletStatus,
-        StoreWalletReason = view.StoreWalletReason,
-        Network = _sweepSettings.Network.ChainName.ToString(),
-        Total = history.Total,
-        Skip = history.Skip,
-        Count = history.Count,
-        History = history.Records.Select(SparkSweepRecordData.From).ToList()
-    };
+        var warnings = new List<string>();
+        var networkName = _sweepSettings.Network.ChainName.ToString();
+        if (networkName == "Mainnet")
+        {
+            var threshold = view.Settings.BalanceThresholdSats;
+            var minSweep = view.Settings.MinimumSweepSats;
+            if (threshold < SweepSettings.DefaultBalanceThresholdSats)
+                warnings.Add(
+                    $"Balance threshold ({threshold:N0} sats) is below the " +
+                    $"{SweepSettings.DefaultBalanceThresholdSats:N0}-sat recommended minimum; " +
+                    "mainnet exit fees will represent a higher share of the swept amount.");
+            if (minSweep < SweepSettings.DefaultMinimumSweepSats)
+                warnings.Add(
+                    $"Minimum sweep amount ({minSweep:N0} sats) is below the " +
+                    $"{SweepSettings.DefaultMinimumSweepSats:N0}-sat recommended floor; " +
+                    "fee defaults were measured on regtest and are higher on mainnet.");
+        }
+        return new SparkSweepConfigurationData
+        {
+            Settings = view.Settings,
+            WalletRunning = view.WalletRunning,
+            BalanceSats = view.BalanceSats,
+            StoreWalletStatus = view.StoreWalletStatus,
+            StoreWalletReason = view.StoreWalletReason,
+            Network = networkName,
+            Total = history.Total,
+            Skip = history.Skip,
+            Count = history.Count,
+            History = history.Records.Select(SparkSweepRecordData.From).ToList(),
+            Warnings = warnings
+        };
+    }
 
     private static SparkSweepPreviewData ToModel(SweepPreview preview) => new()
     {

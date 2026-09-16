@@ -21,8 +21,13 @@ Everything about the plugin beyond "what is it and how do I install it". Start a
 
 ## Automating it
 
-- **[Greenfield API](greenfield-api.md)** — the ten endpoints that do everything the pages do, their
+- **[Greenfield API](greenfield-api.md)** — the endpoints that do everything the pages do, their
   API-key permissions, and a worked `curl` script for provisioning a store headlessly.
+
+## Deploying it
+
+- **[Railway](railway.md)** — persistent volume requirements, environment variables, log rotation
+  options, and a post-deploy verification script for Railway deployments.
 
 ## Working on it
 
