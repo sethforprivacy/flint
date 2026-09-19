@@ -167,7 +167,7 @@ jobs:
       # it. It is also what exports the GitHub Actions cache credentials the `type=gha` backend needs —
       # a bare `docker buildx bake` in a `run:` step cannot see them.
       - name: Build and push
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
         with:
           # `source` is load-bearing, and it is the fixture checkout, not `.`: bake-action v7 has no
           # `workdir` input (the run warned about it and ignored it) — a *local* `source` IS the working
