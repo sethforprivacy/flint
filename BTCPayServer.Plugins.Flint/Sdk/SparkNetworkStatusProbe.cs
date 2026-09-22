@@ -137,7 +137,7 @@ public sealed class SparkNetworkStatusProbe : ISparkNetworkStatusProbe
         {
             var status = await SparkDeadline
                 .OrNullAsync(
-                    BreezSdkSparkMethods.GetSparkStatus(),
+                    BreezSdkSparkMethods.GetSparkStatus(new GetSparkStatusRequest(proxy: null)),
                     Deadline,
                     () => logger.LogDebug(
                         "Reading the Spark network status exceeded {Seconds}s", Deadline.TotalSeconds),

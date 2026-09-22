@@ -3,6 +3,7 @@ using System;
 using BTCPayServer.Plugins.Flint.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace BTCPayServer.Plugins.Flint.Migrations
 {
     [DbContext(typeof(SparkPluginDbContext))]
-    partial class SparkPluginDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260820175701_UnilateralExitRecords")]
+    partial class UnilateralExitRecords
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -22,30 +25,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
-
-            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.InvoicePaymentHash", b =>
-                {
-                    b.Property<string>("PaymentHash")
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("FirstSeenAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("InvoiceId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("PaymentMethodId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("PaymentHash");
-
-                    b.HasIndex("FirstSeenAt")
-                        .HasDatabaseName("IX_InvoicePaymentHashes_FirstSeenAt");
-
-                    b.ToTable("InvoicePaymentHashes", "BTCPayServer.Plugins.Flint");
-                });
 
             modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.InvoiceRecord", b =>
                 {
@@ -63,12 +42,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                         .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("CreditAbandonedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("CreditedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Description")
@@ -96,13 +69,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.HasKey("PaymentHash");
 
                     b.HasIndex("StoreId", "CreatedAt");
-
-                    b.HasIndex("StoreId", "ExpiresAt")
-                        .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
-                        .HasFilter("\"Status\" <> 1");
-
-                    b.HasIndex("StoreId", "SettledAt")
-                        .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
 
                     b.HasIndex("StoreId", "Status");
 

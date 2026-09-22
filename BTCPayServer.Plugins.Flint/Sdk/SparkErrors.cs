@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using Breez.Sdk.Spark;
 
 namespace BTCPayServer.Plugins.Flint.Sdk;
@@ -45,6 +46,7 @@ public static class SparkErrors
             SdkException.Signer signer => $"Spark signer error: {Strip(signer.v1)}",
             SdkException.InvalidUuid uuid => $"Invalid identifier: {Strip(uuid.v1)}",
             SdkException.Generic generic => Strip(generic.v1),
+            SdkException.InsufficientCpfpFunds shortfall => DescribeCpfpShortfall(ToSats(shortfall.requiredSat)),
             // MissingUtxo and MaxDepositClaimFeeExceeded carry several named fields rather than a
             // single v1, so there is nothing better to do than strip the synthesised prefix.
             SdkException => Strip(exception.Message),
@@ -140,10 +142,79 @@ public static class SparkErrors
                storage.v1?.Contains("no rows", StringComparison.OrdinalIgnoreCase) is true;
     }
 
+    /// <summary>
+    /// Turns the unilateral-exit-specific SDK error into a typed plugin exception, or returns null when the
+    /// failure is something else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>There is now exactly one of these, and there used to be two.</b> SDK 0.25 removed
+    /// <c>SdkException.FundingUtxoConflict</c> along with the build shape that could produce it: a conflict is
+    /// no longer reported as an error at all, because an earlier attempt's spent funding is followed to
+    /// whatever it became rather than rejected, and fresh funding can be passed alongside the old. What
+    /// remains is the shortfall, which a caller still has to act on and which needs the number the SDK
+    /// provides — the figure to put in front of an operator who has to top a funding address up.
+    /// </para>
+    /// <para>
+    /// Returns null rather than the original exception so a call site can use it as an exception filter and let
+    /// everything else escape unchanged, with its original stack.
+    /// </para>
+    /// </remarks>
+    public static Exception? TranslateUnilateralExit(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception switch
+        {
+            SdkException.InsufficientCpfpFunds shortfall =>
+                new SparkExitFundingShortfallException(ToSats(shortfall.requiredSat), shortfall),
+            _ => null
+        };
+    }
+
+    internal static string DescribeCpfpShortfall(long requiredSat) => string.Format(
+        CultureInfo.InvariantCulture,
+        "There is not enough confirmed Bitcoin on the exit funding address to pay the exit's on-chain fees. "
+        + "Spark needs at least {0:N0} sat available there, as a single confirmed output.",
+        requiredSat);
+
+    /// <remarks>
+    /// Every amount on the exit surface is a <c>u64</c> of satoshi — no tokens, no base units, no
+    /// <c>BigInteger</c> — so the only conversion hazard is the width, and it is clamped rather than wrapped:
+    /// an absurd value must not come out the other side as a negative fee.
+    /// </remarks>
+    private static long ToSats(ulong value) => (long)Math.Min(value, long.MaxValue);
+
     private static string Strip(string? message)
     {
         if (string.IsNullOrEmpty(message))
             return "Unknown Spark error.";
         return message.StartsWith("@v1=", StringComparison.Ordinal) ? message[4..] : message;
     }
+}
+
+/// <summary>
+/// Raised when a unilateral exit could not be built because its funding outputs do not cover the fees.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Recoverable, and the fix is a number.</b> A unilateral exit pays every one of its own on-chain fees from a
+/// separate confirmed UTXO the operator supplies, because the coins being recovered are locked behind timelocks
+/// and cannot pay for their own release. Under-funding it therefore fails the build rather than producing a
+/// cheaper exit — and the SDK says what would have been enough, which is carried here so an operator is told
+/// how much to add instead of being told to guess.
+/// </para>
+/// <para>
+/// Nothing was built, signed or broadcast, so retrying after topping the address up is safe.
+/// </para>
+/// </remarks>
+public sealed class SparkExitFundingShortfallException : InvalidOperationException
+{
+    public SparkExitFundingShortfallException(long requiredSat, Exception? innerException = null)
+        : base(SparkErrors.DescribeCpfpShortfall(requiredSat), innerException)
+    {
+        RequiredSat = requiredSat;
+    }
+
+    /// <summary>What the SDK said the exit needs, in satoshi, as a single confirmed output.</summary>
+    public long RequiredSat { get; }
 }

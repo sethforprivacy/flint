@@ -803,8 +803,16 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         });
     }
 
-    private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
+private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
     {
+        // Imported before the sync, and the order is the point. The SDK collects a leaf's exit data as it
+        // learns about the leaf, so bringing the backup in first means a leaf whose chain existed only in the
+        // backup is present before anything asks the operators about it. Doing it the other way round spends a
+        // round trip confirming a leaf set that the import might have expanded — and the import is the part
+        // that has to work when the operators are unreachable, which is exactly when a sync is most likely to
+        // fail or to be wasted.
+        await RestoreExitStateAsync(storeId, sdk).ConfigureAwait(false);
+
         try
         {
             var info = await sdk.GetInfoAsync(ensureSynced: true).ConfigureAwait(false);
@@ -822,6 +830,98 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 "Store {StoreId}: the Spark wallet connected but its first sync failed ({Reason}). Invoice "
                 + "creation may fail until this resolves",
                 storeId, SparkErrors.Describe(ex));
+        }
+    }
+
+    /// <summary>
+    /// Puts a store's exported exit-state backup back into the wallet that just started.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what makes the backup on the Advanced page mean anything.</b> The page tells an operator that
+    /// a stored backup is imported automatically, and this is the only code that does it; without it the backup
+    /// is a value the plugin writes down and never reads, and an operator who pasted one would be told their
+    /// exit data was secured while the wallet that needed it stayed exactly as exitable as before. That is the
+    /// failure this method exists to make impossible, so it runs on <em>every</em> connect — not only the first
+    /// one after a paste — because the wallet storage it is restoring into can be lost at any time, and the
+    /// connect is the only moment the plugin reliably gets.
+    /// </para>
+    /// <para>
+    /// <b>Ordered before the first sync, deliberately.</b> The SDK collects exit data for leaves as it learns
+    /// about them, so importing first means a leaf whose chain was only in the backup is present before
+    /// anything asks the operators about it. The reverse order would spend a round trip confirming a leaf set
+    /// that import might have expanded, and it is the import that has to happen while the operators are
+    /// unreachable — which is precisely when a sync is most likely to fail.
+    /// </para>
+    /// <para>
+    /// <b>Every failure here is logged and swallowed.</b> A store whose backup will not import still has a
+    /// working Lightning wallet, and taking the wallet down over a recovery aid would trade a rare loss of
+    /// exit data for a certain loss of payments. The SDK also cannot be trusted to be idempotent about a
+    /// blob it refuses on one attempt, so this is not retried here: the next connect tries again, which is
+    /// the same cadence the operator's own restart has.
+    /// </para>
+    /// <para>
+    /// <b>The blob is never logged, not even in the failure path.</b> It discloses the store's balance, how it
+    /// is split, and its payment history — so the log line names the store, the outcome and the counts, and
+    /// nothing else. That is also why this does not go through <c>SparkErrors.Describe</c> on the raw
+    /// exception: an SDK that echoed the blob back in a message would put it in the log.
+    /// </para>
+    /// </remarks>
+    private async Task RestoreExitStateAsync(string storeId, ISparkSdkClient sdk)
+    {
+        // Off unless the host turned the feature on. A store can carry a section with a backup in it from a
+        // host that had the gate set, and importing it on a host that did not would be this plugin acting on
+        // exit data for a feature that is otherwise absent — including on the connect path, where no operator
+        // asked for anything.
+        if (!Constants.UnilateralExitEnabled)
+            return;
+
+        string? backup;
+        try
+        {
+            var settings = await Get(storeId).ConfigureAwait(false);
+            backup = settings?.UnilateralExit?.ExitStateBackup;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: its settings could not be read, so a stored exit-state backup was not "
+                + "imported on this connect", storeId);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(backup))
+            return;
+
+        try
+        {
+            var imported = await sdk.ImportUnilateralExitStateAsync(backup).ConfigureAwait(false);
+
+            // Logged at information even when nothing was restored, because "the backup did not cover this
+            // wallet" is a fact the operator needs and cannot see anywhere else: the page only reports that a
+            // backup is stored. The conflicting count is called out separately because it is the one that
+            // means data was refused rather than merely unnecessary.
+            _logger.LogInformation(
+                "Store {StoreId}: imported exit-state backup: {Imported} leaves restored, {Foreign} foreign, "
+                + "{Conflicting} conflicting, {Chains} chains skipped",
+                storeId, imported.ImportedLeaves, imported.SkippedForeignLeaves,
+                imported.SkippedConflictingLeaves, imported.SkippedChains);
+
+            if (imported.RestoredNothing && imported.SkippedConflictingLeaves > 0)
+            {
+                _logger.LogWarning(
+                    "Store {StoreId}: every leaf in its exit-state backup was refused as conflicting, so no "
+                    + "exit data was restored. The backup disagrees with exit data this wallet already holds",
+                    storeId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: its exit-state backup could not be imported ({ExceptionType}). The wallet is "
+                + "running; a leaf whose data was only in that backup cannot be exited unilaterally until this "
+                + "succeeds",
+                storeId, ex.GetType().Name);
         }
     }
 

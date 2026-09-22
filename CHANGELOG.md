@@ -5,6 +5,46 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+The Breez Spark SDK is bumped to **0.25.0**, and the experimental unilateral exit is rebuilt on its new
+API. That API inverted the flow — an exit is now quoted into a prepared request that is passed back into
+the build, `CheckUnilateralExit` reports progress against the chain, and the SDK can export and import the
+wallet's exit data — and the plugin's exit surface follows it. No other feature changed.
+
+### Changed
+
+- **A unilateral exit no longer needs Spark's operators to be reachable.** On the old API, pricing and
+  building an exit talked to them, so the flow only helped against operators who *refused*; against
+  operators that were gone it could do nothing. On 0.25 an exit is quoted and built from data the SDK holds
+  locally. The caveat is the point of the next entry: this works for leaves whose data was collected while
+  the operators *were* reachable, and only for those.
+
+### Added
+
+- **An exit-state backup, on the Advanced page.** The SDK can now export the wallet's unilateral-exit data
+  and import it back, and an exit built from an exported copy is the only kind that survives the loss of the
+  wallet's own storage while the operators are gone. The page exports a fresh blob for copying and stores a
+  pasted one, which a restart imports automatically. The blob is sensitive — it carries every leaf and its
+  transactions, so it discloses the balance, how it is split and the history — so it is never rendered back
+  out of storage, and the page says so.
+- **A "Check progress" control on the exit page.** Asks the chain how far a built exit has got and refreshes
+  every transaction's status. It reports whether the set is on track, finished (with a pointer to marking it
+  completed), or can no longer finish — in which case it says plainly that the money is not lost and that the
+  fix is to build again from the same leaves. It broadcasts and signs nothing, and it works with the store's
+  wallet stopped.
+- **A "send these now" list above the transaction table**, naming exactly which transactions can be
+  broadcast at this moment and the command to run for each, so an operator opening the page a day later does
+  not have to read the whole set to find the actionable row.
+
+- **The exit page now warns that leaving a step unbroadcast costs money.** About 50 blocks (~8 hours) after
+  a step becomes valid, Spark's watchtowers can broadcast their own version of that step; its fee is taken
+  out of the leaf rather than paid by the funding UTXO, so a step left unsent for a day or more pays part of
+  its own cost out of the money being recovered. Each transaction row still reports its CSV timelock, but the
+  page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
+  tells the operator that following the Status column is what matters, since broadcasting an already-sent
+  transaction is harmless.
+
 ## [1.1.0] — 2026-09-07
 
 A compatibility and CI-hardening release. No plugin source changed between 1.0.4 and this: the

@@ -88,7 +88,7 @@ jobs:
       - name: Bump Breez.Sdk.Spark to ${{ needs.check.outputs.latest }}
         run: |
           set -euo pipefail
-          # The pin is an exact-version bracket pin (Version="[0.23.0]"): the sed keeps the
+          # The pin is an exact-version bracket pin (Version="[0.25.0]"): the sed keeps the
           # brackets on the way out, and \[?[0-9][0-9.]*\]? also survives a future unbracketed
           # pin. The guard greps fixed-string, since a literal "[0.24.0]" would otherwise be a
           # character class to grep.

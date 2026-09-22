@@ -135,6 +135,26 @@
   the wallet on-chain](deposits.md). Closing this properly would mean the plugin doing all the claiming itself,
   which trades an overpayment risk for a worse one — a claim loop that stops means no deposit ever arrives —
   and is not something to ship without mainnet evidence behind it.
+- **The unilateral exit is experimental, manual, and narrower than the name suggests.** It exists behind an
+  environment gate (`FLINT_EXPERIMENTAL_UNILATERAL_EXIT`) on the Advanced page and carries four limits that
+  do not show from the name alone. The plugin **never broadcasts**: it quotes, funds and signs, and the
+  operator pushes every transaction out by hand, package by package, through a node that supports package
+  relay — a plain `sendrawtransaction` rejects the zero-fee tree transactions. An exit is quoted and built
+  from data the SDK holds **locally**, so on the pinned SDK (0.25.0) it does not need the Spark operators to
+  be reachable — but only for leaves whose data was collected while they still were. That is why the
+  exit-state backup on the Advanced page matters: it is the copy that survives the wallet's own storage, and
+  a leaf is only exitable this second way once its chain has been synced at least once so its data exists to
+  be collected. So the path now covers operators who are gone, given a backup taken in time — not a wallet
+  that was never online with them. The fees are paid from a **separate on-chain output the operator funds by
+  hand**, as a single output covering the quoted amount, on an address derived from the store's seed at a
+  documented path. And settlement is **not fast**: refunds carry multi-day CSV timelocks, and nothing in the
+  plugin watches the chain on the operator's behalf. That last point has a cost worth naming: about 50 blocks
+  after a step becomes valid, Spark's watchtowers can broadcast their own version of that step, whose fee is
+  taken out of the leaf rather than paid by the funding UTXO — so a step left unbroadcast for a day or more
+  can end up paying for parts of itself out of the money being recovered. Checking the exit page daily is the
+  mitigation. Funding discovery also asks a block explorer (mempool.space by default on mainnet,
+  configurable) about the funding address, which discloses that address to a third party unless an own
+  instance is configured.
 - **Neither post-MVP feature can be tested off mainnet.** Cross-chain sending is hard-gated — the SDK throws
   at connect on any other network — and Stable Balance is *accepted* on regtest and then never converts,
   because USDB does not exist there. So the unit tests run against a fake built to model the real SDK's

@@ -87,6 +87,121 @@
             Deposit address and unclaimed deposits
         </a>
 
+        @if (Constants.UnilateralExitEnabled)
+        {
+            @*
+                Rendered only behind the server-side switch, and the switch is what makes the whole feature
+                exist: with it off there is no section, no link, and the page it points at answers "not found".
+                A merchant on a normal server never learns this is here, which is the intent — it is an
+                experiment, and an experiment that can spend their own on-chain money.
+            *@
+            <h3 class="mt-5 mb-3">Unilateral exit</h3>
+            <p class="text-secondary">
+                <strong>Experimental, and a last resort.</strong> Forces this store's balance on-chain without
+                Spark's cooperation, funded by your own Bitcoin and broadcast by you, over days of timelocks. A
+                normal sweep is the way to get funds out; this is for when that has stopped working.
+            </p>
+            <a class="btn btn-outline-danger" asp-action="Exit" asp-route-storeId="@Model.StoreId"
+               id="SparkUnilateralExitLink">
+                Unilateral exit
+            </a>
+
+            @*
+                Wallet infrastructure rather than one exit's business, which is why it lives here and not on the
+                exit page: it covers every leaf the wallet holds, and a merchant should collect it BEFORE they
+                need it. An exit is built from data the SDK keeps in this wallet's local storage; while the
+                operators are reachable that data can be re-fetched, and once they are gone and the storage is
+                lost it cannot be recovered from anywhere — so a backup taken now is the difference between an
+                exit that works with the operators vanished and one that does not.
+            *@
+            <h4 class="mt-4 mb-3">Exit-state backup</h4>
+            <p>
+                This wallet keeps the data an exit is built from in its own storage on this server. While
+                Spark's operators are reachable that data can be fetched again, so a wallet restored from its
+                recovery phrase rebuilds it. <strong>When they are gone and this server's storage is lost, it
+                cannot be recovered from anywhere</strong> — and the leaves it covered can no longer be exited.
+                Export it here, keep the copy somewhere safe, and an exit built from it goes ahead with the
+                operators gone.
+            </p>
+            <div class="alert alert-warning" role="alert" id="SparkExitStateBackupWarning">
+                <strong>Treat this backup as a secret, like a key.</strong> It carries every leaf of this
+                wallet and the transactions under them, so it discloses the balance, how it is split, and the
+                history of what the store received and spent. Anyone who reads it learns your finances. Keep it
+                somewhere encrypted, and paste it into this page only when replacing it.
+            </div>
+            <p id="SparkExitStateBackupState">
+                @if (Model.HasExitStateBackup)
+                {
+                    <span class="badge bg-info">Stored</span>
+                    <span>An exit-state backup is stored for this store and is imported automatically when the
+                    wallet next starts. It is not shown here — export a fresh copy if you need one. If the
+                    import itself fails, the wallet still runs and the reason is in the server log, so check
+                    there after a restart rather than assuming a stored backup was applied.</span>
+                }
+                else
+                {
+                    <span class="badge bg-secondary">None stored</span>
+                    <span>No exit-state backup is stored, so a restart imports nothing. Export one below and
+                    keep the copy.</span>
+                }
+            </p>
+
+            <form method="post" asp-action="ExportExitState" asp-route-storeId="@Model.StoreId"
+                  permission="@Policies.CanModifyStoreSettings">
+                <button type="submit" class="btn btn-secondary" id="SparkExportExitState">
+                    Export exit state
+                </button>
+                <div class="form-text">
+                    Reads the current data out of this store's running wallet. It <strong>changes nothing</strong>
+                    and can fail if the wallet is not running — try again once it is.
+                </div>
+            </form>
+
+            @if (Model.ExportedExitState is { Length: > 0 } exported)
+            {
+                @*
+                    Rendered from the model, for this one response only — never read back out of storage. The
+                    roll-up is what makes a multi-megabyte blob usable in a box this size; the copy button
+                    still carries the whole value.
+                *@
+                <div class="mt-3">
+                    <label class="form-label" for="SparkExitStateExported">
+                        Your exit-state backup — copy it now, it is not shown again
+                    </label>
+                    <textarea id="SparkExitStateExported" class="form-control font-monospace" rows="6"
+                              readonly="readonly">@exported</textarea>
+                    <div class="d-flex align-items-start gap-2 mt-2">
+                        <button type="button" class="btn btn-outline-secondary"
+                                data-clipboard-target="#SparkExitStateExported" id="SparkExitStateCopy">
+                            Copy backup
+                        </button>
+                    </div>
+                    <div class="form-text">
+                        Paste this into the replacement field below only if you are restoring it here. Keep the
+                        copy somewhere encrypted.
+                    </div>
+                </div>
+            }
+
+            <form method="post" asp-action="SetExitStateBackup" asp-route-storeId="@Model.StoreId"
+                  permission="@Policies.CanModifyStoreSettings" class="mt-3">
+                <div class="form-group">
+                    <label asp-for="ExitStateBackup" class="form-label"></label>
+                    <textarea asp-for="ExitStateBackup" id="SparkExitStateBackup" class="form-control font-monospace"
+                              rows="5" spellcheck="false" autocomplete="off"></textarea>
+                    <div class="form-text">
+                        A backup you exported earlier. It is stored and <strong>imported automatically when this
+                        store's wallet next restarts</strong>; it is not applied now. An out-of-date backup can
+                        restore leaves that have since been spent, so the balance may read high until the next
+                        sync. Submitting this empty stores nothing and clears the backup.
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" id="SparkSaveExitStateBackup">
+                    Save backup
+                </button>
+            </form>
+        }
+
         <form method="post" asp-action="AdvancedSweep" asp-route-storeId="@Model.StoreId"
               permission="@Policies.CanModifyStoreSettings">
             <h3 class="mt-5 mb-3">Sweep tuning</h3>
