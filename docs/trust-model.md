@@ -25,6 +25,17 @@ wallet as an ordinary transfer to the provider's address and depend on the provi
 side; until it does, they are neither on Spark nor at the destination. The plugin records the provider's own
 quote id before sending and reports what it says it delivered, which is the most the SDK exposes.
 
+**Accepting USDC and USDT puts a conversion provider between the payer and the store** — Orchestra, the same
+provider a cross-chain sweep uses, in the other direction. The payer sends their stablecoin to the provider's
+deposit address on their own chain; the provider converts it and pays bitcoin into the store's Spark wallet. Until
+it does, the money is with the provider and is neither the payer's nor the store's. If the provider never
+delivers, the invoice is simply not paid, and the store has received nothing it could refund from — the payer's
+claim is against the provider, and the invoice records the provider's order id and the payer's transaction hash to
+pursue it with. The coin's issuer, Circle or Tether, is the payer's counterparty up to that point and never the
+store's: the store receives bitcoin. The one exception is a store holding its balance in USDB through Stable
+Balance, which takes on the freezable-issuer risk described above for that balance. The feature is off by default
+and mainnet only.
+
 **The store's Lightning connection string is a bearer spend credential, store-bound at save time.**
 Setup writes a `type=flint;store-id=…;key=…` string into the store's Lightning payment method. The
 embedded store id binds the key to a wallet, and the plugin refuses to save the string on any *other*

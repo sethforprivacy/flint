@@ -26,6 +26,10 @@ Setup asks one question — where the store's Spark seed comes from:
 All three are behind BTCPay's own hot-wallet gate — a server admin, or the *Non-admins can create Hot
 Wallets for their Store* policy — because Spark keeps keys on the server.
 
+Two optional steps follow the seed question: automatic sweeping ([Sweeping the balance out](sweeping.md)), and,
+on mainnet, **accepting USDC and USDT** from customers while the store receives and keeps bitcoin
+([Accepting USDC and USDT](stablecoin-payments.md)). Both can be changed later from the status page.
+
 The phrase is encrypted with `IDataProtector` before it is stored and is **never rendered back**: there is
 no reveal-seed feature. That cuts both ways. The data-protection keyring lives in the BTCPay data
 directory, so losing that directory makes the stored copy unreadable and your own backup the only

@@ -11,6 +11,10 @@ itself. The balance can then be swept automatically, on a threshold, to the stor
 wallet, to a fixed Bitcoin address, or cross-chain to a stablecoin at an address you control on an EVM
 chain; and it can be held in USDB between sweeps.
 
+It can also let customers **pay in USDC or USDT** from Ethereum, Solana, Tron, Base and other networks while
+**the store receives and keeps bitcoin**: the stablecoin is converted on the way in, so the merchant never
+holds it. One switch on the Flint page, off by default.
+
 > [!WARNING]
 > Flint is still in development and thinly proven in production. Use it with caution and amounts you
 > can afford to lose, and read [Known limitations](docs/limitations.md) before putting money through it.
@@ -24,7 +28,9 @@ you own is: every Lightning receive rides Lightspark's service provider, and thi
 the only thing that reduces that exposure, which is why the sweep threshold is the most important setting
 on the plugin. Stable Balance and cross-chain sweeps each add a further counterparty of a different kind:
 a regulated stablecoin issuer whose token metadata says it can **freeze** the balance, and a bridge
-provider that holds the funds between the two chains. Both are off by default. There is one more
+provider that holds the funds between the two chains. Accepting USDC and USDT puts the same kind of
+provider between the payer and the store for the minutes a payment is converted. All three are off by
+default. There is one more
 counterparty, and on a shared instance the most complete one: the **server operator**. The store's seed
 is stored encrypted on the server, whoever operates the server can decrypt it and spend the store's
 Lightning funds, and the setup page says so before a seed is created or imported. If you do not operate
@@ -43,8 +49,8 @@ What a server needs to *run* this plugin:
   (around 190 MB) for `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64`. There is
   **no** `linux-musl` (Alpine) or `win-arm64` payload, so the plugin will not load on those platforms.
   Standard BTCPay Docker images (Debian-based) are fine.
-- **Mainnet or regtest.** The SDK offers no testnet or signet, so neither is supported. Stable Balance
-  and cross-chain sweeps are mainnet-only even on a supported network.
+- **Mainnet or regtest.** The SDK offers no testnet or signet, so neither is supported. Stable Balance,
+  cross-chain sweeps and USDC/USDT at checkout are mainnet-only even on a supported network.
 - **Disk for the SDK's per-store state**, under `<DataDir>/Plugins/Flint/`, plus an unrotated
   `sdk.log` you are expected to point `logrotate` at — see [Known limitations](docs/limitations.md).
 - **Server-admin rights, or the *Non-admins can create Hot Wallets for their Store* policy**, to set a
@@ -83,14 +89,16 @@ see [Setting a store up](docs/store-setup.md) for exactly what that destroys.
    fee defaults are regtest measurements and need raising for mainnet.
 3. **[Fund the wallet on-chain](docs/deposits.md)**, if you want to start with a balance rather than wait
    for receives. Read the fee-ceiling warning first.
-4. Optionally **[hold the balance in dollars](docs/stable-balance.md)** between sweeps, and drive the
-   whole lot from a script with the **[Greenfield API](docs/greenfield-api.md)**.
+4. Optionally **[accept USDC and USDT, received as bitcoin](docs/stablecoin-payments.md)**, **[hold the
+   balance in dollars](docs/stable-balance.md)** between sweeps, and drive the whole lot from a script with
+   the **[Greenfield API](docs/greenfield-api.md)**.
 
 ## Documentation
 
 **Running a store on it:** [setting a store up](docs/store-setup.md) ·
 [sweeping the balance out](docs/sweeping.md) · [funding the wallet on-chain](docs/deposits.md) ·
-[holding the balance in dollars](docs/stable-balance.md) · [known limitations](docs/limitations.md) ·
+[holding the balance in dollars](docs/stable-balance.md) ·
+[accepting USDC and USDT, received as bitcoin](docs/stablecoin-payments.md) · [known limitations](docs/limitations.md) ·
 [trust model](docs/trust-model.md) · [automating it with the Greenfield API](docs/greenfield-api.md)
 
 **Working on it:** [building](docs/building.md) · [tests](docs/testing.md) ·

@@ -7,6 +7,23 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Accept USDC and USDT at checkout, received as bitcoin.** One switch on the Flint page (or optional step 3 of
+  setup) adds USDC and USDT beside Lightning on every new invoice. The customer picks the coin and the network they
+  hold it on — Ethereum, Solana, Tron, Base, Arbitrum, Polygon, BNB Chain or Avalanche, wherever the provider serves
+  that coin — and sends it to the quote's deposit address; the provider converts it on the way in, so **the store's
+  Spark wallet receives and keeps bitcoin and never holds the stablecoin** (or USDB, for a store holding its balance
+  in dollars through Stable Balance). The network's cost is shown as the invoice's network cost and paid by the
+  customer, so an exactly paid invoice settles exactly. Each network is shown with its icon — on its button, in the
+  middle of the QR code and on the address line — as the payer's check that they are on the right network; only
+  networks the plugin has an icon for are offered. Mainnet only; built on Breez Spark SDK 0.26's cross-chain
+  receive through Orchestra. Payments are matched to invoices by quote, with every live ask kept unique per
+  network, and credited exactly once through the same reconciliation discipline as Lightning. See
+  [Accepting USDC and USDT](docs/stablecoin-payments.md), and the new provider in the
+  [trust model](docs/trust-model.md).
+- **`GET`/`PUT /api/v1/stores/{storeId}/spark/stablecoins`**, the same switch through the Greenfield API.
+
 ### Changed
 
 - **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
