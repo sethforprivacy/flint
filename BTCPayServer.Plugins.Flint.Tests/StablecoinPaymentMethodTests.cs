@@ -1,5 +1,6 @@
 using BTCPayServer.Data;
 using BTCPayServer.Models.InvoicingModels;
+using BTCPayServer.Plugins.Flint.Controllers;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Payments;
 using BTCPayServer.Plugins.Flint.Sdk;
@@ -9,6 +10,7 @@ using BTCPayServer.Rating;
 using BTCPayServer.Services.Invoices;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Routing;
+using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;
 using Xunit;
 
@@ -82,31 +84,99 @@ public class StablecoinPaymentMethodTests
         Assert.Equal("9990", parsedPayment.DeliveredAmount);
     }
 
+    [Fact]
+    public void A_quote_on_show_reads_back_from_the_invoice_blob_BTCPay_stores()
+    {
+        // The crash this pins, found on a live server: BTCPay stores a prompt with its invoice serializer, whose
+        // NBitcoin converters write every date inside the prompt's details as Unix seconds. A handler serializer
+        // without those converters wrote an ISO date, could not read back the integer BTCPay stored, and threw from
+        // inside BTCPay's Greenfield invoice endpoint — which BTCPay 2.4 answers by disabling the plugin and
+        // restarting the server. The handler's own round trip, above, never saw it.
+        var handler = Handler();
+        var expires = DateTimeOffset.FromUnixTimeSeconds(1_790_267_071);
+        var details = Details();
+        details.Quote!.ExpiresAt = expires;
+        var invoice = new InvoiceEntity { Id = "invoice-1", Currency = "USD" };
+        invoice.SetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId, new PaymentPrompt
+        {
+            Currency = "USDC",
+            Divisibility = 6,
+            Destination = "0xdep",
+            Details = JToken.FromObject(details, handler.Serializer)
+        });
+
+        var stored = invoice.GetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId)!;
+        Assert.Equal(JTokenType.Integer, stored.Details["quote"]!["expiresAt"]!.Type);
+
+        var parsed = (StablecoinPromptDetails)handler.ParsePaymentPromptDetails(stored.Details);
+        Assert.Equal(expires, parsed.Quote!.ExpiresAt);
+        Assert.Equal(10m, parsed.Quote.Due);
+        Assert.Equal(0.08m, parsed.Quote.Fee);
+        Assert.Equal(2, parsed.Networks.Count);
+    }
+
+    [Fact]
+    public void Details_that_do_not_read_keep_their_networks_and_lose_their_quote()
+    {
+        var handler = Handler();
+        var details = JObject.FromObject(Details(), handler.Serializer);
+        details["quote"]!["expiresAt"] = "not a date";
+
+        var parsed = (StablecoinPromptDetails)handler.ParsePaymentPromptDetails(details);
+
+        Assert.Null(parsed.Quote);
+        Assert.Equal(["ethereum", "base"], parsed.Networks.Select(n => n.Chain).ToArray());
+    }
+
+    public static TheoryData<string> Unreadable => new()
+    {
+        "null", "\"a string\"", "42", "[1, 2]", "{\"networks\": \"not a list\"}", "{\"sdkPaymentId\": {}}"
+    };
+
+    [Theory]
+    [MemberData(nameof(Unreadable))]
+    public void No_parse_BTCPay_calls_ever_throws(string json)
+    {
+        // Every one of these runs inside a BTCPay request, where an exception from plugin code disables the plugin
+        // and restarts the server.
+        var handler = Handler();
+        var token = JToken.Parse(json);
+
+        var prompt = Assert.IsType<StablecoinPromptDetails>(handler.ParsePaymentPromptDetails(token));
+        Assert.Null(prompt.Quote);
+        Assert.IsType<StablecoinPaymentMethodConfig>(handler.ParsePaymentMethodConfig(token));
+        // Its chain may be empty, which the invoice page's partial takes as "nothing to add" rather than naming it.
+        Assert.IsType<StablecoinPaymentDetails>(handler.ParsePaymentDetails(token));
+    }
+
     #region Checkout
 
     private static (CheckoutModel Model, JObject Data) Checkout(
         StablecoinPromptDetails details,
         string? destination,
-        decimal netDue = 10m)
+        decimal netDue = 10m,
+        IUrlHelper? url = null)
     {
         var handler = Handler();
         var invoice = new InvoiceEntity { Id = "invoice-1", Currency = "USD", StoreId = "store-1" };
         invoice.AddRate(new CurrencyPair("USDC", "USD"), 1m);
-        var prompt = new PaymentPrompt
+        // Through BTCPay's own invoice storage, so checkout reads the details back in the shape BTCPay stores them
+        // in, which is not the shape the handler wrote them in (see
+        // A_quote_on_show_reads_back_from_the_invoice_blob_BTCPay_stores).
+        invoice.SetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId, new PaymentPrompt
         {
-            ParentEntity = invoice,
-            PaymentMethodId = StablecoinPayments.Usdc.PaymentMethodId,
             Currency = "USDC",
             Divisibility = 6,
             Destination = destination,
             Details = JToken.FromObject(details, handler.Serializer)
-        };
+        });
+        var prompt = invoice.GetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId)!;
         invoice.NetDue = netDue;
         var model = new CheckoutModel();
-        var url = new RouteEchoUrlHelper();
 
         new StablecoinCheckoutModelExtension(StablecoinPayments.Usdc).ModifyCheckoutModel(
-            new CheckoutModelContext(model, new StoreData(), new StoreBlob(), invoice, url, prompt, handler));
+            new CheckoutModelContext(model, new StoreData(), new StoreBlob(), invoice, url ?? new RouteEchoUrlHelper(),
+                prompt, handler));
 
         return (model, (JObject)model.AdditionalData[StablecoinCheckoutModelExtension.ModelKey]);
     }
@@ -182,6 +252,29 @@ public class StablecoinPaymentMethodTests
     }
 
     [Fact]
+    public void A_checkout_that_cannot_be_prepared_shows_the_method_as_unavailable_instead_of_throwing()
+    {
+        // The public checkout is BTCPay's request, and an exception from here would disable the plugin and restart
+        // the server for anyone holding an invoice link.
+        var (model, data) = Checkout(Details(), destination: "0xdep", url: new ThrowingUrlHelper());
+
+        Assert.Equal(StablecoinCheckoutModelExtension.CheckoutBodyComponentName, model.CheckoutBodyComponentName);
+        Assert.Empty(data["networks"]!);
+        Assert.Null(data["quote"]);
+        Assert.Null(model.InvoiceBitcoinUrl);
+    }
+
+    private sealed class ThrowingUrlHelper : IUrlHelper
+    {
+        public ActionContext ActionContext { get; } = new();
+        public string? Action(UrlActionContext actionContext) => throw new InvalidOperationException("no router");
+        public string? Content(string? contentPath) => throw new InvalidOperationException("no router");
+        public bool IsLocalUrl(string? url) => false;
+        public string? Link(string? routeName, object? values) => throw new InvalidOperationException("no router");
+        public string? RouteUrl(UrlRouteContext routeContext) => throw new InvalidOperationException("no router");
+    }
+
+    [Fact]
     public void The_payment_link_is_the_quote_on_show_and_nothing_before_one()
     {
         var handler = Handler();
@@ -194,6 +287,40 @@ public class StablecoinPaymentMethodTests
         details.Quote = null;
         var unpicked = new PaymentPrompt { Details = JToken.FromObject(details, handler.Serializer) };
         Assert.Null(link.GetPaymentLink(unpicked, null));
+    }
+
+    #endregion
+
+    #region The quote endpoint
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    [Fact]
+    public async Task A_quote_that_fails_unexpectedly_answers_503_rather_than_throwing()
+    {
+        // Anonymous, and BTCPay turns an exception from plugin code into a disabled plugin and a restarted server.
+        var harness = new StablecoinHarness(new FakeSparkStoreRuntime());
+        harness.Invoices.FailLookupsWith = new InvalidOperationException("the database is down");
+        var controller = new UIStablecoinCheckoutController(
+            harness.Service, NullLogger<UIStablecoinCheckoutController>.Instance);
+
+        var result = await controller.Quote("invoice-1", "USDC-FLINT", "base", Ct);
+
+        var error = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(503, error.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_payer_who_went_away_is_answered_rather_than_thrown_at()
+    {
+        var harness = new StablecoinHarness(new FakeSparkStoreRuntime());
+        harness.Invoices.FailLookupsWith = new OperationCanceledException();
+        var controller = new UIStablecoinCheckoutController(
+            harness.Service, NullLogger<UIStablecoinCheckoutController>.Instance);
+
+        var result = await controller.Quote("invoice-1", "USDC-FLINT", "base", new CancellationToken(canceled: true));
+
+        Assert.IsType<EmptyResult>(result);
     }
 
     #endregion

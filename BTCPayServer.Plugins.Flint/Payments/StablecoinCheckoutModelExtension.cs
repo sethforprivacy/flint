@@ -4,6 +4,8 @@ using System.Linq;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;
 
 namespace BTCPayServer.Plugins.Flint.Payments;
@@ -13,9 +15,17 @@ namespace BTCPayServer.Plugins.Flint.Payments;
 /// ask for another.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Everything comes out of the prompt's own details, so the status poll that refreshes a checkout every few seconds
 /// is a read of the invoice blob and never a provider call. The component is
 /// <c>Views/Shared/Spark/StablecoinCheckout.cshtml</c>, registered at <c>checkout-end</c>.
+/// </para>
+/// <para>
+/// <b>It never throws</b>, for the reason given on <see cref="StablecoinPaymentMethodHandler"/>: this runs inside
+/// BTCPay's public checkout request, where an exception from plugin code disables the plugin and restarts the
+/// server. Anyone holding an invoice link can make that request, so a failure here shows the payer an unavailable
+/// payment method instead.
+/// </para>
 /// </remarks>
 public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
 {
@@ -24,9 +34,12 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
     /// <summary>The key the component reads its data from on the checkout model.</summary>
     public const string ModelKey = "flintStablecoin";
 
-    public StablecoinCheckoutModelExtension(StablecoinAsset asset)
+    private readonly ILogger _logger;
+
+    public StablecoinCheckoutModelExtension(StablecoinAsset asset, ILogger? logger = null)
     {
         Asset = asset ?? throw new ArgumentNullException(nameof(asset));
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public StablecoinAsset Asset { get; }
@@ -44,7 +57,27 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
             return;
 
         context.Model.CheckoutBodyComponentName = CheckoutBodyComponentName;
+        try
+        {
+            Populate(context, handler);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "The {Asset} checkout for invoice {InvoiceId} could not be prepared; showing it as unavailable",
+                Asset.Symbol, context.InvoiceEntity?.Id);
+            context.Model.InvoiceBitcoinUrl = null;
+            context.Model.InvoiceBitcoinUrlQR = null;
+            context.Model.AdditionalData[ModelKey] = JObject.FromObject(new
+            {
+                asset = Asset.Symbol,
+                assetName = Asset.Name,
+                networks = Array.Empty<object>()
+            });
+        }
+    }
 
+    private void Populate(CheckoutModelContext context, StablecoinPaymentMethodHandler handler)
+    {
         var details = context.Prompt.Details is { Type: not JTokenType.Null } raw
             ? handler.ParsePaymentPromptDetails(raw) as StablecoinPromptDetails
             : null;

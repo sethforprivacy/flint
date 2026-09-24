@@ -373,10 +373,16 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         foreach (var asset in StablecoinPayments.Assets)
         {
             services.AddSingleton<IPaymentMethodHandler>(provider => new StablecoinPaymentMethodHandler(
-                asset, provider.GetRequiredService<Func<StablecoinPaymentService>>()));
-            services.AddSingleton<ICheckoutModelExtension>(new StablecoinCheckoutModelExtension(asset));
+                asset,
+                provider.GetRequiredService<Func<StablecoinPaymentService>>(),
+                provider.GetRequiredService<ILogger<StablecoinPaymentMethodHandler>>()));
+            services.AddSingleton<ICheckoutModelExtension>(provider => new StablecoinCheckoutModelExtension(
+                asset, provider.GetRequiredService<ILogger<StablecoinCheckoutModelExtension>>()));
             services.AddSingleton<IPaymentLinkExtension>(provider => new StablecoinPaymentLinkExtension(
-                new StablecoinPaymentMethodHandler(asset, provider.GetRequiredService<Func<StablecoinPaymentService>>())));
+                new StablecoinPaymentMethodHandler(
+                    asset,
+                    provider.GetRequiredService<Func<StablecoinPaymentService>>(),
+                    provider.GetRequiredService<ILogger<StablecoinPaymentMethodHandler>>())));
             services.AddDefaultPrettyName(asset.PaymentMethodId, asset.Symbol);
             services.AddCurrencyData(new CurrencyData
             {

@@ -20,7 +20,10 @@
 {
     <template id="@StablecoinCheckoutModelExtension.CheckoutBodyComponentName">
         <div class="payment-box" id="FlintStablecoinCheckout">
-            <div class="form-group mb-3">
+            <div v-if="networks.length === 0" class="alert alert-warning" role="alert" id="FlintStablecoinUnavailable">
+                {{ asset }} payments are unavailable for this invoice right now. Please pay another way.
+            </div>
+            <div v-else class="form-group mb-3">
                 <label class="form-label" for="FlintStablecoinNetwork">{{ asset }} network</label>
                 <select id="FlintStablecoinNetwork" class="form-select" v-model="chain" v-on:change="requestQuote" :disabled="loading">
                     <option value="" disabled>Choose the network you are paying from</option>

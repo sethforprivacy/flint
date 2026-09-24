@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Services;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -31,16 +34,31 @@ namespace BTCPayServer.Plugins.Flint.Payments;
 /// service reaches the store runtime, which must not be constructed from inside that graph (see
 /// <c>SparkPlugin</c>'s note on deferred resolution).
 /// </para>
+/// <para>
+/// <b>Nothing BTCPay calls here may throw.</b> BTCPay 2.4 answers an exception from a plugin's code during a
+/// request by disabling the plugin and restarting the server (<c>PluginExceptionHandler</c>), and it calls the
+/// parse methods below from inside its own requests — the Greenfield invoice endpoints, the invoice page, the
+/// public checkout. One unreadable details blob was once enough to take a server down that way, so each parse
+/// degrades instead: to the network list, or to an empty object, with a warning in the log.
+/// </para>
 /// </remarks>
 public sealed class StablecoinPaymentMethodHandler : IPaymentMethodHandler
 {
     private readonly Func<StablecoinPaymentService> _service;
+    private readonly ILogger _logger;
 
-    public StablecoinPaymentMethodHandler(StablecoinAsset asset, Func<StablecoinPaymentService> service)
+    public StablecoinPaymentMethodHandler(
+        StablecoinAsset asset,
+        Func<StablecoinPaymentService> service,
+        ILogger? logger = null)
     {
         Asset = asset ?? throw new ArgumentNullException(nameof(asset));
         _service = service ?? throw new ArgumentNullException(nameof(service));
-        Serializer = BlobSerializer.CreateSerializer().Serializer;
+        _logger = logger ?? NullLogger.Instance;
+        // The invoice blob's own serializer, NBitcoin's converters included. BTCPay writes a prompt's details with
+        // it, and that turns every date inside them into Unix seconds; a serializer without those converters writes
+        // an ISO date and then cannot read back what BTCPay stored. That mismatch is the crash described above.
+        Serializer = BlobSerializer.CreateSerializer(null as NBitcoin.Network).Serializer;
     }
 
     public StablecoinAsset Asset { get; }
@@ -77,13 +95,74 @@ public sealed class StablecoinPaymentMethodHandler : IPaymentMethodHandler
         context.Prompt.Details = JObject.FromObject(new StablecoinPromptDetails { Networks = [.. networks] }, Serializer);
     }
 
-    public object ParsePaymentPromptDetails(JToken details) =>
-        details.ToObject<StablecoinPromptDetails>(Serializer) ?? new StablecoinPromptDetails();
+    /// <summary>
+    /// The prompt's networks and quote. A blob that does not read keeps its network list and loses its quote, so
+    /// the checkout offers a fresh one; the quote itself lives on in the plugin's own table, which is what settles it.
+    /// </summary>
+    public object ParsePaymentPromptDetails(JToken details)
+    {
+        try
+        {
+            return details.ToObject<StablecoinPromptDetails>(Serializer) ?? new StablecoinPromptDetails();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "A {Asset} prompt's details could not be read; offering its networks without a quote",
+                Asset.Symbol);
+        }
 
-    public object ParsePaymentMethodConfig(JToken config) =>
-        config.ToObject<StablecoinPaymentMethodConfig>(Serializer) ?? new StablecoinPaymentMethodConfig();
+        try
+        {
+            return new StablecoinPromptDetails
+            {
+                Networks = details is JObject o && o["networks"] is JArray networks
+                    ? networks.ToObject<List<StablecoinNetworkOption>>(Serializer) ?? []
+                    : []
+            };
+        }
+        catch (Exception)
+        {
+            return new StablecoinPromptDetails();
+        }
+    }
 
-    public object ParsePaymentDetails(JToken details) =>
-        details.ToObject<StablecoinPaymentDetails>(Serializer)
-        ?? throw new FormatException($"Invalid {nameof(StablecoinPaymentDetails)}");
+    /// <summary>Empty on purpose (see <see cref="StablecoinPaymentMethodConfig"/>), so any object reads as one.</summary>
+    public object ParsePaymentMethodConfig(JToken config)
+    {
+        try
+        {
+            return config.ToObject<StablecoinPaymentMethodConfig>(Serializer) ?? new StablecoinPaymentMethodConfig();
+        }
+        catch (Exception)
+        {
+            return new StablecoinPaymentMethodConfig();
+        }
+    }
+
+    /// <summary>
+    /// A credited payment's details. One that does not read comes back with its fields empty rather than throwing:
+    /// the payment is already on the invoice, and what this adds is display.
+    /// </summary>
+    public object ParsePaymentDetails(JToken details)
+    {
+        try
+        {
+            if (details.ToObject<StablecoinPaymentDetails>(Serializer) is { } parsed)
+                return parsed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "A {Asset} payment's details could not be read", Asset.Symbol);
+        }
+
+        return new StablecoinPaymentDetails
+        {
+            QuoteId = "",
+            Chain = "",
+            Asset = Asset.Symbol,
+            DepositAddress = "",
+            DestinationAsset = "",
+            SdkPaymentId = ""
+        };
+    }
 }

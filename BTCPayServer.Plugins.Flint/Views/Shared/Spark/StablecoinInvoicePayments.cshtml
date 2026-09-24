@@ -23,8 +23,10 @@
                 return null;
             try
             {
+                // A payment whose details did not read comes back with an empty chain; it is still in BTCPay's own
+                // payments table above, and there is nothing of this plugin's to add about it.
                 var details = handler.ParsePaymentDetails(payment.Details) as StablecoinPaymentDetails;
-                return details is null ? null : new { Payment = payment, Details = details, Asset = handler.Asset };
+                return string.IsNullOrEmpty(details?.Chain) ? null : new { Payment = payment, Details = details, Asset = handler.Asset };
             }
             catch (Exception)
             {

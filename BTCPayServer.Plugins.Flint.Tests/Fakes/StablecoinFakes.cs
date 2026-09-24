@@ -219,6 +219,9 @@ public sealed class FakeStablecoinInvoiceGateway : IStablecoinInvoiceGateway
 
     public Exception? FailPaymentsWith { get; set; }
 
+    /// <summary>Thrown by <see cref="GetInvoiceAsync"/>: an invoice store that is down.</summary>
+    public Exception? FailLookupsWith { get; set; }
+
     public Invoice Add(
         string invoiceId,
         string storeId,
@@ -257,6 +260,8 @@ public sealed class FakeStablecoinInvoiceGateway : IStablecoinInvoiceGateway
         PaymentMethodId paymentMethodId,
         CancellationToken cancellationToken = default)
     {
+        if (FailLookupsWith is not null)
+            throw FailLookupsWith;
         if (!Invoices.TryGetValue(invoiceId, out var invoice))
             return Task.FromResult<StablecoinInvoice?>(null);
 
