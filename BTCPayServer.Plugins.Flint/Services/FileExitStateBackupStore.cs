@@ -103,6 +103,18 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
         try
         {
             await File.WriteAllTextAsync(temporary, backup, cancellationToken).ConfigureAwait(false);
+
+            // Owner-only before it is ever a stored backup, never afterwards: the rename carries the
+            // temp's mode onto the target, so this is the only moment the mode can be set without a
+            // window in which the file sits under its final name at the umask — readable by every
+            // account on the host for as long as a correction takes, and nothing here corrects it
+            // afterwards. The 0700 directory is the first line of defence for this blob; a file that is
+            // itself 0600 means a second one even against a reader that reaches the directory some
+            // other way — the same account running BTCPay under a different path, an operator's own
+            // backup tool reading the tree.
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
             File.Move(temporary, path, overwrite: true);
         }
         catch
@@ -123,6 +135,28 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
 
         File.Delete(path);
         return Task.FromResult(true);
+    }
+
+    /// <inheritdoc />
+    public Task<Stream?> OpenReadAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        var path = PathFor(storeId);
+
+        // Absent answers null, as ReadAsync does, and a file that cannot be opened throws for the same
+        // reason: the caller redirects on "none stored" and reports "unreadable", and fusing the two
+        // would tell an operator who pressed Download that they have no backup. Opening is a handle, not
+        // the content, so there is nothing to await.
+        //
+        // FileShare.Read: opening a download must not exclude anything else from the file — a second
+        // download, or a ReadAsync comparing a paste — and no writer ever opens the target, because
+        // WriteAsync reaches it only by renaming a temp over it. That replacement is exactly the
+        // concurrent write this share pattern tolerates: on POSIX a rename swaps the directory entry
+        // while an already-open handle keeps reading the old inode to a clean end, so a pass that
+        // refreshes the backup halfway through a download serves one whole file or the other, never a
+        // mixture, and never a sharing error.
+        return File.Exists(path)
+            ? Task.FromResult<Stream?>(File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            : Task.FromResult<Stream?>(null);
     }
 
     /// <summary>

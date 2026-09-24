@@ -161,6 +161,37 @@ public sealed class ExitStateBackupScheduler
     public void MarkSkipped(string storeId, DateTimeOffset now) => MarkPass(storeId, now);
 
     /// <summary>
+    /// Records that a pass ran and learned nothing worth acting on: the safety net restarts, and
+    /// nothing else moves — a pending request stays pending, and no stored content is noted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// For the pass an empty export produces: the wallet was asked and said nothing, so the pass has
+    /// no report on the state to serve a request with, and no bytes to update a belief about the file
+    /// with. Recording it anyway is the point — a wallet with no exit state yet has a null
+    /// <c>LastPassAt</c>, which reads as due on every pass, so an unrecorded empty export leaves the
+    /// task spending a live SDK call on that store every minute, forever. With the pass on the record,
+    /// the next ask comes at <see cref="SafetyNetInterval"/>: the cadence an answering-nothing wallet
+    /// deserves.
+    /// </para>
+    /// <para>
+    /// <see cref="MarkSkipped"/> is the contrast, and the reason this is not the same call: a skip is a
+    /// report on the wallet's state — the export came back and matched what is stored — so it serves
+    /// the pending request. An idle pass is no such report, and a request a real event earned stays
+    /// owed until a pass can serve it.
+    /// </para>
+    /// </remarks>
+    public void MarkIdlePass(string storeId, DateTimeOffset now)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+
+        _marks.AddOrUpdate(
+            storeId,
+            _ => new Marks(null, now, null),
+            (_, current) => current with { LastPassAt = now });
+    }
+
+    /// <summary>
     /// Whether the scheduler knows what content is believed stored for a store.
     /// </summary>
     /// <remarks>

@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -42,6 +43,30 @@ public interface IExitStateBackupStore
     /// fact from one that answered "absent", and the caller decides what to do with it.
     /// </remarks>
     Task<string?> ReadAsync(string storeId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Opens the stored backup as a readable stream, or null when none is stored.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The read for a caller that only moves the content.</b> A download wants the file's bytes on a
+    /// response and never looks at them; answering it with <see cref="ReadAsync"/> plus an encoding of the
+    /// result puts a multi-megabyte secret in memory twice — the string read, then the byte array handed
+    /// on — to produce a single pass-through copy. A stream is the same answer a buffer at a time, and it
+    /// is the only way this seam serves the blob without holding it.
+    /// </para>
+    /// <para>
+    /// <b>Distinct from <see cref="ReadAsync"/>, not a second spelling of it.</b> The string read is for a
+    /// caller that must <em>judge</em> the content — compare it against a paste, import it, decide what it
+    /// says; this one is for a caller that must not, and a caller that streams should never read the
+    /// stream back into a string.
+    /// </para>
+    /// <para>
+    /// Like <see cref="ReadAsync"/>, an open that cannot be answered is not swallowed into a null:
+    /// "absent" is a fact the caller redirects with; "unreadable" is a fault the caller surfaces.
+    /// </para>
+    /// </remarks>
+    Task<Stream?> OpenReadAsync(string storeId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// When the backup was written, or null when none is stored.

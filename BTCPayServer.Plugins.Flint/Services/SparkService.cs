@@ -1501,8 +1501,16 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
 
                 if (string.IsNullOrWhiteSpace(exported))
                 {
-                    // No MarkSkipped: an empty answer is not a report on the wallet's state, and serving
-                    // a pending request with nothing would silently drop it. The next pass asks again.
+                    // No MarkSkipped on either path: an empty answer is not a report on the wallet's
+                    // state, and serving a pending request with nothing would silently drop it. With
+                    // nothing pending, though, the pass itself is worth recording — it is the only
+                    // thing that stops a wallet with no exit state to export from being asked on every
+                    // scheduled pass forever, and the safety net re-asks it on schedule. A request that
+                    // is pending was earned by a real event and an empty answer does not serve it:
+                    // nothing is recorded, so the next pass asks again on the event's behalf.
+                    if (_exitStateBackupScheduler.PendingSince(storeId) is null)
+                        _exitStateBackupScheduler.MarkIdlePass(storeId, now);
+
                     _logger.LogInformation(
                         "Store {StoreId}: its exit-state export came back empty, so nothing was stored",
                         storeId);
@@ -1528,7 +1536,10 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
 
                 await _exitStateBackupStore.WriteAsync(storeId, exported, cancellationToken)
                     .ConfigureAwait(false);
-                _exitStateBackupScheduler.NoteStoredContent(storeId, exported);
+                // The tracked store seam has already moved the scheduler's belief to these bytes —
+                // a second note here would only be a second place the same fact gets stated, and the
+                // one that a manual writer's path does not share. MarkTaken is this pass's own
+                // report, ordered after the write, and nothing else can serve the pending request.
                 _exitStateBackupScheduler.MarkTaken(storeId, now);
 
                 _logger.LogInformation(

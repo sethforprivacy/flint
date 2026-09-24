@@ -114,6 +114,66 @@ public class FileExitStateBackupStoreTests
         Assert.Equal(OwnerOnly, File.GetUnixFileMode(store.StorageDirectory()));
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task The_backup_file_itself_is_owner_only()
+    {
+        Assert.SkipWhen(
+            !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(), "Unix file modes.");
+
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        await store.WriteAsync(Store, "the-stored-backup-blob");
+
+        // The 0700 directory keeps other accounts out; this is the second line of defence for the
+        // one that is already in — the mode is set on the temporary before the rename carries it to
+        // the target, so the secret is never world-readable under either name, and a reader that
+        // reaches past the directory still meets a file it cannot open.
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            File.GetUnixFileMode(store.PathFor(Store)));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_stream_with_nothing_stored_answers_null_and_an_open_one_answers_the_stored_bytes()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        // Null, not an empty stream — the download answers "there is no backup" only to a null, and a
+        // zero-byte file would have read as a backup that imports as nothing.
+        await using (var absent = await store.OpenReadAsync(Store))
+            Assert.Null(absent);
+
+        await store.WriteAsync(Store, "the-stored-backup-blob");
+
+        // The bytes a download hands over, read back off an open handle: this seam never interprets
+        // the content, and the streaming read is the same rule — what comes out is what went in.
+        await using var stream = await store.OpenReadAsync(Store)
+            ?? throw new InvalidOperationException("the stored backup did not open");
+        using var reader = new StreamReader(stream);
+        Assert.Equal("the-stored-backup-blob", await reader.ReadToEndAsync());
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task An_open_download_is_neither_blocked_by_the_next_write_nor_cut_short_by_it()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+        await store.WriteAsync(Store, "first-backup");
+
+        // The FileShare promise, as a fact about a filesystem rather than a comment: a pass that
+        // refreshes the backup halfway through a download renames a new file over the one being
+        // served, and the handle already open reads to a clean end of the bytes it opened — the
+        // response is one whole backup or another, never an error and never a mixture.
+        await using var serving = await store.OpenReadAsync(Store)
+            ?? throw new InvalidOperationException("the stored backup did not open");
+        await store.WriteAsync(Store, "second-backup-longer");
+
+        using var reader = new StreamReader(serving);
+        Assert.Equal("first-backup", await reader.ReadToEndAsync());
+    }
+
     [Fact]
     public void A_store_id_that_could_escape_the_owner_only_directory_is_refused()
     {

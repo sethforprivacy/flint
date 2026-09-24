@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text;
 using BTCPayServer.Plugins.Flint.Services;
 
 namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
@@ -43,6 +45,20 @@ public sealed class FakeExitStateBackupStore : IExitStateBackupStore
         return FailReadWith is { } failure
             ? Task.FromException<string?>(failure)
             : Task.FromResult(Stored(storeId));
+    }
+
+    // A fresh stream per call, as a file would give: the caller owns and disposes what it opens. The
+    // bytes are the UTF-8 encoding the file store's own read would produce, so a controller served by
+    // this fake sees the same payload a controller served by the real store would.
+    public Task<Stream?> OpenReadAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        if (FailReadWith is { } failure)
+            return Task.FromException<Stream?>(failure);
+
+        var stored = Stored(storeId);
+        return stored is null
+            ? Task.FromResult<Stream?>(null)
+            : Task.FromResult<Stream?>(new MemoryStream(Encoding.UTF8.GetBytes(stored)));
     }
 
     public Task<DateTimeOffset?> TakenAtAsync(string storeId, CancellationToken cancellationToken = default) =>

@@ -261,11 +261,17 @@ public sealed class SparkServiceHarness : IDisposable
         // The real file store over the harness's temp data directory — the layout, the owner-only
         // creation, and the atomic replace are what the backup tests assert, and a fake would assert
         // the fake. One fresh scheduler per construction, as a process restart gets: its whole point is
-        // that the first pass after a restart re-seeds itself from the file.
+        // that the first pass after a restart re-seeds itself from the file. And composed exactly as
+        // the container composes it — the tracked decorator over the file store, both service and test
+        // handed the decorator — because a test that writes through the store manually (a paste, an
+        // export) has to see the scheduler's belief move the way it moves in production, or the test
+        // is wiring a composition production does not have.
         var dataDirectories = Options.Create(new DataDirectories { DataDir = dataDir });
-        var exitStateBackups = new FileExitStateBackupStore(
-            dataDirectories, NullLogger<FileExitStateBackupStore>.Instance);
         var backupScheduler = new ExitStateBackupScheduler();
+        var exitStateBackups = new TrackedExitStateBackupStore(
+            new FileExitStateBackupStore(
+                dataDirectories, NullLogger<FileExitStateBackupStore>.Instance),
+            backupScheduler);
         var clock = timeProvider ?? TimeProvider.System;
 
         var service = new TestableSparkService(

@@ -270,6 +270,67 @@ public class SparkExitStateAutoBackupTests
         Assert.Null(await h.ExitStateBackups.ReadAsync(StoreId, Ct));
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task A_store_that_always_exports_empty_is_asked_again_only_at_the_safety_net()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+        h.Sdk.Clients[StoreId].ExitStateToExport = "";
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        // The first pass learned what this wallet has to give: nothing. That is still a pass, so the
+        // half-hour pass is not due and the SDK is not asked again — left unrecorded, every minute of
+        // the task's own cadence would pay for a live export of the same nothing, forever.
+        clock.Advance(TimeSpan.FromMinutes(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        // And the safety net is what re-asks it, because the wallet may have been funded since: an
+        // hour of silence is exactly what the net exists for.
+        clock.Advance(TimeSpan.FromMinutes(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal(2, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+
+        // Asked twice, answered empty twice, and no file either way.
+        Assert.Null(await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_pending_request_keeps_asking_on_every_pass_rather_than_the_safety_net()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+        h.Sdk.Clients[StoreId].ExitStateToExport = "";
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        // A claim earns a refresh from a wallet that has been answering empty so far.
+        Emit(h, StoreId, SparkEventKind.ClaimedDeposits, payment: null);
+        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+            "the claimed-deposit event never requested a refresh");
+
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+
+        // The request the event earned is not served by an empty answer: the export ran, the request
+        // stays pending, and the safety-net clock does not move — which is why the pass a minute
+        // later is due on the request's own terms rather than an hour from the empty pass.
+        Assert.Equal(2, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+        Assert.NotNull(h.BackupScheduler.PendingSince(StoreId));
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+
+        Assert.Equal(3, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+        Assert.NotNull(h.BackupScheduler.PendingSince(StoreId));
+        Assert.Null(await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+    }
+
     [Fact(Timeout = 120_000)]
     public async Task After_a_restart_the_first_pass_learns_from_the_file_instead_of_rewriting_it()
     {
@@ -301,6 +362,49 @@ public class SparkExitStateAutoBackupTests
             h?.Dispose();
             first.Dispose();
         }
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_write_through_the_store_moves_the_scheduler_s_belief_with_the_write()
+    {
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(new StubTimeProvider(Base));
+
+        // One manual writer: the page's export, a paste, an adoption all write through this same
+        // seam without saying anything to the scheduler — and through this seam they cannot, because
+        // the tracked store moves the scheduler's belief as part of the write itself.
+        await h.ExitStateBackups.WriteAsync(StoreId, "pasted-exit-state", Ct);
+
+        // What a due pass will ask is now answered from that write rather than from a second read of
+        // the file: the scheduler knows something is stored, and these exact bytes are it. Left
+        // stale, the next due pass would compare a fresh export against the nothing it believes
+        // stored and rewrite these identical bytes once to learn what the paste already knew.
+        Assert.True(h.BackupScheduler.KnowsStoredContent(StoreId));
+        Assert.True(h.BackupScheduler.ContentUnchanged(StoreId, "pasted-exit-state"));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_cleared_backup_is_written_afresh_by_the_next_due_pass()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal("exit-state-blob", await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+
+        // The page's own clear. The belief has to empty with the file: one that outlived the bytes
+        // would let a due pass call the next export "unchanged" and skip a store holding nothing —
+        // a wallet left without its only device-proof copy by the press that was meant to restart
+        // its coverage. "Absent" is also what the pass then acts on: nothing is believed stored, so
+        // a clear self-heals on the next due pass rather than waiting on an operator to notice.
+        Assert.True(await h.ExitStateBackups.DeleteAsync(StoreId, Ct));
+        Assert.False(h.BackupScheduler.ContentUnchanged(StoreId, "exit-state-blob"));
+
+        clock.Advance(TimeSpan.FromHours(1));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+
+        Assert.Equal("exit-state-blob", await h.ExitStateBackups.ReadAsync(StoreId, Ct));
     }
 
     // ------------------------------------------------------------------------------------------------

@@ -753,10 +753,16 @@ public class SparkExitPageTests
 
         ApplyControllerCachePolicy(h.Mvc);
 
-        var file = Assert.IsType<FileContentResult>(
+        var file = Assert.IsType<FileStreamResult>(
             await h.Mvc.DownloadExitStateBackup(Store, CancellationToken.None));
 
-        Assert.Equal(Encoding.UTF8.GetBytes(secret), file.FileContents);
+        // Bytes, still — read out of the stream the action handed the response rather than off a
+        // byte array the action was holding, because pinning what the operator would actually save is
+        // the whole point, and a stream the test drains is the download's only full copy.
+        using var delivered = new MemoryStream();
+        await file.FileStream.CopyToAsync(delivered, CancellationToken.None);
+        Assert.Equal(Encoding.UTF8.GetBytes(secret), delivered.ToArray());
+
         Assert.Equal("application/octet-stream", file.ContentType);
 
         // The stamp is in the name because the artifact lands in a directory the operator keeps, where two

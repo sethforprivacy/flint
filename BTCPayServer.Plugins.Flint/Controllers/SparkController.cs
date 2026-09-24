@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
@@ -1238,6 +1237,16 @@ public class SparkController : Controller
     /// note above the attribute); the download's share of it is pinned by a test, since it is the one
     /// action on this controller whose body is a secret rather than a page.
     /// </para>
+    /// <para>
+    /// <b>Streamed, by design.</b> Nothing on this path reads the content — the point is that the file
+    /// the plugin holds and the file the operator keeps are one sequence of bytes — so the action never
+    /// holds it either: a string read of a multi-megabyte blob re-encoded to a byte array for a content
+    /// result is the secret in memory twice to produce a single pass-through copy, and it is the whole
+    /// secret at once rather than a buffer at a time. The stream from
+    /// <see cref="IExitStateBackupStore.OpenReadAsync"/> goes to the response as it is, and
+    /// <see cref="FileStreamResult"/> disposes the handle when the response pipeline has finished with
+    /// it.
+    /// </para>
     /// </remarks>
     [HttpPost("advanced/exit-state/download")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
@@ -1253,7 +1262,8 @@ public class SparkController : Controller
 
         storeId = store.Id;
 
-        var backup = await _exitStateBackupStore.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+        var backup = await _exitStateBackupStore.OpenReadAsync(storeId, cancellationToken)
+            .ConfigureAwait(false);
         if (backup is null)
         {
             TempData[WellKnownTempData.ErrorMessage] =
@@ -1264,8 +1274,10 @@ public class SparkController : Controller
 
         var takenAt = await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
 
+        // The length and nothing else, as everywhere this blob is handled — and a file's length now,
+        // in bytes, which is exactly the size of the artifact being handed over.
         _logger.LogInformation(
-            "Store {StoreId}: served the stored exit-state backup ({Length:N0} characters, taken {TakenAt:u})",
+            "Store {StoreId}: served the stored exit-state backup ({Length:N0} bytes, taken {TakenAt:u})",
             storeId, backup.Length, takenAt);
 
         // The timestamp is in the name because the file is the artifact the operator is storing off-box, and
@@ -1274,7 +1286,7 @@ public class SparkController : Controller
             ? $"exit-state-backup-{storeId}-{at:yyyyMMdd-HHmmss}.txt"
             : $"exit-state-backup-{storeId}.txt";
 
-        return File(Encoding.UTF8.GetBytes(backup), "application/octet-stream", name);
+        return new FileStreamResult(backup, "application/octet-stream") { FileDownloadName = name };
     }
 
     /// <summary>

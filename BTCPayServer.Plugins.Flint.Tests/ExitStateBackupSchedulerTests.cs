@@ -143,6 +143,40 @@ public class ExitStateBackupSchedulerTests
         Assert.False(s.ShouldTake(Store, Base + TimeSpan.FromSeconds(1)));
     }
 
+    [Fact]
+    public void An_idle_pass_with_nothing_pending_waits_the_safety_net_before_being_asked_again()
+    {
+        var s = new ExitStateBackupScheduler();
+
+        // The unfunded wallet: asked, and answering nothing. That answer was still a pass, so the
+        // next ask is an interval from here rather than the task's next minute — the difference
+        // between one live export an hour and one every minute forever, for a wallet that has no
+        // exit state to give.
+        s.MarkIdlePass(Store, Base);
+
+        Assert.False(s.ShouldTake(Store, Base + Min(30)));
+        Assert.False(s.ShouldTake(Store, Base + Min(59)));
+        Assert.True(s.ShouldTake(Store, Base + TimeSpan.FromHours(1)));
+    }
+
+    [Fact]
+    public void An_idle_pass_serves_nothing_and_a_later_take_serves_the_request()
+    {
+        var s = new ExitStateBackupScheduler();
+        s.RequestRefresh(Store);
+        var started = Pending(s);
+
+        // Empty export with a request pending: the pass learned nothing about the state, so the
+        // request a real event earned is still owed. Only a pass that can report on the wallet
+        // serves it.
+        s.MarkIdlePass(Store, Base);
+        Assert.Equal(started, s.PendingSince(Store));
+
+        s.MarkTaken(Store, Base + Min(2));
+        Assert.Null(s.PendingSince(Store));
+        Assert.False(s.ShouldTake(Store, Base + Min(3)));
+    }
+
     // ------------------------------------------------------------------
     // The content hash: what makes "due" not mean "written"
     // ------------------------------------------------------------------
@@ -182,5 +216,22 @@ public class ExitStateBackupSchedulerTests
         s.NoteStoredContent(Store, null);
         Assert.False(s.KnowsStoredContent(Store));
         Assert.False(s.ContentUnchanged(Store, "exported-blob"));
+    }
+
+    [Fact]
+    public void An_idle_pass_leaves_the_belief_about_stored_content_exactly_as_it_found_it()
+    {
+        var s = new ExitStateBackupScheduler();
+
+        // Nothing noted: an export that came back empty is not evidence that the file is absent, and
+        // a belief of "absent" would have the next due pass rewrite whatever the file does hold.
+        s.MarkIdlePass(Store, Base);
+        Assert.False(s.KnowsStoredContent(Store));
+
+        // And a belief the caller already seeded from the file survives the pass: the empty answer
+        // says nothing about the file, so it cannot be what the scheduler's belief is rewritten from.
+        s.NoteStoredContent(Store, "exported-blob");
+        s.MarkIdlePass(Store, Base + Min(30));
+        Assert.True(s.ContentUnchanged(Store, "exported-blob"));
     }
 }

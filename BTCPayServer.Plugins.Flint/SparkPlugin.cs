@@ -146,8 +146,16 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // debounce/safety-net decisions, and the pass that applies them. Registered unconditionally like
         // the rest of the exit surface — the gate is enforced inside the pass, not by whether the
         // types exist.
-        services.AddSingleton<IExitStateBackupStore, FileExitStateBackupStore>();
+        //
+        // The file store is registered as itself only, and the seam published to callers is the
+        // tracking decorator: every write and every delete through the store has to move the
+        // scheduler's belief about what is stored with it, and a caller cannot forget the bookkeeping
+        // when the only published route to the file passes through it.
+        services.AddSingleton<FileExitStateBackupStore>();
         services.AddSingleton<ExitStateBackupScheduler>();
+        services.AddSingleton<IExitStateBackupStore>(provider => new TrackedExitStateBackupStore(
+            provider.GetRequiredService<FileExitStateBackupStore>(),
+            provider.GetRequiredService<ExitStateBackupScheduler>()));
 
         // The setup flow's decisions, kept out of the controller so they can be tested.
         services.AddSingleton<SparkStoreProvisioner>();
