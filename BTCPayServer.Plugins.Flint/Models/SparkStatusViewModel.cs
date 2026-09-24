@@ -94,4 +94,10 @@ public class SparkStatusViewModel
 
     /// <summary>The stablecoin balance as a readable quantity, or null when the store holds none.</summary>
     public string? StableBalanceHolding { get; set; }
+
+    /// <summary>False on any network but mainnet, where the provider that bridges USDC and USDT does not operate.</summary>
+    public bool StablecoinsAvailable { get; set; }
+
+    /// <summary>Whether checkout offers USDC and USDT: either payment method configured and not switched off.</summary>
+    public bool StablecoinsEnabled { get; set; }
 }

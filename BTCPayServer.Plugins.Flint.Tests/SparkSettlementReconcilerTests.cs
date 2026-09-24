@@ -1,3 +1,4 @@
+using System.Numerics;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
@@ -1047,6 +1048,17 @@ public class SparkSettlementReconcilerTests
             CancellationToken cancellationToken = default) =>
             _inner.SendCrossChainAsync(
                 route, recipientAddress, amount, maxSlippageBps, idempotencyKey, approveQuote, cancellationToken);
+
+        public Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+            CancellationToken cancellationToken = default) =>
+            _inner.GetCrossChainReceiveRoutesAsync(cancellationToken);
+
+        public Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+            SparkCrossChainReceiveRoute route,
+            BigInteger amount,
+            uint maxSlippageBps,
+            CancellationToken cancellationToken = default) =>
+            _inner.ReceiveCrossChainAsync(route, amount, maxSlippageBps, cancellationToken);
 
         public Task DisconnectAsync() => _inner.DisconnectAsync();
 

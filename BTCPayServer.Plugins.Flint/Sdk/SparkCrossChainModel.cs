@@ -172,6 +172,18 @@ public enum SparkConversionStatus
 /// The authoritative settled amount at the destination, in destination-asset base units. Null until the
 /// provider reports delivery — which, again, arrives through no event.
 /// </param>
+/// <param name="AssetAmountIn">
+/// On a <b>receive</b>, what the payer actually deposited on <paramref name="Chain"/>, in the external asset's
+/// base units (<paramref name="AssetDecimals"/>). On a send, the Spark amount expressed in the external asset.
+/// </param>
+/// <param name="EstimatedOut">
+/// Frozen at quote time. On a receive this is in Spark-side units (sats, or token base units) and equals the
+/// quote's <c>expectedReceivedAmount</c> — which is why it can identify the quote a receive came from.
+/// </param>
+/// <param name="ServiceFeeAmount">Frozen at quote time, in the service-fee asset's own units.</param>
+/// <param name="ExternalTxHash">
+/// The transaction on the non-Spark chain: the payer's funding deposit on a receive, the delivery on a send.
+/// </param>
 public sealed record SparkConversionState(
     SparkCrossChainProvider Provider,
     SparkConversionStatus Status,
@@ -181,7 +193,13 @@ public sealed record SparkConversionState(
     string? RecipientAddress = null,
     string? Chain = null,
     string? Asset = null,
-    uint AssetDecimals = 0)
+    uint AssetDecimals = 0,
+    string? ChainId = null,
+    string? AssetContract = null,
+    BigInteger? AssetAmountIn = null,
+    BigInteger? EstimatedOut = null,
+    BigInteger? ServiceFeeAmount = null,
+    string? ExternalTxHash = null)
 {
     /// <summary>True while the provider has neither delivered nor given up.</summary>
     public bool IsInFlight => Status is SparkConversionStatus.Pending or SparkConversionStatus.Unknown;

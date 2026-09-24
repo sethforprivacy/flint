@@ -85,6 +85,7 @@ public class SparkController : Controller
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
     private readonly CrossChainCatalog _crossChainCatalog;
+    private readonly StablecoinPaymentService _stablecoins;
     private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<SparkController> _logger;
 
@@ -99,6 +100,7 @@ public class SparkController : Controller
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
         CrossChainCatalog crossChainCatalog,
+        StablecoinPaymentService stablecoins,
         IAuthorizationService authorizationService,
         ILogger<SparkController> logger)
     {
@@ -112,6 +114,7 @@ public class SparkController : Controller
         _deposits = deposits;
         _stableBalance = stableBalance;
         _crossChainCatalog = crossChainCatalog;
+        _stablecoins = stablecoins;
         _authorizationService = authorizationService;
         _logger = logger;
     }
@@ -214,6 +217,18 @@ public class SparkController : Controller
             ? await TryEnableSweepingAtSetupAsync(storeId, vm, cancellationToken).ConfigureAwait(false)
             : null;
 
+        // Same rule as sweeping: after provisioning, and never able to fail setup. Off mainnet the box is not
+        // rendered, and the service refuses anyway.
+        if (vm.EnableStablecoins && _stablecoins.Available
+            && !await _stablecoins.SetEnabledAsync(storeId, true, cancellationToken).ConfigureAwait(false))
+        {
+            sweepNotice = string.Join(" ", new[]
+            {
+                sweepNotice,
+                "USDC and USDT payments could not be turned on; use the switch on the Flint page."
+            }.Where(part => !string.IsNullOrEmpty(part)));
+        }
+
         if (vm.SeedSource is SeedSource.Generated)
         {
             // Core's screen, so the seed is shown the same way BTCPay shows its own: posted to the page
@@ -308,6 +323,9 @@ public class SparkController : Controller
         model.DepositAddress = deposits.Address;
         model.StuckDepositCount = deposits.Stuck.Count;
 
+        model.StablecoinsAvailable = _stablecoins.Available;
+        model.StablecoinsEnabled = await _stablecoins.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false);
+
         model.StableBalanceAvailable = _stableBalance.Available;
         if (_stableBalance.Available)
         {
@@ -399,6 +417,48 @@ public class SparkController : Controller
         else
         {
             TempData[WellKnownTempData.ErrorMessage] = "The store's Lightning payment method could not be updated.";
+        }
+
+        return RedirectToAction(nameof(Status), new { storeId });
+    }
+
+    /// <summary>
+    /// The one switch for USDC and USDT at checkout.
+    /// </summary>
+    /// <remarks>
+    /// Both coins together, on purpose: a merchant deciding whether to take stablecoins is making one decision, and
+    /// a store that wants only one can still switch the other off in BTCPay's own checkout settings, which this
+    /// respects. The state lives in the store's payment methods alone, so this page and checkout cannot disagree.
+    /// </remarks>
+    [HttpPost("status/stablecoins")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Stablecoins(
+        [FromRoute] string storeId,
+        bool enabled,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        if (enabled && !_stablecoins.Available)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "USDC and USDT payments are only available on Bitcoin mainnet.";
+        }
+        else if (await _stablecoins.SetEnabledAsync(storeId, enabled, cancellationToken).ConfigureAwait(false))
+        {
+            TempData[WellKnownTempData.SuccessMessage] = enabled
+                ? "Customers can now pay this store in USDC and USDT. Payments arrive in its Spark wallet."
+                : "USDC and USDT payments are off for this store.";
+        }
+        else
+        {
+            TempData[WellKnownTempData.ErrorMessage] = "The store's payment methods could not be updated.";
         }
 
         return RedirectToAction(nameof(Status), new { storeId });

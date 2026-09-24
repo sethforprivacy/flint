@@ -3,8 +3,11 @@ using System.Net.Http;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Hosting;
 using BTCPayServer.Lightning;
+using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Plugins.Flint.Payments;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Services.Invoices;
@@ -266,6 +269,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IInvoiceRecordStore, EfInvoiceRecordStore>();
         services.AddSingleton<IOutgoingPaymentStore, EfOutgoingPaymentStore>();
         services.AddSingleton<ISweepRecordStore, EfSweepRecordStore>();
+        services.AddSingleton<IStablecoinQuoteStore, EfStablecoinQuoteStore>();
         services.AddDbContext<SparkPluginDbContext>((provider, options) =>
         {
             var factory = provider.GetRequiredService<SparkPluginDbContextFactory>();
@@ -299,6 +303,11 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // its own. See SparkLightningConfigSweepTask.
         services.AddScheduledTask<SparkLightningConfigSweepTask>(Constants.ConfigSweepInterval);
 
+        // USDC and USDT at checkout, received into the store's Spark wallet as bitcoin (or as its Stable Balance
+        // token, when it holds one). See StablecoinPaymentService for the flow and StablecoinQuoteMatcher for how an
+        // arrival is attributed to the invoice it paid.
+        AddStablecoinPayments(services);
+
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");
         services.AddUIExtension("ln-payment-method-setup-tab", "Spark/LNPaymentMethodSetupTab");
@@ -309,6 +318,84 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("spark-setup-post-body", "Spark/SparkSweepSetupStep");
         services.AddUIExtension("spark-status-post-body", "Spark/SparkSweepStatus");
 
+        // USDC/USDT: setup step 3 (after sweeping, by registration order), the checkout body, and the merchant's
+        // view of those payments on an invoice.
+        services.AddUIExtension("spark-setup-post-body", "Spark/SparkStablecoinSetupStep");
+        services.AddUIExtension("checkout-end", "Spark/StablecoinCheckout");
+        services.AddUIExtension("store-invoices-payments", "Spark/StablecoinInvoicePayments");
+
         base.Execute(services);
+    }
+
+    /// <summary>
+    /// The two stablecoin payment methods and everything they stand on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deferred resolution, again.</b> The handlers are built while BTCPay builds its handler dictionary, and the
+    /// service they call reaches the store runtime (<see cref="SparkService"/>), whose own graph reaches that
+    /// dictionary back. So the handlers and <see cref="SparkService"/> both take the service through a
+    /// <c>Func&lt;T&gt;</c>, and the service's BTCPay gateways take core's payment types the same way — the rule at
+    /// the top of <see cref="Execute"/>, applied uniformly.
+    /// </para>
+    /// <para>
+    /// <b>Rates.</b> A prompt is denominated in the coin, so BTCPay needs <c>USDC_X</c> and <c>USDT_X</c> for
+    /// every invoice currency. Both coins are taken at dollar parity — exactly as the SDK sizes the quote — and
+    /// crossed through bitcoin for anything else, so a store needs no rate configuration of its own: the preferred
+    /// exchange that already prices <c>BTC_X</c> prices these too. The exact <c>_USD</c> rule outranks the store's
+    /// catch-all, so a dollar invoice asks for exactly its price rather than for a bid/ask spread's worth more. A
+    /// store on custom rate scripting has to add these itself, which the docs say.
+    /// </para>
+    /// </remarks>
+    private static void AddStablecoinPayments(IServiceCollection services)
+    {
+        services.AddSingleton<StablecoinRouteCache>();
+        services.AddSingleton<IStablecoinInvoiceGateway, BTCPayStablecoinInvoiceGateway>();
+        services.AddSingleton<IStablecoinStoreConfig, BTCPayStablecoinStoreConfig>();
+        services.AddSingleton(provider =>
+        {
+            // Mainnet only, resolved once for the reason Stable Balance's is: the chain is fixed for the life of
+            // the process, and the SDK refuses a cross-chain configuration anywhere else.
+            var networkProvider = provider.GetRequiredService<BTCPayNetworkProvider>();
+            return new StablecoinPaymentService(
+                provider.GetRequiredService<IStablecoinQuoteStore>(),
+                provider.GetRequiredService<IStablecoinInvoiceGateway>(),
+                provider.GetRequiredService<IStablecoinStoreConfig>(),
+                provider.GetRequiredService<ISparkStoreRuntime>(),
+                provider.GetRequiredService<StablecoinRouteCache>(),
+                provider.GetRequiredService<TimeProvider>(),
+                SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType) == Network.Main,
+                provider.GetRequiredService<ILogger<StablecoinPaymentService>>());
+        });
+        services.TryAddSingleton<Func<StablecoinPaymentService>>(provider =>
+            provider.GetRequiredService<StablecoinPaymentService>);
+
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            services.AddSingleton<IPaymentMethodHandler>(provider => new StablecoinPaymentMethodHandler(
+                asset, provider.GetRequiredService<Func<StablecoinPaymentService>>()));
+            services.AddSingleton<ICheckoutModelExtension>(new StablecoinCheckoutModelExtension(asset));
+            services.AddSingleton<IPaymentLinkExtension>(provider => new StablecoinPaymentLinkExtension(
+                new StablecoinPaymentMethodHandler(asset, provider.GetRequiredService<Func<StablecoinPaymentService>>())));
+            services.AddDefaultPrettyName(asset.PaymentMethodId, asset.Symbol);
+            services.AddCurrencyData(new CurrencyData
+            {
+                Code = asset.Symbol,
+                Name = asset.Name,
+                Divisibility = StablecoinPayments.Divisibility,
+                Symbol = null,
+                Crypto = true
+            });
+            services.AddSingleton(new DefaultRules(
+            [
+                $"{asset.Symbol}_USD = 1",
+                $"{asset.Symbol}_X = {asset.Symbol}_BTC * BTC_X",
+                $"{asset.Symbol}_BTC = 1 / BTC_USD"
+            ]));
+        }
+
+        // Crediting what the event stream dropped, and retrying credits that did not land. Same cadence as the
+        // Lightning reconciliation; a store with no open quote costs one indexed query per pass.
+        services.AddScheduledTask<StablecoinReconciliationTask>(Constants.ReconciliationInterval);
     }
 }

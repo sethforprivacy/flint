@@ -197,7 +197,15 @@ public class SparkPluginStartupTests
                      typeof(ISweepRecordStore),
                      typeof(SparkPluginDbContextFactory),
                      typeof(IInvoicePaymentHashIndex),
-                     typeof(SparkInvoicePaymentHashIndexer)
+                     typeof(SparkInvoicePaymentHashIndexer),
+                     // The USDC/USDT path reaches the store runtime (SparkService), core's invoice repository, and
+                     // core's payment types through Funcs — the same graph the handlers below are built inside.
+                     typeof(StablecoinPaymentService),
+                     typeof(IStablecoinQuoteStore),
+                     typeof(IStablecoinInvoiceGateway),
+                     typeof(IStablecoinStoreConfig),
+                     typeof(StablecoinRouteCache),
+                     typeof(StablecoinReconciliationTask)
                  })
         {
             var resolved = host.Resolve(type.Name, provider => provider.GetRequiredService(type));
@@ -241,6 +249,71 @@ public class SparkPluginStartupTests
         // moved Lightning out from under BTC-LN would fail here rather than making every credit unrecordable.
         foreach (var paymentMethodId in BTCPayInvoiceCreditGateway.CreditablePaymentMethods)
             Assert.True(handlers.TryGetValue(paymentMethodId, out _), $"no handler for {paymentMethodId}");
+    }
+
+    /// <summary>
+    /// BTCPay holds both stablecoin payment methods, their checkout and link extensions, their rates and their
+    /// currency data — the pieces a merchant never sees until one is missing.
+    /// </summary>
+    /// <remarks>
+    /// The handlers are built inside the construction of <see cref="PaymentMethodHandlerDictionary"/>, which is the
+    /// graph that deadlocked BTCPay's startup once already; resolving the dictionary with them in it, bounded like
+    /// every resolution here, is what shows their deferred service keeps it acyclic.
+    /// </remarks>
+    [Fact]
+    public void The_stablecoin_payment_methods_are_registered_with_BTCPay()
+    {
+        using var host = SparkTestHost.Create(_output);
+
+        var handlers = host.Resolve(
+            "PaymentMethodHandlerDictionary (with the stablecoin handlers)",
+            provider => provider.GetRequiredService<PaymentMethodHandlerDictionary>());
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            Assert.True(handlers.TryGetValue(asset.PaymentMethodId, out var handler), $"no handler for {asset.PaymentMethodId}");
+            Assert.IsType<BTCPayServer.Plugins.Flint.Payments.StablecoinPaymentMethodHandler>(handler);
+        }
+
+        var checkout = host.Resolve(
+            "Dictionary<PaymentMethodId, ICheckoutModelExtension>",
+            provider => provider.GetRequiredService<Dictionary<BTCPayServer.Payments.PaymentMethodId, BTCPayServer.Payments.ICheckoutModelExtension>>());
+        var links = host.Resolve(
+            "Dictionary<PaymentMethodId, IPaymentLinkExtension>",
+            provider => provider.GetRequiredService<Dictionary<BTCPayServer.Payments.PaymentMethodId, BTCPayServer.Payments.IPaymentLinkExtension>>());
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            Assert.True(checkout.ContainsKey(asset.PaymentMethodId));
+            Assert.True(links.ContainsKey(asset.PaymentMethodId));
+        }
+
+        // Priced with no store configuration at all: the default rules carry both coins.
+        var rules = host.Resolve(
+            "DefaultRulesCollection",
+            provider => provider.GetRequiredService<DefaultRulesCollection>());
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            var rule = rules.WithPreferredExchange("kraken").GetRuleFor(new BTCPayServer.Rating.CurrencyPair(asset.Symbol, "USD"));
+            Assert.True(rule.Reevaluate());
+            Assert.Equal(1m, rule.BidAsk!.Bid);
+        }
+
+        // The checkout's quote endpoint activates the way MVC activates it, from a request scope.
+        var controller = host.Resolve(
+            "UIStablecoinCheckoutController (activated as MVC would)",
+            provider =>
+            {
+                using var scope = provider.CreateScope();
+                return ActivatorUtilities.CreateInstance<UIStablecoinCheckoutController>(scope.ServiceProvider);
+            });
+        Assert.NotNull(controller);
+
+        // Formatted at six decimals rather than falling back to the dollar's two.
+        var currencies = host.Resolve(
+            "CurrencyNameTable",
+            provider => provider.GetRequiredService<BTCPayServer.Services.Rates.CurrencyNameTable>());
+        currencies.ReloadCurrencyData(CancellationToken.None).GetAwaiter().GetResult();
+        foreach (var asset in StablecoinPayments.Assets)
+            Assert.Equal(6, currencies.GetCurrencyData(asset.Symbol, useFallback: false)?.Divisibility);
     }
 
     /// <summary>

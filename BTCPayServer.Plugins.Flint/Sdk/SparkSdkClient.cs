@@ -868,6 +868,109 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 .ToList(),
         pair);
 
+    public async Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        // contractAddress: null lists every source; the caller filters by asset. The SDK already leaves out routes
+        // this wallet could not complete (#1141) and ones the provider only takes with a refund address (TON),
+        // which a receive cannot carry because the payer is not known when the quote is made.
+        var routes = await _sdk
+            .GetCrossChainRoutes(new CrossChainRouteFilter.Receive(contractAddress: null))
+            .ConfigureAwait(false);
+
+        return routes is null ? [] : routes.Select(MapReceiveRoute).ToList();
+    }
+
+    public async Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+        SparkCrossChainReceiveRoute route,
+        BigInteger amount,
+        uint maxSlippageBps,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(route);
+        if (amount <= BigInteger.Zero)
+            throw new ArgumentOutOfRangeException(nameof(amount), amount, "A cross-chain receive needs an amount.");
+
+        if (route.Handle is not CrossChainRoutePair pair)
+        {
+            throw new InvalidOperationException(
+                "This cross-chain route did not come from the SDK's own route table. The SDK is given back the "
+                + "route object it produced, because a reconstructed one is not what the provider quoted.");
+        }
+
+        var response = await _sdk.ReceivePayment(new ReceivePaymentRequest(
+                new ReceivePaymentMethod.CrossChain(
+                    pair,
+                    amount,
+                    // null: the SDK lands the wallet's active Stable Balance token when the route can deliver it,
+                    // and sats otherwise. Forcing Bitcoin would convert a dollar-holding store's receipt to
+                    // bitcoin and then straight back, paying the spread twice.
+                    destination: null,
+                    // The payer covers the provider's fee, which is BTCPay's model for a network fee too: the
+                    // invoice asks for its price plus the cost of this route.
+                    feeMode: CrossChainFeeMode.FeesExcluded,
+                    maxSlippageBps: maxSlippageBps,
+                    targetOverpayBps: null)))
+            .ConfigureAwait(false);
+
+        // Asserted rather than assumed: an address with no quote behind it is one no payer should be shown.
+        if (response.crossChainInfo is not { } info
+            || string.IsNullOrWhiteSpace(info.depositAddress)
+            || info.depositAmount <= BigInteger.Zero)
+        {
+            throw new InvalidOperationException(
+                "Spark returned a cross-chain receive without a deposit address and amount; refusing to show it "
+                + "to a payer.");
+        }
+
+        return new SparkCrossChainReceiveQuote(
+            route,
+            info.depositAddress,
+            info.depositAmount,
+            info.expectedReceivedAmount,
+            string.IsNullOrWhiteSpace(info.destinationAsset) ? "BTC" : info.destinationAsset,
+            string.IsNullOrWhiteSpace(info.tokenIdentifier) ? null : info.tokenIdentifier,
+            info.serviceFeeAmount,
+            string.IsNullOrWhiteSpace(info.serviceFeeAsset) ? null : info.serviceFeeAsset,
+            FromUnixSeconds(info.expiresAt),
+            string.IsNullOrWhiteSpace(response.paymentRequest) ? info.depositAddress : response.paymentRequest);
+    }
+
+    internal static SparkCrossChainReceiveRoute MapReceiveRoute(CrossChainRoutePair pair)
+    {
+        var accepted = pair.acceptedAssets ?? [];
+        var bitcoin = accepted.FirstOrDefault(asset => asset.asset is SparkAsset.Bitcoin);
+
+        return new SparkCrossChainReceiveRoute(
+            pair.provider switch
+            {
+                CrossChainProvider.Orchestra => SparkCrossChainProvider.Orchestra,
+                CrossChainProvider.Boltz => SparkCrossChainProvider.Boltz,
+                _ => SparkCrossChainProvider.Unknown
+            },
+            pair.chain,
+            string.IsNullOrWhiteSpace(pair.chainId) ? null : pair.chainId,
+            pair.asset,
+            string.IsNullOrWhiteSpace(pair.contractAddress) ? null : pair.contractAddress,
+            pair.decimals,
+            LandsAsBitcoin: bitcoin is not null,
+            LandsAsToken: accepted.Any(asset => asset.asset is SparkAsset.Token),
+            BitcoinLimits: bitcoin?.limits is { } limits
+                ? new SparkCrossChainLimits(limits.minAmount, limits.maxAmount, limits.minUsdCents, limits.maxUsdCents)
+                : null,
+            Handle: pair);
+    }
+
+    /// <summary>A unix-seconds expiry, clamped so a malformed value cannot throw out of a checkout.</summary>
+    private static DateTimeOffset FromUnixSeconds(ulong unixSeconds)
+    {
+        const long maxUnixSeconds = 253_402_300_799; // 9999-12-31T23:59:59Z, the limit DateTimeOffset accepts.
+        return DateTimeOffset.FromUnixTimeSeconds(unixSeconds > maxUnixSeconds ? maxUnixSeconds : (long)unixSeconds);
+    }
+
     /// <remarks>
     /// The cross-chain quote reports its expiry as an ISO-8601 <em>string</em>, where the cooperative-exit quote
     /// reports its own as a Unix <c>ulong</c>. An unparseable value is treated as already expired rather than as

@@ -187,6 +187,12 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </remarks>
     private readonly SparkStorePassScheduler _reconciliationPass;
 
+    /// <summary>
+    /// The USDC/USDT path, deferred because it reads the store runtime this service is, and is reached from the
+    /// payment-method handler dictionary this service must not be built from inside (see <c>SparkPlugin</c>).
+    /// </summary>
+    private readonly Func<StablecoinPaymentService> _stablecoinsFactory;
+
     public SparkService(
         EventAggregator eventAggregator,
         IStoreRepository storeRepository,
@@ -202,6 +208,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         IBolt11Parser bolt11Parser,
         TimeProvider timeProvider,
         Func<SparkLightningConfigSweeper> configSweeperFactory,
+        Func<StablecoinPaymentService> stablecoinsFactory,
         ILoggerFactory loggerFactory,
         ILogger<SparkService> logger) : base(eventAggregator, logger)
     {
@@ -225,6 +232,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         _lightningWiring = lightningWiring;
         _bolt11Parser = bolt11Parser;
         _configSweeperFactory = configSweeperFactory;
+        _stablecoinsFactory = stablecoinsFactory;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -966,6 +974,13 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             return;
         }
 
+        if (payment.PaymentHash is null
+            && payment.Method is SparkPaymentMethod.Spark or SparkPaymentMethod.Token
+            && await TryHandleStablecoinReceiveAsync(instance, payment, cancellationToken).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (payment.PaymentHash is not { } paymentHash)
         {
             // A direct Spark transfer with no HTLC and no invoice: real money that cannot be attributed to a
@@ -997,6 +1012,56 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         }
 
         await _reconciler.ApplyAsync(storeId, payment, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Routes a USDC/USDT receive — a transfer from the bridge provider, with no payment hash — to the stablecoin
+    /// path. False when it is not one, so the caller reports it as the unattributable transfer it then is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The provider's conversion details, which are what tie the transfer to a quote, can arrive after the
+    /// transfer itself: the SDK first reports a plain Spark transfer and attaches the details once the provider
+    /// confirms the order, announcing them with <c>PaymentMetadataUpdated</c>. So the stored row is re-read before
+    /// deciding, and a detail-less transfer that arrives while the store has open quotes is left for that event —
+    /// or the stablecoin reconciliation pass — rather than warned about as money nothing can attribute.
+    /// </para>
+    /// <para>
+    /// A detail-less transfer on a store with no open quote falls through to the existing warning: nothing this
+    /// plugin quoted can explain it.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> TryHandleStablecoinReceiveAsync(
+        SparkStoreInstance instance,
+        SparkPayment payment,
+        CancellationToken cancellationToken)
+    {
+        var stablecoins = _stablecoinsFactory();
+        if (!stablecoins.Available)
+            return false;
+
+        if (payment.Conversion is null || payment.Status is not SparkPaymentStatus.Completed)
+            payment = await ConfirmStatusAsync(instance, payment, cancellationToken).ConfigureAwait(false);
+
+        if (payment.Conversion is { Provider: SparkCrossChainProvider.Orchestra })
+        {
+            await stablecoins.TryCreditAsync(instance.StoreId, payment, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+
+        // Some other conversion — a Stable Balance swap leg, say — is not a USDC/USDT receive waiting for its
+        // details, whatever quotes are open.
+        if (payment.Conversion is not null
+            || !await stablecoins.HasOpenQuotesAsync(instance.StoreId, cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        _logger.LogDebug(
+            "Store {StoreId}: Spark payment {SdkPaymentId} has no payment hash and no conversion details yet while "
+            + "USDC/USDT quotes are open; waiting for the provider's details to attribute it",
+            instance.StoreId, payment.SdkPaymentId);
+        return true;
     }
 
     /// <summary>
@@ -1292,6 +1357,20 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 // that matters. Failing before teardown would leave a live wallet with settings that say there
                 // is none.
                 await _lightningWiring.ClearIfOursAsync(storeId, CancellationToken).ConfigureAwait(false);
+
+                // USDC and USDT land in this wallet too, so they go with it: left configured they could only ever
+                // be offered as unavailable. Best effort, after everything that matters more has happened.
+                try
+                {
+                    await _stablecoinsFactory().SetEnabledAsync(storeId, false, CancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: Spark was removed but its USDC/USDT payment methods could not be cleared",
+                        storeId);
+                }
+
                 return SparkSettingsApplied.Removed;
             }
 

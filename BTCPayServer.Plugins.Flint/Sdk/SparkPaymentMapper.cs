@@ -133,6 +133,9 @@ public static class SparkPaymentMapper
         switch (info)
         {
             case ConversionInfo.Orchestra orchestra:
+                // The last six fields are what a cross-chain *receive* is attributed by: estimatedOut and
+                // serviceFeeAmount are frozen at quote time and identify the quote, assetAmountIn is what the
+                // payer really sent, and the external hash is the payer's own transaction. A send ignores them.
                 return new SparkConversionState(
                     SparkCrossChainProvider.Orchestra,
                     MapConversionStatus(orchestra.status),
@@ -142,7 +145,13 @@ public static class SparkPaymentMapper
                     orchestra.recipientAddress,
                     orchestra.chain,
                     orchestra.asset,
-                    orchestra.assetDecimals);
+                    orchestra.assetDecimals,
+                    NullIfBlank(orchestra.chainId),
+                    NullIfBlank(orchestra.assetContract),
+                    orchestra.assetAmountIn,
+                    orchestra.estimatedOut,
+                    orchestra.serviceFeeAmount,
+                    NullIfBlank(orchestra.externalTxHash));
 
             case ConversionInfo.Boltz boltz:
                 // Recorded even though no Boltz route currently prepares, so a payment that somehow took one is

@@ -1,0 +1,85 @@
+@using System.Globalization
+@using BTCPayServer.Payments
+@using BTCPayServer.Plugins.Flint.Payments
+@using BTCPayServer.Services
+@using BTCPayServer.Services.Invoices
+@inject DisplayFormatter DisplayFormatter
+@inject PaymentMethodHandlerDictionary Handlers
+@model BTCPayServer.Models.InvoicingModels.InvoiceDetailsModel
+@*
+    Injected at "store-invoices-payments": the merchant's view of USDC/USDT payments on an invoice.
+
+    What the payer sent, from which network and in which transaction, and what reached the Spark wallet. The
+    payer's transaction hash is the one thing a merchant needs to chase a payment on the other chain, and BTCPay's
+    own payments table has no column for it. Renders nothing on an invoice without one of these payments, and
+    tolerates any other model, as every extension partial here does.
+*@
+@{
+    var payments = (Model?.Payments ?? [])
+        .Select(payment =>
+        {
+            if (StablecoinPayments.For(payment.PaymentMethodId) is null
+                || Handlers.TryGet(payment.PaymentMethodId) is not StablecoinPaymentMethodHandler handler)
+                return null;
+            try
+            {
+                var details = handler.ParsePaymentDetails(payment.Details) as StablecoinPaymentDetails;
+                return details is null ? null : new { Payment = payment, Details = details, Asset = handler.Asset };
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        })
+        .Where(p => p is not null)
+        .ToList();
+}
+@if (payments.Count > 0)
+{
+    <section id="FlintStablecoinPayments">
+        <h5>USDC and USDT payments</h5>
+        <div class="invoice-payments table-responsive mt-0">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th class="w-150px">Network</th>
+                        <th>Payer's transaction</th>
+                        <th class="w-150px">Received as</th>
+                        <th class="w-150px text-end">Paid</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in payments)
+                    {
+                        // Sats for a bitcoin landing; a Spark token (USDB) is six-decimal, which the SDK asserts for
+                        // every token it lands a receive as.
+                        var received = row!.Details.DestinationAsset;
+                        if (System.Numerics.BigInteger.TryParse(row.Details.DeliveredAmount, NumberStyles.Integer, CultureInfo.InvariantCulture, out var delivered))
+                        {
+                            received = string.Equals(row.Details.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase)
+                                ? $"{delivered.ToString("N0", CultureInfo.InvariantCulture)} sats"
+                                : $"{StablecoinAmounts.Format(delivered, 6)} {row.Details.DestinationAsset}";
+                        }
+                        <tr>
+                            <td>@StablecoinPayments.ChainName(row.Details.Chain)</td>
+                            <td>
+                                @if (!string.IsNullOrEmpty(row.Details.ExternalTxHash))
+                                {
+                                    <vc:truncate-center text="@row.Details.ExternalTxHash" classes="truncate-center-id" />
+                                }
+                                else
+                                {
+                                    <span class="text-secondary">Not reported</span>
+                                }
+                            </td>
+                            <td>@received</td>
+                            <td class="payment-value text-end text-nowrap">
+                                <span data-sensitive class="text-success">@DisplayFormatter.Currency(row.Payment.Value, row.Asset.Symbol, divisibility: StablecoinPayments.Divisibility)</span>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+}
