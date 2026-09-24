@@ -5,6 +5,23 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Changed
+
+- **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
+  0.25.0 bump). The API changes the plugin meets are absorbed at the SDK seam: a manual deposit
+  claim now reports one of three outcomes — settled, submitted (settles asynchronously) or deferred,
+  which is reported as a failure with its reason — the network-status probe takes a request, and a
+  cross-chain route describes its Spark side as accepted assets carrying amount limits. The new
+  `PaymentMetadataUpdated` event is consumed rather than dropped.
+- **An on-chain deposit can be credited before its third confirmation.** SDK 0.26 unifies early and
+  mature claiming under the one claim ceiling the plugin already configures: when the service
+  provider's spread for crediting a deposit early fits that ceiling, the SDK takes it. It never costs
+  more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
+  unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
+  so it cannot read as stuck and invite a second claim.
+
 ## [1.1.0] — 2026-09-07
 
 A compatibility and CI-hardening release. No plugin source changed between 1.0.4 and this: the

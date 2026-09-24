@@ -133,9 +133,15 @@ public sealed record SparkRecommendedFees(
     long MinimumFeeSatPerVbyte);
 
 /// <summary>
-/// Outcome of a manual claim. Exactly one of <see cref="Payment"/> and <see cref="Error"/> is set.
+/// Outcome of a manual claim. At most one of <see cref="Payment"/> and <see cref="Error"/> is set, and exactly
+/// one of <see cref="Payment"/>, <see cref="Error"/> and <see cref="Submitted"/> says what happened.
 /// </summary>
-public sealed record SparkClaimDepositResult(SparkPayment? Payment, string? Error)
+/// <param name="Submitted">
+/// The SDK accepted the claim but settles it asynchronously, so there is no payment to hand back yet — its
+/// <c>ClaimDepositOutcome.Submitted</c>. A success: the credit arrives as an ordinary deposit payment on the event
+/// stream, and nothing more is needed from anybody.
+/// </param>
+public sealed record SparkClaimDepositResult(SparkPayment? Payment, string? Error, bool Submitted = false)
 {
-    public bool Succeeded => Payment is not null;
+    public bool Succeeded => Payment is not null || Submitted;
 }

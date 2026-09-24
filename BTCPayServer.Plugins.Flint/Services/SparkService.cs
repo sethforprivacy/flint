@@ -912,6 +912,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             // through a compare-and-set, so a duplicate is harmless and a missing event is recoverable.
             case SparkEventKind.PaymentSucceeded when envelope.Payment is not null:
             case SparkEventKind.PaymentPending when envelope.Payment is not null:
+            // A metadata update is a completion as far as a cross-chain receive is concerned: the conversion
+            // details that tie the transfer to a quote arrive only with it. For anything else it is one more
+            // harmless re-check through the same compare-and-set.
+            case SparkEventKind.PaymentMetadataUpdated when envelope.Payment is not null:
                 await HandleReceiveEventAsync(instance, envelope.Payment).ConfigureAwait(false);
                 return;
 

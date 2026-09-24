@@ -9,7 +9,10 @@ to this page when there is actually something to claim.
 
 The wallet has one **static Bitcoin address**. It does not rotate, so save it once and reuse it. Money sent
 to it credits the store's Spark balance after **three confirmations**, at which point the SDK claims it —
-budget half an hour or more, not seconds.
+budget half an hour or more, not seconds. It can land sooner: the Spark service provider will credit a deposit
+before it matures for a spread, and the SDK takes that offer by itself whenever the spread fits the same claim
+ceiling described below — so an early claim never costs more than the ceiling an ordinary one would be allowed.
+A deposit credited that way is not listed as unclaimed while the provider finishes with it.
 
 > **The failure worth understanding before you send anything.** Claiming a deposit costs an on-chain fee,
 > and the SDK will only pay up to a configured ceiling. Above it the claim does not happen more cheaply —
