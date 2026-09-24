@@ -192,6 +192,8 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// payment-method handler dictionary this service must not be built from inside (see <c>SparkPlugin</c>).
     /// </summary>
     private readonly Func<StablecoinPaymentService> _stablecoinsFactory;
+
+    /// <summary>
     /// Where each store's automatic exit-state backup is kept. One file per store, in a directory of the
     /// plugin's own; nothing else in this class opens it.
     /// </summary>
@@ -1198,6 +1200,15 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
             case SparkEventKind.PaymentFailed:
                 // A failed inbound HTLC leaves the invoice payable, so there is nothing to record.
                 _logger.LogDebug("Store {StoreId}: Spark payment failed", envelope.StoreId);
+                return;
+
+            case SparkEventKind.NewDeposits:
+                // On-chain money detected before its claim. Not a leaf yet, so today's exit state does not
+                // cover it — but the claim usually lands well inside the debounce, and a refresh requested
+                // here means the pass that runs after it exports the leaf even if the claim event itself is
+                // one of the drops the event channel is documented as producing.
+                _logger.LogDebug("Store {StoreId}: Spark detected a new on-chain deposit", envelope.StoreId);
+                _exitStateBackupScheduler.RequestRefresh(envelope.StoreId);
                 return;
 
             case SparkEventKind.ClaimedDeposits:

@@ -188,6 +188,32 @@ public class SparkExitStateAutoBackupTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task A_new_deposit_event_requests_a_refresh_through_the_same_debounce()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        // NewDeposits is the claim's precursor: the listener maps it, and it requests a refresh on the
+        // same terms as the claim that follows it, so a pass that runs after the debounce exports the
+        // leaf even if the claim event itself never arrives. The wait is on the scheduler's pending
+        // mark rather than a log line, because a precursor event is deliberately not operator-level.
+        Emit(h, StoreId, SparkEventKind.NewDeposits, payment: null);
+        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+            "the new-deposit event never requested a refresh");
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal(2, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task An_inbound_payment_event_requests_a_refresh_through_the_same_debounce()
     {
         var clock = new StubTimeProvider(Base);

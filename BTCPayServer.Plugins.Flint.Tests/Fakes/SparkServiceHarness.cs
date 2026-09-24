@@ -79,7 +79,8 @@ public sealed class SparkServiceHarness : IDisposable
         Deadlines deadlines,
         ChainName chain,
         TimeProvider timeProvider,
-        IExitStateBackupStore exitStateBackups)
+        IExitStateBackupStore exitStateBackups,
+        ExitStateBackupScheduler backupScheduler)
     {
         Service = service;
         Sdk = sdk;
@@ -91,6 +92,7 @@ public sealed class SparkServiceHarness : IDisposable
         _chain = chain;
         _timeProvider = timeProvider;
         ExitStateBackups = exitStateBackups;
+        BackupScheduler = backupScheduler;
     }
 
     public SparkService Service { get; }
@@ -127,6 +129,9 @@ public sealed class SparkServiceHarness : IDisposable
     /// the test with the production code instead of pinning either.
     /// </summary>
     public IExitStateBackupStore ExitStateBackups { get; }
+
+    /// <summary>The real scheduler the service decides with; the tests read its marks directly.</summary>
+    public ExitStateBackupScheduler BackupScheduler { get; }
 
     /// <summary>The BTCPay data directory this service was given, which is where its per-store storage lives.</summary>
     public string DataDir => _dataDir;
@@ -296,7 +301,8 @@ public sealed class SparkServiceHarness : IDisposable
             NullLogger<SparkLightningConfigSweeper>.Instance);
 
         return new SparkServiceHarness(
-            service, sdk, broadcaster, log, dataDir, durable, deadlines, chain, clock, exitStateBackups)
+            service, sdk, broadcaster, log, dataDir, durable, deadlines, chain, clock, exitStateBackups,
+            backupScheduler)
         {
             Stablecoins = stablecoins
         };
