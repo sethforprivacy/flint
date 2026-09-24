@@ -26,8 +26,11 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// cancellation, because no SDK call can be cancelled — see <see cref="FakeSparkSdkClientFactory"/>.
 /// </para>
 /// </remarks>
+[Collection(UnilateralExitTestCollection.Name)]
 public class SparkServiceStartupTests
 {
+    private const string Gate = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
+
     /// <summary>
     /// How long startup may take before it is treated as hung.
     /// </summary>
@@ -318,6 +321,231 @@ public class SparkServiceStartupTests
 
         return stopwatch.Elapsed;
     }
+
+    // ------------------------------------------------------------------------------------------------
+    // The exit-state backup is imported on connect, or the page lies about it.
+    // ------------------------------------------------------------------------------------------------
+
+    private const string BackupStore = "store-with-an-exit-state-backup";
+
+    /// <summary>
+    /// A stored exit-state backup is put into the wallet when it starts.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the only thing that makes the backup worth taking.</b> The Advanced page tells an operator
+    /// that a stored backup is imported automatically, and the backup exists for the case where the wallet's
+    /// own storage is gone while the Spark operators are unreachable — the one situation in which a leaf's exit
+    /// data cannot be re-fetched from anywhere. If nothing imports it, the operator is shown a "Stored" badge
+    /// for data the plugin never reads, and they find out only when they need it, which is the worst possible
+    /// moment. So this asserts the import reaches the SDK with the stored value, not merely that a code path
+    /// exists.
+    /// </remarks>
+    [Fact]
+    public async Task A_stored_exit_state_backup_is_imported_when_the_wallet_starts()
+    {
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
+        await WithExitStateBackup(h, BackupStore, "the-stored-backup-blob");
+
+        StartWithinTimeout(h);
+
+        // The import happens on the warm-up path, which is deliberately not awaited by the connect, so the
+        // assertion has to wait for it rather than assume it has already run.
+        await WaitUntil(
+            () => h.Sdk.Clients.TryGetValue(BackupStore, out var backupClient) && backupClient.ExitImportCalls.Count > 0,
+            "the exit-state backup to be imported");
+
+        Assert.Equal(["the-stored-backup-blob"], h.Sdk.Clients[BackupStore].ExitImportCalls);
+    }
+
+    /// <summary>
+    /// A store with no backup has nothing imported, so the feature costs nothing until it is used.
+    /// </summary>
+    /// <remarks>
+    /// The other half of the guard above, and the one that catches an import wired to the wrong place: an
+    /// implementation that imported on every connect regardless of whether a backup existed would pass the
+    /// first test while quietly sending an empty or absent value to the SDK for every store on the server.
+    /// <b>The gate is on for this test deliberately.</b> With it off, nothing imports and the assertion would
+    /// pass against an implementation that imported for every store, which is precisely the bug it exists to
+    /// catch.
+    /// </remarks>
+    [Fact]
+    public async Task A_store_with_no_backup_imports_nothing_on_start()
+    {
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(HealthyStore, SparkServiceHarness.MnemonicFor(1));
+
+        StartWithinTimeout(h);
+
+        // Give a would-be import the same window the positive test gives the real one, so this cannot pass
+        // merely by observing the store before an incorrect import had a chance to run.
+        await Task.Delay(250);
+
+        Assert.Empty(h.Sdk.Clients[HealthyStore].ExitImportCalls);
+    }
+
+    /// <summary>
+    /// The backup value itself never reaches the log, on either path.
+    /// </summary>
+    /// <remarks>
+    /// The blob carries every leaf of the wallet and the transactions that spend them, so it discloses the
+    /// balance, how it is split, and the payment history. It is the one secret on this surface, and the import
+    /// is the only place the plugin handles it — which makes it the place a well-meaning debug line would leak
+    /// it. Asserted on the failure path too, because that is where an implementation is most tempted to print
+    /// what it could not read.
+    /// </remarks>
+    [Fact]
+    public async Task The_exit_state_backup_value_never_reaches_the_log()
+    {
+        const string secret = "blob-that-must-not-be-logged-9f3a";
+
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
+        await WithExitStateBackup(h, BackupStore, secret);
+
+        StartWithinTimeout(h);
+        await WaitUntil(
+            () => h.Sdk.Clients.TryGetValue(BackupStore, out var backupClient) && backupClient.ExitImportCalls.Count > 0,
+            "the import to run");
+
+        Assert.DoesNotContain(secret, h.Log.AllText);
+    }
+
+    /// <summary>
+    /// A backup an earlier version of the plugin left in the store's settings is adopted on connect:
+    /// imported into the wallet, moved to the plugin's own file, and the old setting cleared.
+    /// </summary>
+    /// <remarks>
+    /// <b>The upgrade path is the whole reason the deprecated setting still deserializes.</b> A store
+    /// upgrading from the old version may hold its only copy of the backup there; an upgrade that
+    /// silently stopped reading the slot — or, worse, cleared it without moving it — would lose the
+    /// exit data of every leaf that version had learned about, which is exactly the loss the backup
+    /// exists to prevent. Asserted end to end because each step commits only on the last: a build
+    /// that wrote the file before the import succeeded, or cleared the setting when the write
+    /// failed, fails one of these three assertions.
+    /// </remarks>
+    [Fact]
+    public async Task A_backup_left_in_the_old_settings_location_is_adopted_on_connect()
+    {
+        const string legacySecret = "legacy-blob-that-must-not-be-logged-4c1b";
+
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
+
+        // The shape the old version left behind: written through the store repository, not the
+        // in-memory cache, because a real upgrade's value was persisted by a previous run.
+        var settings = h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!;
+        settings.UnilateralExit = new UnilateralExitSettings { ExitStateBackup = legacySecret };
+        h.Stores.Seed(BackupStore, Constants.StoreSettingsKey, settings);
+
+        StartWithinTimeout(h);
+
+        // The one wait point after which all three commits are visible: the plugin logs the adoption
+        // only once the file has taken the value and the setting has been cleared.
+        await WaitUntil(
+            () => h.Log.AllText.Contains("adopted an exit-state backup"),
+            "the legacy backup to be adopted");
+
+        Assert.Equal([legacySecret], h.Sdk.Clients[BackupStore].ExitImportCalls);
+        Assert.Equal(legacySecret, await h.ExitStateBackups.ReadAsync(BackupStore));
+        Assert.Null(
+            h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!
+                .UnilateralExit!.ExitStateBackup);
+
+        // And the adoption line, like every other on this path, names a length and not the value.
+        Assert.DoesNotContain(legacySecret, h.Log.AllText);
+    }
+
+
+    /// <summary>
+    /// An adopted backup leaves no copy reachable from the settings cache either.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The database being clear is only half the clear.</b> Every reader gets the cached instance —
+    /// <c>SparkService.Get</c> hands back a clone of it — and both whole-settings writers rebuild from that
+    /// clone: <c>SparkUnilateralExitService.SaveExitSettingsAsync</c> clones the settings and the exit
+    /// section before storing, and a re-provision carries the previous exit settings across. A cache still
+    /// holding the blob is therefore a blob the next disclosure acknowledgement writes back into the
+    /// settings column, where it stays for good — adoption is never consulted again once the file exists,
+    /// which is precisely when nothing is left to clear it.
+    /// </para>
+    /// <para>
+    /// The two are read through different doors on purpose: the repository for the row, the service for the
+    /// cache. A fake repository that handed back the very instance the cache holds would let an
+    /// implementation that cleared neither pass this.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task An_adopted_backup_leaves_no_copy_behind_in_the_settings_cache()
+    {
+        const string legacySecret = "legacy-blob-that-must-not-be-logged-7d22";
+
+        using var gate = FeatureGate();
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
+
+        var seeded = h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!;
+        seeded.UnilateralExit = new UnilateralExitSettings { ExitStateBackup = legacySecret };
+        h.Stores.Seed(BackupStore, Constants.StoreSettingsKey, seeded);
+
+        StartWithinTimeout(h);
+        await WaitUntil(
+            () => h.Log.AllText.Contains("adopted an exit-state backup"),
+            "the legacy backup to be adopted");
+
+        Assert.Null(
+            h.Stores.Stored<SparkSettings>(BackupStore, Constants.StoreSettingsKey)!
+                .UnilateralExit!.ExitStateBackup);
+
+        // The read every later whole-settings write is built from.
+        var cached = await h.Service.Get(BackupStore);
+        Assert.NotNull(cached);
+        Assert.Null(cached.UnilateralExit!.ExitStateBackup);
+    }
+
+    /// <summary>
+    /// Turns the experimental-exit gate on for the duration of a test.
+    /// </summary>
+    /// <remarks>
+    /// The import is behind <see cref="Constants.UnilateralExitEnabled"/>, so a test that did not set this
+    /// would be asserting against a feature that was off and would pass for the wrong reason. The variable is
+    /// process-wide, which is why this class joins <see cref="UnilateralExitTestCollection"/>: xUnit's
+    /// per-class parallelism would otherwise let two classes read it while another is mid-swap.
+    /// </remarks>
+    private static IDisposable FeatureGate() => new EnvironmentSwitch(Gate);
+
+    private sealed class EnvironmentSwitch : IDisposable
+    {
+        private readonly string _name;
+        private readonly string? _previous;
+
+        public EnvironmentSwitch(string name)
+        {
+            _name = name;
+            _previous = Environment.GetEnvironmentVariable(name);
+            Environment.SetEnvironmentVariable(name, "1");
+        }
+
+        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
+    }
+
+    /// <summary>
+    /// Places a store's exit-state backup on the plugin's own file — the location a previous run
+    /// stored it, read back by the connect through the real file store.
+    /// </summary>
+    /// <remarks>
+    /// The harness's store is the real <c>FileExitStateBackupStore</c> over a temp data directory, so
+    /// this is not a fake agreeing with itself: the import test below reads bytes this wrote, and a
+    /// connect that looked only at its own cache would find nothing.
+    /// </remarks>
+    private static Task WithExitStateBackup(SparkServiceHarness h, string storeId, string backup) =>
+        h.ExitStateBackups.WriteAsync(storeId, backup);
+
 
     private static async Task WaitUntil(Func<bool> condition, string what)
     {

@@ -307,6 +307,12 @@ public class SparkStoreProvisionerTests
         var first = h.Settings.Settings[StoreId]!;
         first.Sweep.Enabled = true;
         first.Sweep.BalanceThresholdSats = 100_000;
+        first.Deposits.ClaimFeeLeewaySatPerVbyte = 9;
+        first.StableBalance.DisclosureAcknowledged = true;
+        // Infrastructure configuration, which has nothing to do with which seed the store runs on — and off
+        // mainnet losing it means the next unilateral exit refuses for want of a block explorer.
+        first.UnilateralExit.DisclosureAcknowledged = true;
+        first.UnilateralExit.EsploraApiUrl = "https://explorer.test/api";
         first.ApiKeyOverride = "merchant-key";
 
         var replacement = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
@@ -316,8 +322,19 @@ public class SparkStoreProvisionerTests
         Assert.NotEqual(first.PaymentKey, second.PaymentKey);
         Assert.True(second.Sweep.Enabled);
         Assert.Equal(100_000, second.Sweep.BalanceThresholdSats);
+        Assert.Equal(9, second.Deposits.ClaimFeeLeewaySatPerVbyte);
+        Assert.True(second.StableBalance.DisclosureAcknowledged);
+        Assert.True(second.UnilateralExit.DisclosureAcknowledged);
+        Assert.Equal("https://explorer.test/api", second.UnilateralExit.EsploraApiUrl);
         Assert.Equal("merchant-key", second.ApiKeyOverride);
         Assert.Equal(SeedSource.Imported, second.SeedSource);
+
+        // Copied, not aliased. Sharing a block with the object the caller still holds would make a later edit to
+        // one silently edit the other — including the copy a failed attempt is supposed to roll back to.
+        Assert.NotSame(first.Sweep, second.Sweep);
+        Assert.NotSame(first.Deposits, second.Deposits);
+        Assert.NotSame(first.StableBalance, second.StableBalance);
+        Assert.NotSame(first.UnilateralExit, second.UnilateralExit);
     }
 
     [Fact]

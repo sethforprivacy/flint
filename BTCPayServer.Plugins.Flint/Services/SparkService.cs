@@ -187,6 +187,32 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </remarks>
     private readonly SparkStorePassScheduler _reconciliationPass;
 
+    /// <summary>
+    /// The USDC/USDT path, deferred because it reads the store runtime this service is, and is reached from the
+    /// payment-method handler dictionary this service must not be built from inside (see <c>SparkPlugin</c>).
+    /// </summary>
+    private readonly Func<StablecoinPaymentService> _stablecoinsFactory;
+
+    /// <summary>
+    /// Where each store's automatic exit-state backup is kept. One file per store, in a directory of the
+    /// plugin's own; nothing else in this class opens it.
+    /// </summary>
+    private readonly IExitStateBackupStore _exitStateBackupStore;
+
+    /// <summary>
+    /// The debounce/safety-net decisions for those backups, plus the per-store content hash that stops an
+    /// unchanged state being rewritten. Singleton because the requests arrive on per-store event loops and
+    /// the scheduled pass consumes them from another thread entirely.
+    /// </summary>
+    private readonly ExitStateBackupScheduler _exitStateBackupScheduler;
+
+    /// <summary>
+    /// The clock every scheduled decision reads. Kept as a field because the backup pass compares it
+    /// against times the event path recorded through the scheduler; a test advances one and observes the
+    /// other.
+    /// </summary>
+    private readonly TimeProvider _timeProvider;
+
     public SparkService(
         EventAggregator eventAggregator,
         IStoreRepository storeRepository,
@@ -202,7 +228,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         IBolt11Parser bolt11Parser,
         TimeProvider timeProvider,
         Func<SparkLightningConfigSweeper> configSweeperFactory,
+        Func<StablecoinPaymentService> stablecoinsFactory,
         ILoggerFactory loggerFactory,
+        IExitStateBackupStore exitStateBackupStore,
+        ExitStateBackupScheduler exitStateBackupScheduler,
         ILogger<SparkService> logger) : base(eventAggregator, logger)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -225,8 +254,12 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         _lightningWiring = lightningWiring;
         _bolt11Parser = bolt11Parser;
         _configSweeperFactory = configSweeperFactory;
+        _stablecoinsFactory = stablecoinsFactory;
         _loggerFactory = loggerFactory;
         _logger = logger;
+        _timeProvider = timeProvider;
+        _exitStateBackupStore = exitStateBackupStore;
+        _exitStateBackupScheduler = exitStateBackupScheduler;
     }
 
     #region Hosted service lifecycle
@@ -803,8 +836,16 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         });
     }
 
-    private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
+private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
     {
+        // Imported before the sync, and the order is the point. The SDK collects a leaf's exit data as it
+        // learns about the leaf, so bringing the backup in first means a leaf whose chain existed only in the
+        // backup is present before anything asks the operators about it. Doing it the other way round spends a
+        // round trip confirming a leaf set that the import might have expanded — and the import is the part
+        // that has to work when the operators are unreachable, which is exactly when a sync is most likely to
+        // fail or to be wasted.
+        await RestoreExitStateAsync(storeId, sdk).ConfigureAwait(false);
+
         try
         {
             var info = await sdk.GetInfoAsync(ensureSynced: true).ConfigureAwait(false);
@@ -823,6 +864,243 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 + "creation may fail until this resolves",
                 storeId, SparkErrors.Describe(ex));
         }
+    }
+
+    /// <summary>
+    /// Puts a store's exported exit-state backup back into the wallet that just started.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what makes the backup on the Advanced page mean anything.</b> The page tells an operator that
+    /// a stored backup is imported automatically, and this is the only code that does it; without it the backup
+    /// is a value the plugin writes down and never reads, and an operator who pasted one would be told their
+    /// exit data was secured while the wallet that needed it stayed exactly as exitable as before. That is the
+    /// failure this method exists to make impossible, so it runs on <em>every</em> connect — not only the first
+    /// one after a paste — because the wallet storage it is restoring into can be lost at any time, and the
+    /// connect is the only moment the plugin reliably gets.
+    /// </para>
+    /// <para>
+    /// <b>Ordered before the first sync, deliberately.</b> The SDK collects exit data for leaves as it learns
+    /// about them, so importing first means a leaf whose chain was only in the backup is present before
+    /// anything asks the operators about it. The reverse order would spend a round trip confirming a leaf set
+    /// that import might have expanded, and it is the import that has to happen while the operators are
+    /// unreachable — which is precisely when a sync is most likely to fail.
+    /// </para>
+    /// <para>
+    /// <b>Every failure here is logged and swallowed.</b> A store whose backup will not import still has a
+    /// working Lightning wallet, and taking the wallet down over a recovery aid would trade a rare loss of
+    /// exit data for a certain loss of payments. The SDK also cannot be trusted to be idempotent about a
+    /// blob it refuses on one attempt, so this is not retried here: the next connect tries again, which is
+    /// the same cadence the operator's own restart has.
+    /// </para>
+    /// <para>
+    /// <b>The blob is never logged, not even in the failure path.</b> It discloses the store's balance, how it
+    /// is split, and its payment history — so the log line names the store, the outcome and the counts, and
+    /// nothing else. That is also why this does not go through <c>SparkErrors.Describe</c> on the raw
+    /// exception: an SDK that echoed the blob back in a message would put it in the log.
+    /// </para>
+    /// </remarks>
+    private async Task RestoreExitStateAsync(string storeId, ISparkSdkClient sdk)
+    {
+        // Off unless the host turned the feature on. A store can carry a section with a backup in it from a
+        // host that had the gate set, and importing it on a host that did not would be this plugin acting on
+        // exit data for a feature that is otherwise absent — including on the connect path, where no operator
+        // asked for anything.
+        if (!Constants.UnilateralExitEnabled)
+            return;
+
+        // The plugin's own file first: the backup is a multi-megabyte secret and the settings blob is
+        // deserialized on every settings read, which is exactly why it stopped living there.
+        string? backup;
+        try
+        {
+            backup = await _exitStateBackupStore.ReadAsync(storeId, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: its stored exit-state backup could not be read, so a backup was not "
+                + "imported on this connect", storeId);
+            return;
+        }
+
+        // Adoption: a store upgrading from a plugin version that kept the backup in its settings still has
+        // its only copy there, and losing a backup on an upgrade is losing the exit data of every leaf
+        // the old version had learned about. Import from the old location first; the move is committed
+        // only once the import has succeeded, so a blob this SDK refuses stays where it is.
+        var adopting = false;
+        if (string.IsNullOrWhiteSpace(backup))
+        {
+            string? legacy;
+            try
+            {
+                var settings = await Get(storeId).ConfigureAwait(false);
+                legacy = settings?.UnilateralExit?.ExitStateBackup;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Store {StoreId}: its settings could not be read, so a stored exit-state backup was not "
+                    + "imported on this connect", storeId);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(legacy))
+                return;
+
+            backup = legacy;
+            adopting = true;
+        }
+
+        try
+        {
+            var imported = await sdk.ImportUnilateralExitStateAsync(backup).ConfigureAwait(false);
+
+            // After the import, never before: the old location is the only copy until the wallet has
+            // demonstrably taken the blob back, and an adoption that cleared it on a failed import would
+            // trade the backup for nothing.
+            if (adopting)
+                await AdoptLegacyBackupAsync(storeId, backup).ConfigureAwait(false);
+
+            // Logged at information even when nothing was restored, because "the backup did not cover this
+            // wallet" is a fact the operator needs and cannot see anywhere else: the page only reports that a
+            // backup is stored. The conflicting count is called out separately because it is the one that
+            // means data was refused rather than merely unnecessary.
+            _logger.LogInformation(
+                "Store {StoreId}: imported exit-state backup: {Imported} leaves restored, {Foreign} foreign, "
+                + "{Conflicting} conflicting, {Chains} chains skipped",
+                storeId, imported.ImportedLeaves, imported.SkippedForeignLeaves,
+                imported.SkippedConflictingLeaves, imported.SkippedChains);
+
+            if (imported.RestoredNothing && imported.SkippedConflictingLeaves > 0)
+            {
+                _logger.LogWarning(
+                    "Store {StoreId}: every leaf in its exit-state backup was refused as conflicting, so no "
+                    + "exit data was restored. The backup disagrees with exit data this wallet already holds",
+                    storeId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: its exit-state backup could not be imported ({ExceptionType}). The wallet is "
+                + "running; a leaf whose data was only in that backup cannot be exited unilaterally until this "
+                + "succeeds",
+                storeId, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Commits the adoption of a backup found at the old settings location: writes it to the file store,
+    /// then clears the setting.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only ever called after a successful import — the caller owns that ordering, because the setting is
+    /// the only copy until the wallet has provably taken the blob back.
+    /// </para>
+    /// <para>
+    /// The two steps fail differently and neither is worth an exception: while the write fails, the old
+    /// location still holds the backup and the next connect adopts again; once the write has landed, the
+    /// copy that counts is stored, and a setting that still names the value is inert — adoption is only
+    /// ever consulted when the file is absent — so a failed clear costs one retry at most.
+    /// </para>
+    /// <para>
+    /// The clearing itself is <see cref="ClearExitStateBackupSlot"/>'s, shared with the page's own clear of
+    /// the backup — including why the row is rewritten through the repository rather than
+    /// <see cref="Set"/>.
+    /// </para>
+    /// <para>
+    /// Logs the length and nothing else, as everywhere this blob is handled.
+    /// </para>
+    /// </remarks>
+    private async Task AdoptLegacyBackupAsync(string storeId, string backup)
+    {
+        try
+        {
+            await _exitStateBackupStore.WriteAsync(storeId, backup, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: its exit-state backup imported but could not be written to the plugin's "
+                + "own file ({ExceptionType}); it stays at its old location and a later connect will "
+                + "attempt the move again",
+                storeId, ex.GetType().Name);
+            return;
+        }
+
+        try
+        {
+            await ClearExitStateBackupSlot(storeId).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Store {StoreId}: adopted an exit-state backup left by an earlier version of this plugin "
+                + "into its own file and cleared the old setting ({Length} characters)",
+                storeId, backup.Length);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: its exit-state backup was adopted into the plugin's own file, but the "
+                + "old setting could not be cleared; the stored file is the copy that counts",
+                storeId);
+        }
+    }
+
+    /// <summary>
+    /// Clears a store's deprecated <see cref="UnilateralExitSettings.ExitStateBackup"/> slot — the
+    /// persisted row and the cached instance alike.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Both, or the clear did not happen.</b> The cached instance is what every reader gets:
+    /// <see cref="Get"/> hands back a clone of it, and both whole-settings writers rebuild from that clone
+    /// — <c>SparkUnilateralExitService.SaveExitSettingsAsync</c> clones the settings and the exit section
+    /// before storing, and <c>SparkStoreProvisioner</c> carries the previous exit settings across a
+    /// re-provision. A row cleared while the cache kept the blob is therefore a row the next disclosure
+    /// acknowledgement fills back in, and adoption is never consulted again once the file exists.
+    /// </para>
+    /// <para>
+    /// <b>The row is read fresh rather than taken from the cache, and written through the repository rather
+    /// than through <see cref="Set"/>.</b> <c>Set</c> reconciles the running instance, which would tear
+    /// down and reconnect a wallet on a path where no operator asked for anything — the connect that is
+    /// adopting right now, or a merchant's browser. A concurrent reconfiguration racing this write
+    /// rewrites the slot from a fresh read rather than a cached one for the same reason: the cached blob
+    /// may predate a change this method has no business reverting.
+    /// </para>
+    /// <para>
+    /// <b>The cache is cleared in place, not dropped.</b> A store missing from the cache reads as "no
+    /// Spark configuration" to every reader — <see cref="Get"/>, <see cref="Resolve"/>,
+    /// <see cref="HasAnyStoreProvisioned"/> — so invalidating the entry would trade a stale field for a
+    /// lie about the store existing at all.
+    /// </para>
+    /// <para>
+    /// Row first, cache second, the way <see cref="Set"/> orders the same two steps: a process that died
+    /// between them converges on the stored row at the next startup. Nothing names the value; it is the
+    /// wallet's whole exit state.
+    /// </para>
+    /// </remarks>
+    private async Task ClearExitStateBackupSlot(string storeId)
+    {
+        var stored = await _storeRepository
+            .GetSettingAsync<SparkSettings>(storeId, Constants.StoreSettingsKey)
+            .ConfigureAwait(false);
+
+        if (stored?.UnilateralExit is { } exit && !string.IsNullOrEmpty(exit.ExitStateBackup))
+        {
+            exit.ExitStateBackup = null;
+            await _storeRepository
+                .UpdateSetting(storeId, Constants.StoreSettingsKey, stored)
+                .ConfigureAwait(false);
+        }
+
+        // Unconditionally, not only when the row moved: an empty row and a populated cache is a state this
+        // method has been called to end regardless of which half is holding it.
+        if (_settings.TryGetValue(storeId, out var cached) && cached.UnilateralExit is { } cachedExit)
+            cachedExit.ExitStateBackup = null;
     }
 
     /// <summary>
@@ -912,6 +1190,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             // through a compare-and-set, so a duplicate is harmless and a missing event is recoverable.
             case SparkEventKind.PaymentSucceeded when envelope.Payment is not null:
             case SparkEventKind.PaymentPending when envelope.Payment is not null:
+            // A metadata update is a completion as far as a cross-chain receive is concerned: the conversion
+            // details that tie the transfer to a quote arrive only with it. For anything else it is one more
+            // harmless re-check through the same compare-and-set.
+            case SparkEventKind.PaymentMetadataUpdated when envelope.Payment is not null:
                 await HandleReceiveEventAsync(instance, envelope.Payment).ConfigureAwait(false);
                 return;
 
@@ -920,10 +1202,25 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 _logger.LogDebug("Store {StoreId}: Spark payment failed", envelope.StoreId);
                 return;
 
+            case SparkEventKind.NewDeposits:
+                // On-chain money detected before its claim. Not a leaf yet, so today's exit state does not
+                // cover it — but the claim usually lands well inside the debounce, and a refresh requested
+                // here means the pass that runs after it exports the leaf even if the claim event itself is
+                // one of the drops the event channel is documented as producing.
+                _logger.LogDebug("Store {StoreId}: Spark detected a new on-chain deposit", envelope.StoreId);
+                _exitStateBackupScheduler.RequestRefresh(envelope.StoreId);
+                return;
+
             case SparkEventKind.ClaimedDeposits:
                 // Real money arriving on-chain, and the SDK claims it automatically. Worth an operator-level
                 // line; the individual amounts show up as Deposit payments on the same event stream.
                 _logger.LogInformation("Store {StoreId}: Spark claimed an on-chain deposit", envelope.StoreId);
+
+                // A claimed deposit changes the wallet's leaf set, so it is the strongest signal that a fresh
+                // exit-state backup is worth having. Never take one here — this runs on the store's event
+                // consumer and an export is a live multi-megabyte SDK call; the scheduler coalesces the burst
+                // and the scheduled pass pays it.
+                _exitStateBackupScheduler.RequestRefresh(envelope.StoreId);
                 return;
 
             default:
@@ -951,6 +1248,11 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             return;
         }
 
+        // Any inbound payment moves exit data, so a backup refresh is warranted whether it arrives as a
+        // Lightning receive or an on-chain deposit. One call here, past the direction filter, rather than
+        // threaded into each branch: it fires before the Deposit branch below returns, so both are covered.
+        _exitStateBackupScheduler.RequestRefresh(storeId);
+
         if (payment.Method is SparkPaymentMethod.Deposit)
         {
             // An auto-claimed on-chain static deposit. It has no payment hash by nature and settles no
@@ -959,6 +1261,13 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 "Store {StoreId}: Spark credited {AmountSats} sat from an on-chain deposit "
                 + "({FeeSats} sat claim fee, {Status})",
                 storeId, payment.AmountSats, payment.FeeSats, payment.Status);
+            return;
+        }
+
+        if (payment.PaymentHash is null
+            && payment.Method is SparkPaymentMethod.Spark or SparkPaymentMethod.Token
+            && await TryHandleStablecoinReceiveAsync(instance, payment, cancellationToken).ConfigureAwait(false))
+        {
             return;
         }
 
@@ -993,6 +1302,56 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         }
 
         await _reconciler.ApplyAsync(storeId, payment, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Routes a USDC/USDT receive — a transfer from the bridge provider, with no payment hash — to the stablecoin
+    /// path. False when it is not one, so the caller reports it as the unattributable transfer it then is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The provider's conversion details, which are what tie the transfer to a quote, can arrive after the
+    /// transfer itself: the SDK first reports a plain Spark transfer and attaches the details once the provider
+    /// confirms the order, announcing them with <c>PaymentMetadataUpdated</c>. So the stored row is re-read before
+    /// deciding, and a detail-less transfer that arrives while the store has open quotes is left for that event —
+    /// or the stablecoin reconciliation pass — rather than warned about as money nothing can attribute.
+    /// </para>
+    /// <para>
+    /// A detail-less transfer on a store with no open quote falls through to the existing warning: nothing this
+    /// plugin quoted can explain it.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> TryHandleStablecoinReceiveAsync(
+        SparkStoreInstance instance,
+        SparkPayment payment,
+        CancellationToken cancellationToken)
+    {
+        var stablecoins = _stablecoinsFactory();
+        if (!stablecoins.Available)
+            return false;
+
+        if (payment.Conversion is null || payment.Status is not SparkPaymentStatus.Completed)
+            payment = await ConfirmStatusAsync(instance, payment, cancellationToken).ConfigureAwait(false);
+
+        if (payment.Conversion is { Provider: SparkCrossChainProvider.Orchestra })
+        {
+            await stablecoins.TryCreditAsync(instance.StoreId, payment, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+
+        // Some other conversion — a Stable Balance swap leg, say — is not a USDC/USDT receive waiting for its
+        // details, whatever quotes are open.
+        if (payment.Conversion is not null
+            || !await stablecoins.HasOpenQuotesAsync(instance.StoreId, cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        _logger.LogDebug(
+            "Store {StoreId}: Spark payment {SdkPaymentId} has no payment hash and no conversion details yet while "
+            + "USDC/USDT quotes are open; waiting for the provider's details to attribute it",
+            instance.StoreId, payment.SdkPaymentId);
+        return true;
     }
 
     /// <summary>
@@ -1085,6 +1444,124 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         return await _reconciler
             .ReconcileStoresAsync(targets, _reconciliationPass, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Takes the automatic exit-state backup of every running store that is due, per
+    /// <see cref="ExitStateBackupScheduler"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Driven solely by <see cref="ExitStateBackupTask"/>. Only running instances are enumerated, which is
+    /// the skip-the-dead-wallet rule for free: an export is a live SDK call needing a connected wallet,
+    /// and an instance being in <c>_instances</c> is the plugin's own definition of having one. A store
+    /// whose wallet never starts carries no fresh exit data anyway — nothing it holds has changed since
+    /// it stopped answering.
+    /// </para>
+    /// <para>
+    /// <b>This method must never throw into the task loop.</b> Every per-store failure is caught, logged
+    /// without the blob, and left for a later pass: the pass is the retry, and an exception that escaped
+    /// would end the walk over the stores behind it, turning one broken wallet into every store on the
+    /// server losing its backups. Cancellation is the one rethrow — the host is going down, and a
+    /// several-megabyte export into a half-written file is exactly what cancellation is for.
+    /// </para>
+    /// <para>
+    /// <b>The blob never reaches the log on any path here</b> — not the success line (which carries a
+    /// length, nothing else), and not the failure line (which names the exception type and not the
+    /// exception, for the same reason <see cref="RestoreExitStateAsync"/> does not use
+    /// <c>SparkErrors.Describe</c>: an SDK that echoed the export argument back would put the whole
+    /// wallet history in the log).
+    /// </para>
+    /// </remarks>
+    public async Task TakeDueExitStateBackupsAsync(CancellationToken cancellationToken)
+    {
+        // The feature gate first, on the whole pass: with the experiment off nothing here is reachable
+        // from the UI either, and exporting a wallet's exit data on a server that has no exit feature is
+        // this plugin acting on a secret for no one.
+        if (!Constants.UnilateralExitEnabled)
+            return;
+
+        await _startupGate.Task.ConfigureAwait(false);
+
+        // One clock reading for the whole walk, so two stores cannot disagree about the same pass.
+        var now = _timeProvider.GetUtcNow();
+
+        // Snapshotted like the reconciliation walk: a store reconfigured mid-pass mutates the dictionary
+        // being enumerated, and a store that goes away under an in-flight export loses only this pass.
+        foreach (var instance in _instances.Values.ToList())
+        {
+            var storeId = instance.StoreId;
+            try
+            {
+                if (!_exitStateBackupScheduler.ShouldTake(storeId, now))
+                    continue;
+
+                var exported = await instance.Sdk.ExportUnilateralExitStateAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (string.IsNullOrWhiteSpace(exported))
+                {
+                    // No MarkSkipped on either path: an empty answer is not a report on the wallet's
+                    // state, and serving a pending request with nothing would silently drop it. With
+                    // nothing pending, though, the pass itself is worth recording — it is the only
+                    // thing that stops a wallet with no exit state to export from being asked on every
+                    // scheduled pass forever, and the safety net re-asks it on schedule. A request that
+                    // is pending was earned by a real event and an empty answer does not serve it:
+                    // nothing is recorded, so the next pass asks again on the event's behalf.
+                    if (_exitStateBackupScheduler.PendingSince(storeId) is null)
+                        _exitStateBackupScheduler.MarkIdlePass(storeId, now);
+
+                    _logger.LogInformation(
+                        "Store {StoreId}: its exit-state export came back empty, so nothing was stored",
+                        storeId);
+                    continue;
+                }
+
+                // Seed once per process from the file, before judging a fresh export: a restarted server
+                // knows nothing about what is stored, and a first pass that rewrote the file on every
+                // store would spend a multi-megabyte write per store to say "unchanged".
+                if (!_exitStateBackupScheduler.KnowsStoredContent(storeId))
+                {
+                    _exitStateBackupScheduler.NoteStoredContent(
+                        storeId,
+                        await _exitStateBackupStore.ReadAsync(storeId, cancellationToken)
+                            .ConfigureAwait(false));
+                }
+
+                if (_exitStateBackupScheduler.ContentUnchanged(storeId, exported))
+                {
+                    _exitStateBackupScheduler.MarkSkipped(storeId, now);
+                    continue;
+                }
+
+                await _exitStateBackupStore.WriteAsync(storeId, exported, cancellationToken)
+                    .ConfigureAwait(false);
+                // The tracked store seam has already moved the scheduler's belief to these bytes —
+                // a second note here would only be a second place the same fact gets stated, and the
+                // one that a manual writer's path does not share. MarkTaken is this pass's own
+                // report, ordered after the write, and nothing else can serve the pending request.
+                _exitStateBackupScheduler.MarkTaken(storeId, now);
+
+                _logger.LogInformation(
+                    "Store {StoreId}: stored an automatic exit-state backup ({Length} characters)",
+                    storeId, exported.Length);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Type name only — see the remarks. And the pass deliberately records nothing here:
+                // the pending request (if any) and the safety-net clock both stay armed, so the next
+                // pass retries this store. Whatever backup was stored before this one is untouched,
+                // which is what a failure must mean.
+                _logger.LogWarning(
+                    "Store {StoreId}: its automatic exit-state backup failed ({ExceptionType}). A previous "
+                    + "backup, if one exists, is still stored; this will be retried on a later pass",
+                    storeId, ex.GetType().Name);
+            }
+        }
     }
 
     /// <summary>
@@ -1288,6 +1765,20 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 // that matters. Failing before teardown would leave a live wallet with settings that say there
                 // is none.
                 await _lightningWiring.ClearIfOursAsync(storeId, CancellationToken).ConfigureAwait(false);
+
+                // USDC and USDT land in this wallet too, so they go with it: left configured they could only ever
+                // be offered as unavailable. Best effort, after everything that matters more has happened.
+                try
+                {
+                    await _stablecoinsFactory().SetEnabledAsync(storeId, false, CancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: Spark was removed but its USDC/USDT payment methods could not be cleared",
+                        storeId);
+                }
+
                 return SparkSettingsApplied.Removed;
             }
 
@@ -1315,6 +1806,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// <inheritdoc />
     Task<SparkSettingsApplied> ISparkStoreSettingsStore.SetAsync(string storeId, SparkSettings? settings) =>
         Set(storeId, settings);
+
+    /// <inheritdoc />
+    Task ISparkStoreSettingsStore.ClearExitStateBackupSlotAsync(string storeId) =>
+        ClearExitStateBackupSlot(storeId);
 
     /// <inheritdoc />
     string ISparkStoreRuntime.GetStorageDirectory(string storeId) => GetWorkDir(storeId);

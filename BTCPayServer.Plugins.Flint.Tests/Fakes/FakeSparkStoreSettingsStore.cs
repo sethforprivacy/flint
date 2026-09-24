@@ -135,6 +135,21 @@ public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
     }
 
     /// <summary>
+    /// Clears the deprecated exit-state backup slot, as <c>SparkService</c> does. Deliberately not recorded
+    /// in <see cref="Writes"/>: the real one empties the slot through the store repository rather than
+    /// through <see cref="SetAsync"/>, precisely so a press that stores no settings blob does not reconcile
+    /// the wallet — and a caller that reached for <see cref="SetAsync"/> instead is the thing a test needs
+    /// to see.
+    /// </summary>
+    public Task ClearExitStateBackupSlotAsync(string storeId)
+    {
+        if (Settings.TryGetValue(storeId, out var settings) && settings?.UnilateralExit is { } exit)
+            exit.ExitStateBackup = null;
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
     /// Replaces the store's live handle, disposing the old one, as <c>SparkService.Set</c> does.
     /// </summary>
     private void ReconnectWallet(string storeId)

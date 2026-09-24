@@ -18,7 +18,7 @@ namespace BTCPayServer.Plugins.Flint.Migrations
 #pragma warning disable 612, 618
             modelBuilder
                 .HasDefaultSchema("BTCPayServer.Plugins.Flint")
-                .HasAnnotation("ProductVersion", "10.0.10")
+                .HasAnnotation("ProductVersion", "10.0.11")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -141,6 +141,129 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.ToTable("OutgoingPayments", "BTCPayServer.Plugins.Flint");
                 });
 
+            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.StablecoinQuote", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<string>("AskedBaseUnits")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Asset")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Chain")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ChainId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ContractAddress")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("CreditedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Decimals")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("DeliveredBaseUnits")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DepositAddress")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("DepositBaseUnits")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("DestinationAsset")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<decimal>("DueAmount")
+                        .HasPrecision(38, 18)
+                        .HasColumnType("numeric(38,18)");
+
+                    b.Property<string>("ExpectedReceivedBaseUnits")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ExternalTxHash")
+                        .HasColumnType("text");
+
+                    b.Property<decimal>("FeeAmount")
+                        .HasPrecision(38, 18)
+                        .HasColumnType("numeric(38,18)");
+
+                    b.Property<string>("InvoiceId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PaidBaseUnits")
+                        .HasColumnType("text");
+
+                    b.Property<string>("PaymentMethodId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PaymentRequest")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderOrderId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderQuoteId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("SdkPaymentId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ServiceFeeAsset")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ServiceFeeBaseUnits")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("SettledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StoreId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InvoiceId");
+
+                    b.HasIndex("SdkPaymentId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_StablecoinQuotes_SdkPaymentId")
+                        .HasFilter("\"SdkPaymentId\" IS NOT NULL");
+
+                    b.HasIndex("StoreId", "ExpiresAt")
+                        .HasDatabaseName("IX_StablecoinQuotes_StoreId_ExpiresAt_Open")
+                        .HasFilter("\"SdkPaymentId\" IS NULL");
+
+                    b.HasIndex("StoreId", "SettledAt")
+                        .HasDatabaseName("IX_StablecoinQuotes_StoreId_SettledAt_Uncredited")
+                        .HasFilter("\"SdkPaymentId\" IS NOT NULL AND \"CreditedAt\" IS NULL");
+
+                    b.ToTable("StablecoinQuotes", "BTCPayServer.Plugins.Flint");
+                });
+
             modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.SweepRecord", b =>
                 {
                     b.Property<string>("IdempotencyKey")
@@ -251,6 +374,74 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.HasIndex("StoreId", "Status");
 
                     b.ToTable("SweepRecords", "BTCPayServer.Plugins.Flint");
+                });
+
+            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.UnilateralExitRecord", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DestinationAddress")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("FeeRateSatPerVbyte")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FundingAddress")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("FundingKeyIndex")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FundingUtxosJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LeafIdsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("RecoverableValueSat")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SingleUtxoFundingSat")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StoreId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("TotalFeeSat")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TransactionsJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoreId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_UnilateralExitRecords_ActiveStore")
+                        .HasFilter("\"Status\" IN (0, 1)");
+
+                    b.HasIndex("StoreId", "CreatedUtc");
+
+                    b.HasIndex("StoreId", "Status");
+
+                    b.ToTable("UnilateralExitRecords", "BTCPayServer.Plugins.Flint");
                 });
 #pragma warning restore 612, 618
         }

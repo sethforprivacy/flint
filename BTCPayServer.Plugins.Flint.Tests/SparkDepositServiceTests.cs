@@ -493,6 +493,50 @@ public class SparkDepositServiceTests
 
     #endregion
 
+    #region The SDK's claim shapes (0.26)
+
+    /// <summary>
+    /// A deposit the SDK already credited early is not offered as unclaimed.
+    /// </summary>
+    /// <remarks>
+    /// Since 0.26 an early-claimed deposit stays in <c>ListUnclaimedDeposits</c>, marked <c>Claimed</c>, until the
+    /// provider spends its output. Listed as unclaimed it would read as money still on its way — and once
+    /// matured, as a stuck deposit inviting a second claim of funds already in the balance.
+    /// </remarks>
+    [Fact]
+    public void A_deposit_claimed_early_is_not_listed_as_unclaimed()
+    {
+        Assert.False(SparkSdkClient.IsUnclaimed(SdkDeposit(new InstantClaimStatus.Claimed())));
+        Assert.True(SparkSdkClient.IsUnclaimed(SdkDeposit(new InstantClaimStatus.Submitted("claim-1"))));
+        Assert.True(SparkSdkClient.IsUnclaimed(SdkDeposit(new InstantClaimStatus.Declined(null, 1))));
+        Assert.True(SparkSdkClient.IsUnclaimed(SdkDeposit(null)));
+    }
+
+    /// <summary>
+    /// A claim that settles later is a success; a deferred one is a failure that says why.
+    /// </summary>
+    [Fact]
+    public void Claim_outcomes_map_onto_success_and_failure()
+    {
+        var submitted = SparkSdkClient.MapClaimOutcome(new ClaimDepositOutcome.Submitted(), new StubBolt11Parser());
+        Assert.True(submitted.Succeeded);
+        Assert.Null(submitted.Payment);
+        Assert.Null(submitted.Error);
+
+        var deferred = SparkSdkClient.MapClaimOutcome(
+            new ClaimDepositOutcome.Deferred(new ClaimDeferredReason.MaxFeeExceeded(1_200, 800)),
+            new StubBolt11Parser());
+        Assert.False(deferred.Succeeded);
+        Assert.Contains("1,200 sat", deferred.Error);
+        Assert.Contains("800 sat", deferred.Error);
+    }
+
+    private static DepositInfo SdkDeposit(InstantClaimStatus? status) =>
+        new(TxId, 0, 60_000, isMature: false, refundTx: null!, refundTxId: null!, refundState: null!,
+            claimError: null!, instantClaimStatus: status!, maxClaimFee: null!);
+
+    #endregion
+
     private static SparkDepositInfo Stuck(long requiredFeeSats, long amountSats = 60_000) =>
         new(TxId, 0, amountSats, IsMature: true,
             new SparkDepositClaimFailure(

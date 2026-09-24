@@ -995,6 +995,545 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
 
     #endregion
 
+    #region Cross-chain receive
+
+    /// <summary>
+    /// The receive route table, in the shape the provider's live table had when this was written.
+    /// </summary>
+    /// <remarks>
+    /// Chosen for what can go wrong with each. USDC and USDT on six-decimal EVM chains, Solana and Tron are the
+    /// ordinary case. BSC is eighteen decimals, where a six-decimal assumption misprices every amount by 10^12.
+    /// <c>arc</c> can only land a token, so it must not be offered to a store without Stable Balance. <c>USDT0</c>
+    /// is a different token from <c>USDT</c>, and Boltz serves no receive at all.
+    /// </remarks>
+    public List<SparkCrossChainReceiveRoute> CrossChainReceiveRoutes { get; } =
+    [
+        ReceiveRoute("base", "8453", "USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
+        ReceiveRoute("ethereum", "1", "USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
+        ReceiveRoute("solana", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6),
+        ReceiveRoute("bsc", "56", "USDC", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", 18),
+        ReceiveRoute("arc", "5042", "USDC", "0x3600000000000000000000000000000000000000", 6, landsAsBitcoin: false),
+        ReceiveRoute("tron", "728126428", "USDT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6),
+        ReceiveRoute("ethereum", "1", "USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6),
+        ReceiveRoute("bsc", "56", "USDT", "0x55d398326f99059ff775485246999027b3197955", 18),
+        ReceiveRoute("arbitrum", "42161", "USDT0", "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", 6),
+        ReceiveRoute("polygon", "137", "USDT", "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", 6,
+            provider: SparkCrossChainProvider.Boltz)
+    ];
+
+    public static SparkCrossChainReceiveRoute ReceiveRoute(
+        string chain,
+        string? chainId,
+        string asset,
+        string? contract,
+        uint decimals,
+        bool landsAsBitcoin = true,
+        SparkCrossChainLimits? bitcoinLimits = null,
+        SparkCrossChainProvider provider = SparkCrossChainProvider.Orchestra) =>
+        new(provider, chain, chainId, asset, contract, decimals, landsAsBitcoin, LandsAsToken: true,
+            bitcoinLimits, Handle: $"receive-route:{provider}:{chain}:{asset}");
+
+    public Exception? FailCrossChainReceiveRoutesWith { get; set; }
+
+    public Exception? FailCrossChainReceiveWith { get; set; }
+
+    /// <summary>When set, a quote waits on this before answering — for a test to hold one mid-flight.</summary>
+    public TaskCompletionSource? HoldCrossChainReceiveUntil { get; set; }
+
+    /// <summary>BTC price used to size the sats a receive is expected to land, in USD.</summary>
+    public long ReceiveBitcoinPriceUsd { get; set; } = 100_000;
+
+    /// <summary>The provider's fixed fee on a receive, in USD millionths; it rides on the deposit.</summary>
+    public long ReceiveFixedFeeMicroUsd { get; set; } = 50_000;
+
+    /// <summary>The provider's proportional fee on a receive, in basis points of the amount.</summary>
+    public long ReceiveFeeBps { get; set; } = 30;
+
+    /// <summary>Where a receive lands: sats, or the Stable Balance token when a test sets this.</summary>
+    public bool ReceiveLandsAsToken { get; set; }
+
+    public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(15);
+
+    public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
+
+    private int _receiveCount;
+
+    public Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        _writeLog?.Record("sdk:cc-receive-routes");
+        if (FailCrossChainReceiveRoutesWith is not null)
+            throw FailCrossChainReceiveRoutesWith;
+        return Task.FromResult<IReadOnlyList<SparkCrossChainReceiveRoute>>(CrossChainReceiveRoutes.ToList());
+    }
+
+    /// <summary>
+    /// A receive quote sized the way the SDK sizes one on <c>FeesExcluded</c>: the payer's deposit is the amount
+    /// plus the provider's fee, and the wallet expects the amount's worth of sats (or USDB). Each quote gets its own
+    /// deposit address, as the provider's do.
+    /// </summary>
+    public async Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+        SparkCrossChainReceiveRoute route,
+        BigInteger amount,
+        uint maxSlippageBps,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
+        _writeLog?.Record("sdk:cc-receive");
+
+        if (HoldCrossChainReceiveUntil is { } hold)
+            await hold.Task.ConfigureAwait(false);
+        if (FailCrossChainReceiveWith is not null)
+            throw FailCrossChainReceiveWith;
+        if (route.Handle is null)
+            throw new InvalidOperationException("The route did not come from the SDK's own route table.");
+
+        var index = Interlocked.Increment(ref _receiveCount);
+        var scale = BigInteger.Pow(10, (int)route.Decimals);
+        var fixedFee = ReceiveFixedFeeMicroUsd * scale / 1_000_000;
+        var proportional = amount * ReceiveFeeBps / 10_000;
+        var deposit = amount + fixedFee + proportional;
+
+        // Sats for the amount at the configured price, or USDB base units (6 dp) at par.
+        var expected = ReceiveLandsAsToken
+            ? amount * 1_000_000 / scale
+            : amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+
+        var address = route.Chain switch
+        {
+            "tron" => $"TFake{index:D29}",
+            "solana" => $"So1Fake{index:D37}",
+            _ => "0x" + index.ToString("x40", System.Globalization.CultureInfo.InvariantCulture)
+        };
+
+        return new SparkCrossChainReceiveQuote(
+            route,
+            address,
+            deposit,
+            expected,
+            ReceiveLandsAsToken ? "USDB" : "BTC",
+            ReceiveLandsAsToken ? Usdb.Value : null,
+            fixedFee + proportional,
+            route.Asset,
+            DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
+            address);
+    }
+
+    /// <summary>
+    /// The inbound payment the SDK reports once the provider delivers a quote: a Spark transfer (or a token one)
+    /// carrying the provider's conversion details, frozen from the quote exactly as the real provider row does.
+    /// </summary>
+    /// <param name="paid">What the payer actually deposited, in route base units. Defaults to the SDK's deposit.</param>
+    /// <param name="withConversion">
+    /// False reproduces the first report of a receive, before the provider's details arrive — a plain transfer
+    /// with nothing to attribute it by.
+    /// </param>
+    public static SparkPayment CrossChainReceivePayment(
+        SparkCrossChainReceiveQuote quote,
+        string sdkPaymentId,
+        BigInteger? paid = null,
+        bool withConversion = true,
+        SparkPaymentStatus status = SparkPaymentStatus.Completed,
+        DateTimeOffset? at = null) =>
+        new(
+            sdkPaymentId,
+            SparkPaymentDirection.Receive,
+            status,
+            quote.TokenIdentifier is null ? SparkPaymentMethod.Spark : SparkPaymentMethod.Token,
+            (long)quote.ExpectedReceivedAmount,
+            0,
+            at ?? DateTimeOffset.UtcNow,
+            PaymentHash: null,
+            Bolt11: null,
+            Preimage: null,
+            Description: null,
+            Conversion: withConversion
+                ? new SparkConversionState(
+                    SparkCrossChainProvider.Orchestra,
+                    SparkConversionStatus.Completed,
+                    ProviderQuoteId: $"orchestra-quote-{sdkPaymentId}",
+                    ProviderOrderId: $"orchestra-order-{sdkPaymentId}",
+                    DeliveredAmount: quote.ExpectedReceivedAmount,
+                    RecipientAddress: "spark1pgssfakewalletaddress",
+                    Chain: quote.Route.Chain,
+                    Asset: quote.Route.Asset,
+                    AssetDecimals: quote.Route.Decimals,
+                    ChainId: quote.Route.ChainId,
+                    AssetContract: quote.Route.ContractAddress,
+                    AssetAmountIn: paid ?? quote.DepositAmount,
+                    EstimatedOut: quote.ExpectedReceivedAmount,
+                    ServiceFeeAmount: quote.ServiceFeeAmount,
+                    ExternalTxHash: $"0xpayer{sdkPaymentId}")
+                : null);
+
+    public sealed record CrossChainReceiveCall(SparkCrossChainReceiveRoute Route, BigInteger Amount, uint MaxSlippageBps);
+
+    #endregion
+
+    #region Unilateral exit
+
+    /// <summary>
+    /// The leaves an automatic selection would pick, and their values.
+    /// </summary>
+    /// <remarks>
+    /// Empty by default is <b>not</b> laziness. A unilateral-exit quote with <c>Auto</c> selection returns no
+    /// leaves whenever nothing clears the requested fee rate, and that is a normal answer the caller has to
+    /// report as "nothing worth exiting" rather than as a fault — so the fake's default state is the one that
+    /// catches a caller treating an empty quote as success.
+    /// </remarks>
+    public List<SparkExitLeaf> ExitLeaves { get; } = [];
+
+    /// <summary>Total fee the quote reports, in satoshi.</summary>
+    public long ExitTotalFeeSat { get; set; } = 3_000;
+
+    /// <summary>The fan-out's share of <see cref="ExitTotalFeeSat"/>.</summary>
+    public long ExitFanoutFeeSat { get; set; } = 500;
+
+    /// <summary>
+    /// The single confirmed output the exit must be funded with, in satoshi.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately larger than <see cref="ExitTotalFeeSat"/>, as the real quote's is: the funding UTXO has to
+    /// cover every fee plus the fan-out's own outputs, so a caller that funds against the fee total alone is
+    /// under-funded and this default is what catches it.
+    /// </remarks>
+    public long ExitSingleUtxoFundingSat { get; set; } = 4_200;
+
+    /// <summary>Every prepare this fake has been asked for, in order.</summary>
+    public List<ExitQuoteCall> ExitQuoteCalls { get; } = [];
+
+    /// <summary>Every build this fake has been asked for, in order.</summary>
+    public List<ExitBuildCall> ExitBuildCalls { get; } = [];
+
+    /// <summary>Every check this fake has been asked for, in order.</summary>
+    public List<ExitCheckCall> ExitCheckCalls { get; } = [];
+
+    /// <summary>Every export this fake has been asked for, in order.</summary>
+    public List<string> ExitExportCalls { get; } = [];
+
+    /// <summary>Every import this fake has been asked for, in order, with the blob it was handed.</summary>
+    public List<string> ExitImportCalls { get; } = [];
+
+    /// <summary>
+    /// The status the build gives every transaction it hands back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Defaults to <see cref="SparkExitTxReadiness.Ready"/>, not to a single "unconfirmed".</b> SDK 0.25
+    /// replaced the flat status enum with a union because the useful question stopped being "is it mined" and
+    /// became "may I broadcast it yet", so one status for the whole set is precisely the shape that cannot
+    /// express the states the page and the service now have to handle. A test that wants a mixed set — some
+    /// ready, some waiting on a timelock at a known height, some confirmed — sets this per case.
+    /// </para>
+    /// <para>
+    /// The transaction whose readiness differs most usefully is the tree node: it is the one with a CSV timelock,
+    /// so <see cref="ExitReadiness"/> set to <see cref="SparkExitTxReadiness.Waiting"/> with
+    /// <see cref="ExitSpendableAtHeight"/> is what a real set looks like one block after the fan-out confirms.
+    /// </para>
+    /// </remarks>
+    public SparkExitTxReadiness ExitReadiness { get; set; } = SparkExitTxReadiness.Ready;
+
+    /// <summary>
+    /// When set, the build returns the quote's leaves but <b>no transactions at all</b>.
+    /// </summary>
+    /// <remarks>
+    /// This is a distinct state from an empty <em>quote</em>, and the difference is the whole point. An empty
+    /// quote means the leaves the operator pinned are no longer in the wallet, which is a refusal. An empty
+    /// transaction set means the leaves are still there and the SDK has already seen every step this exit
+    /// planned confirm on chain — a resumed build with nothing left to do, which is a success. Reproducing it
+    /// means keeping <see cref="ExitLeaves"/> populated while suppressing the set, so a caller cannot confuse
+    /// the two.
+    /// </remarks>
+    public bool ExitBuildsNoTransactions { get; set; }
+
+    /// <summary>Block height stamped on a <see cref="SparkExitTxReadiness.Confirmed"/> transaction.</summary>
+    public uint? ExitConfirmedAtHeight { get; set; }
+
+    /// <summary>Height stamped on a <see cref="SparkExitTxReadiness.Waiting"/> transaction.</summary>
+    public uint? ExitSpendableAtHeight { get; set; }
+
+    /// <summary>
+    /// The verdict <see cref="CheckUnilateralExitAsync"/> reports, overriding <see cref="NextCheckVerdict"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SparkExitVerdict.Valid"/> and deliberately <b>not</b> <see cref="SparkExitVerdict.Done"/>: a
+    /// check whose default answer is "this exit is finished" would let a caller treat every refresh as success
+    /// without ever reading the verdict, and no test would catch it. "On track" is the unremarkable answer; a
+    /// test that wants Done asks for it.
+    /// </remarks>
+    public SparkExitVerdict CheckVerdict { get; set; } = SparkExitVerdict.Valid;
+
+    /// <summary>
+    /// Consumed once by the next <see cref="CheckUnilateralExitAsync"/>, then cleared, so a test can script
+    /// Valid → Done across two refreshes of the same exit.
+    /// </summary>
+    public SparkExitVerdict? NextCheckVerdict { get; set; }
+
+    /// <summary>Thrown by a check when set, instead of answering.</summary>
+    public Exception? FailCheckWith { get; set; }
+
+    /// <summary>Thrown by an export when set, instead of answering.</summary>
+    public Exception? FailExportWith { get; set; }
+
+    /// <summary>Thrown by an import when set, instead of answering.</summary>
+    public Exception? FailImportWith { get; set; }
+
+    /// <summary>
+    /// The blob <see cref="ExportUnilateralExitStateAsync"/> hands back.
+    /// </summary>
+    /// <remarks>
+    /// A short opaque string by default, because that is all any caller may do with it: the format is the SDK's
+    /// own and nothing in the plugin may interpret it. A test that asserted on its shape would be pinning an
+    /// encoding this side is not allowed to know.
+    /// </remarks>
+    public string ExitStateToExport { get; set; } = "exit-state-blob";
+
+    /// <summary>
+    /// What <see cref="ImportUnilateralExitStateAsync"/> reports having restored.
+    /// </summary>
+    /// <remarks>
+    /// All zeros by default, so <see cref="SparkExitStateImport.RestoredNothing"/> is true for a test that did
+    /// not configure it. That is the answer a caller must not render as "your backup is in place":
+    /// <c>ImportUnilateralExitStateResponse</c> with nothing imported is a perfectly successful call that
+    /// restored nothing, and a fake defaulting to a cheerful count would hide a caller that never read it.
+    /// </remarks>
+    public SparkExitStateImport ExitStateImportResult { get; set; } = new(0, 0, 0, 0);
+
+    /// <summary>Thrown by a prepare when set, before any quote is produced.</summary>
+    public Exception? FailExitQuoteWith { get; set; }
+
+    /// <summary>Thrown by a build when set, <em>after</em> the quote has been approved.</summary>
+    public Exception? FailExitBuildWith { get; set; }
+
+    /// <summary>
+    /// Run after each prepare, so a test can move the wallet's tree between the quote a page showed and the
+    /// quote a build commits to.
+    /// </summary>
+    /// <remarks>
+    /// The hazard this exists for is the sharpest one on the exit surface, and it is <em>not</em> the
+    /// cooperative-exit one. A unilateral-exit quote never expires and carries no id, so a stale one is not
+    /// rejected by anything — it simply describes a different set of leaves than the wallet now has, and a build
+    /// against it commits to leaves the operator did not fund for. Mutating <see cref="ExitLeaves"/> from here
+    /// is how a test proves the caller re-quotes inside the build.
+    /// </remarks>
+    public Action? WhenExitQuoted { get; set; }
+
+    public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
+
+        if (FailExitQuoteWith is not null)
+            throw FailExitQuoteWith;
+
+        var quote = BuildExitQuote(feeRateSatPerVbyte, destinationAddress, leafIds);
+        WhenExitQuoted?.Invoke();
+        return Task.FromResult(quote);
+    }
+
+    public Task<SparkExitResult> UnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ArgumentNullException.ThrowIfNull(fundingUtxos);
+        ArgumentNullException.ThrowIfNull(approveQuote);
+
+        // Quoted inside the build, exactly as the real client does, so the veto sees the fresh quote rather than
+        // whatever the caller last looked at.
+        ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
+        if (FailExitQuoteWith is not null)
+            throw FailExitQuoteWith;
+
+        var quote = BuildExitQuote(feeRateSatPerVbyte, destinationAddress, leafIds);
+        WhenExitQuoted?.Invoke();
+
+        var rejection = approveQuote(quote);
+        ExitBuildCalls.Add(new ExitBuildCall(
+            feeRateSatPerVbyte,
+            destinationAddress,
+            leafIds?.ToList(),
+            fundingUtxos.ToList(),
+            fundingSecretKey?.Length ?? 0,
+            rejection));
+
+        if (rejection is not null)
+            throw new SparkExitRefusedException(rejection);
+
+        if (FailExitBuildWith is not null)
+            throw FailExitBuildWith;
+
+        // The funding check the real SDK makes, reproduced rather than stipulated: the shortfall is discovered at
+        // build time and names the amount that would have worked.
+        var funded = fundingUtxos.Sum(utxo => utxo.ValueSat);
+        if (funded < ExitSingleUtxoFundingSat)
+            throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
+
+        // Signed and inert. Nothing in this fake, and nothing in the real SDK, broadcasts any of it.
+        //
+        // The shape is the real one: a fan-out that goes out first and alone, one tree node per leaf carrying a
+        // CPFP child and the CSV timelock, and a sweep that depends on every node. Each transaction's status is
+        // derived from ExitReadiness rather than fixed, because a set where everything reports the same readiness
+        // cannot express what the page has to render: at most the fan-out is broadcastable and everything below
+        // it is waiting on a confirmation or a timelock.
+        // A resumed build whose every planned step is already confirmed on chain hands back no transactions at all.
+        // The leaves come back with the quote, so this is distinguishable from "the leaves are gone" — which is
+        // the case the caller refuses on.
+        if (ExitBuildsNoTransactions)
+            return Task.FromResult(new SparkExitResult(
+                quote.RecoverableValueSat, quote.TotalFeeSat, [], quote.Leaves));
+
+        var sweepDependsOn = quote.Leaves.Select(leaf => $"txid:node:{leaf.LeafId}").ToList();
+        var transactions = new List<SparkExitTransaction>
+        {
+            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [], ExitStatus())
+        };
+
+        transactions.AddRange(quote.Leaves.Select(leaf => new SparkExitTransaction(
+            SparkExitTxKind.TreeNode,
+            $"node:{leaf.LeafId}",
+            $"txid:node:{leaf.LeafId}",
+            $"0200node{leaf.LeafId}",
+            // A CPFP child, because a tree node pays no fee of its own and must go out as a package. A fake
+            // that left this null would let a caller ship single-transaction broadcast instructions.
+            $"0200cpfp{leaf.LeafId}",
+            1_008,
+            ["txid:fanout"],
+            ExitStatus())));
+
+        transactions.Add(new SparkExitTransaction(
+            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn, ExitStatus()));
+
+        return Task.FromResult(new SparkExitResult(
+            quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
+    }
+
+    /// <summary>One transaction status, derived from the readiness this fake is configured with.</summary>
+    /// <remarks>
+    /// The two heights travel with the readiness exactly as the SDK reports them, and each is attached only to
+    /// the case it belongs to — a <c>Confirmed</c> transaction with a <c>spendableAtHeight</c> or a waiting one
+    /// with a block height is a shape the union cannot produce.
+    /// </remarks>
+    private SparkExitTxStatus ExitStatus() => ExitReadiness switch
+    {
+        SparkExitTxReadiness.Confirmed => new SparkExitTxStatus(
+            SparkExitTxReadiness.Confirmed, BlockHeight: ExitConfirmedAtHeight),
+        SparkExitTxReadiness.Waiting => new SparkExitTxStatus(
+            SparkExitTxReadiness.Waiting, SpendableAtHeight: ExitSpendableAtHeight),
+        _ => new SparkExitTxStatus(ExitReadiness)
+    };
+
+    public Task<SparkExitProgress> CheckUnilateralExitAsync(
+        SparkExitResult exit,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ArgumentNullException.ThrowIfNull(exit);
+        ExitCheckCalls.Add(new ExitCheckCall(exit));
+
+        if (FailCheckWith is not null)
+            throw FailCheckWith;
+
+        // Consumed once, so a test can script Valid → Done across two refreshes rather than flipping the
+        // memorable property and losing the first answer.
+        var verdict = NextCheckVerdict ?? CheckVerdict;
+        NextCheckVerdict = null;
+
+        // The transactions are handed back with this fake's configured readiness rather than with the statuses
+        // they came in with, which is what the SDK does: it reads the chain and replaces them. A check that
+        // echoed its input would let a caller appear to refresh the stored set without the read ever happening.
+        return Task.FromResult(new SparkExitProgress(
+            verdict,
+            exit.RecoverableValueSat,
+            exit.TotalFeeSat,
+            exit.Transactions
+                .Select(transaction => transaction with { Status = ExitStatus() })
+                .ToList()));
+    }
+
+    public Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ExitExportCalls.Add("export");
+
+        return FailExportWith is not null
+            ? Task.FromException<string>(FailExportWith)
+            : Task.FromResult(ExitStateToExport);
+    }
+
+    public Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+        string exitState,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        ExitImportCalls.Add(exitState);
+
+        return FailImportWith is not null
+            ? Task.FromException<SparkExitStateImport>(FailImportWith)
+            : Task.FromResult(ExitStateImportResult);
+    }
+
+    /// <remarks>
+    /// A pinned selection is honoured by filtering, and an id that is no longer in the tree simply does not come
+    /// back — which is how a test reproduces the case a resume has to survive: the operator funded for a leaf
+    /// set that has since changed under them.
+    /// </remarks>
+    private SparkExitQuote BuildExitQuote(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds)
+    {
+        var selected = leafIds is null || leafIds.Count == 0
+            ? ExitLeaves.ToList()
+            : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)).ToList();
+
+        return new SparkExitQuote(
+            selected.Sum(leaf => leaf.ValueSat),
+            selected.Count == 0 ? 0 : ExitTotalFeeSat,
+            selected.Count == 0 ? 0 : ExitSingleUtxoFundingSat,
+            selected,
+            selected.Count == 0 ? 0 : ExitFanoutFeeSat,
+            selected
+                .Select(leaf => new SparkExitBranchFunding(leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
+                .ToList(),
+            feeRateSatPerVbyte,
+            destinationAddress);
+    }
+
+    public sealed record ExitQuoteCall(
+        ulong FeeRateSatPerVbyte,
+        string DestinationAddress,
+        List<string>? LeafIds);
+
+    public sealed record ExitBuildCall(
+        ulong FeeRateSatPerVbyte,
+        string DestinationAddress,
+        List<string>? LeafIds,
+        List<SparkExitFundingUtxo> FundingUtxos,
+        int FundingSecretKeyLength,
+        string? Rejection);
+
+    /// <summary>One <see cref="CheckUnilateralExitAsync"/> call, with the whole exit it was handed.</summary>
+    /// <remarks>
+    /// The reconstruction, not just a count. What the SDK is handed is the plugin's own record rebuilt into the
+    /// SDK's response, and "the check was called" says nothing about whether the thing it was asked to judge
+    /// still had its transactions in it.
+    /// </remarks>
+    public sealed record ExitCheckCall(SparkExitResult Exit);
+
+    #endregion
+
     public Task DisconnectAsync()
     {
         Disconnected = true;

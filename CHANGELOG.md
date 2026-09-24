@@ -5,6 +5,57 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Changed
+
+- **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
+  0.25.0 bump). The API changes the plugin meets are absorbed at the SDK seam: a manual deposit
+  claim now reports one of three outcomes — settled, submitted (settles asynchronously) or deferred,
+  which is reported as a failure with its reason — the network-status probe takes a request, and a
+  cross-chain route describes its Spark side as accepted assets carrying amount limits. The new
+  `PaymentMetadataUpdated` event is consumed rather than dropped.
+- **An on-chain deposit can be credited before its third confirmation.** SDK 0.26 unifies early and
+  mature claiming under the one claim ceiling the plugin already configures: when the service
+  provider's spread for crediting a deposit early fits that ceiling, the SDK takes it. It never costs
+  more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
+  unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
+  so it cannot read as stuck and invite a second claim.
+- **A unilateral exit no longer needs Spark's operators to be reachable.** The experimental
+  unilateral exit is rebuilt on the SDK's exit API, which inverted the flow — an exit is now quoted
+  into a prepared request that is passed back into the build, `CheckUnilateralExit` reports progress
+  against the chain, and the SDK can export and import the wallet's exit data — and the plugin's
+  exit surface follows it. On the old API, pricing and building an exit talked to the operators, so
+  the flow only helped against operators who *refused*; against operators that were gone it could do
+  nothing. An exit is now quoted and built from data the SDK holds locally. The caveat is the point
+  of the next entry: this works for leaves whose data was collected while the operators *were*
+  reachable, and only for those.
+
+### Added
+
+- **An exit-state backup, on the Advanced page.** The SDK can now export the wallet's unilateral-exit data
+  and import it back, and an exit built from an exported copy is the only kind that survives the loss of the
+  wallet's own storage while the operators are gone. The page exports a fresh blob for copying and stores a
+  pasted one, which a restart imports automatically. The blob is sensitive — it carries every leaf and its
+  transactions, so it discloses the balance, how it is split and the history — so it is never rendered back
+  out of storage, and the page says so.
+- **A "Check progress" control on the exit page.** Asks the chain how far a built exit has got and refreshes
+  every transaction's status. It reports whether the set is on track, finished (with a pointer to marking it
+  completed), or can no longer finish — in which case it says plainly that the money is not lost and that the
+  fix is to build again from the same leaves. It broadcasts and signs nothing, and it works with the store's
+  wallet stopped.
+- **A "send these now" list above the transaction table**, naming exactly which transactions can be
+  broadcast at this moment and the command to run for each, so an operator opening the page a day later does
+  not have to read the whole set to find the actionable row.
+
+- **The exit page now warns that leaving a step unbroadcast costs money.** About 50 blocks (~8 hours) after
+  a step becomes valid, Spark's watchtowers can broadcast their own version of that step; its fee is taken
+  out of the leaf rather than paid by the funding UTXO, so a step left unsent for a day or more pays part of
+  its own cost out of the money being recovered. Each transaction row still reports its CSV timelock, but the
+  page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
+  tells the operator that following the Status column is what matters, since broadcasting an already-sent
+  transaction is harmless.
+
 ## [1.1.0] — 2026-09-07
 
 A compatibility and CI-hardening release. No plugin source changed between 1.0.4 and this: the

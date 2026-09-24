@@ -1,3 +1,4 @@
+using System.Numerics;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
@@ -1047,6 +1048,50 @@ public class SparkSettlementReconcilerTests
             CancellationToken cancellationToken = default) =>
             _inner.SendCrossChainAsync(
                 route, recipientAddress, amount, maxSlippageBps, idempotencyKey, approveQuote, cancellationToken);
+
+        public Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+            CancellationToken cancellationToken = default) =>
+            _inner.GetCrossChainReceiveRoutesAsync(cancellationToken);
+
+        public Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+            SparkCrossChainReceiveRoute route,
+            BigInteger amount,
+            uint maxSlippageBps,
+            CancellationToken cancellationToken = default) =>
+            _inner.ReceiveCrossChainAsync(route, amount, maxSlippageBps, cancellationToken);
+
+        public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+            ulong feeRateSatPerVbyte,
+            string destinationAddress,
+            IReadOnlyList<string>? leafIds,
+            CancellationToken cancellationToken = default) =>
+            _inner.PrepareUnilateralExitAsync(
+                feeRateSatPerVbyte, destinationAddress, leafIds, cancellationToken);
+
+        public Task<SparkExitResult> UnilateralExitAsync(
+            ulong feeRateSatPerVbyte,
+            string destinationAddress,
+            IReadOnlyList<string>? leafIds,
+            IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+            byte[] fundingSecretKey,
+            Func<SparkExitQuote, string?> approveQuote,
+            CancellationToken cancellationToken = default) =>
+            _inner.UnilateralExitAsync(
+                feeRateSatPerVbyte, destinationAddress, leafIds, fundingUtxos, fundingSecretKey, approveQuote,
+                cancellationToken);
+
+        public Task<SparkExitProgress> CheckUnilateralExitAsync(
+            SparkExitResult exit,
+            CancellationToken cancellationToken = default) =>
+            _inner.CheckUnilateralExitAsync(exit, cancellationToken);
+
+        public Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default) =>
+            _inner.ExportUnilateralExitStateAsync(cancellationToken);
+
+        public Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+            string exitState,
+            CancellationToken cancellationToken = default) =>
+            _inner.ImportUnilateralExitStateAsync(exitState, cancellationToken);
 
         public Task DisconnectAsync() => _inner.DisconnectAsync();
 

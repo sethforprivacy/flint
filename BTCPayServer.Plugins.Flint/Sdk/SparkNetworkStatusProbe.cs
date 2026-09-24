@@ -137,7 +137,9 @@ public sealed class SparkNetworkStatusProbe : ISparkNetworkStatusProbe
         {
             var status = await SparkDeadline
                 .OrNullAsync(
-                    BreezSdkSparkMethods.GetSparkStatus(),
+                    // No proxy: the plugin configures none anywhere else either, and this probe must reach the
+                    // same network the wallets do.
+                    BreezSdkSparkMethods.GetSparkStatus(new GetSparkStatusRequest(proxy: null)),
                     Deadline,
                     () => logger.LogDebug(
                         "Reading the Spark network status exceeded {Seconds}s", Deadline.TotalSeconds),

@@ -57,6 +57,26 @@ public interface ISparkStoreSettingsStore
 
     /// <summary>Persists settings and reconciles the running instance. Null removes the configuration.</summary>
     Task<SparkSettingsApplied> SetAsync(string storeId, SparkSettings? settings);
+
+    /// <summary>
+    /// Clears a store's deprecated <see cref="UnilateralExitSettings.ExitStateBackup"/> slot — the
+    /// persisted row and the cached copy alike. Nothing else about the settings moves, and the store's
+    /// running SDK instance is left alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The one write on this seam that is not <see cref="SetAsync"/>, and it exists because of what
+    /// <see cref="SetAsync"/> costs: it reconciles the live instance, which tears the wallet down and
+    /// reconnects it. The two callers that empty this slot — a legacy backup being adopted on connect, and
+    /// an operator clearing the backup from the page — have no business interrupting a wallet for a write
+    /// that stores nothing.
+    /// </para>
+    /// <para>
+    /// Idempotent, and silent about the value: the slot is where an earlier version of this plugin kept a
+    /// store's multi-megabyte exit-state secret.
+    /// </para>
+    /// </remarks>
+    Task ClearExitStateBackupSlotAsync(string storeId);
 }
 
 /// <summary>

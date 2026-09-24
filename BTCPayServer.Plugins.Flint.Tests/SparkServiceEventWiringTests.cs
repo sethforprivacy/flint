@@ -2,6 +2,7 @@ using System.Numerics;
 using Breez.Sdk.Spark;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
+using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 using SdkPaymentStatus = Breez.Sdk.Spark.PaymentStatus;
@@ -230,6 +231,119 @@ public class SparkServiceEventWiringTests
 
         await WaitFor(() => h.Log.AllText.Contains("cannot be matched to a BTCPay invoice"),
             "an unattributable receive was not reported");
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // USDC/USDT: a Receive with no payment hash that is not unattributable at all
+    // ---------------------------------------------------------------------------------------------------
+
+    /// <summary>An open USDC quote on Base for one invoice, as the quote endpoint would have recorded it.</summary>
+    private static void SeedStablecoinQuote(SparkServiceHarness h, string quoteId = "quote-1")
+    {
+        h.Stablecoins.Invoices.Add("usdc-invoice", StoreId, 10m, (Services.StablecoinPayments.Usdc, ["base"]));
+        h.Stablecoins.Quotes.Quotes.Add(new StablecoinQuote
+        {
+            Id = quoteId,
+            StoreId = StoreId,
+            InvoiceId = "usdc-invoice",
+            PaymentMethodId = "USDC-FLINT",
+            Chain = "base",
+            ChainId = "8453",
+            Asset = "USDC",
+            ContractAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            Decimals = 6,
+            DepositAddress = "0x00000000000000000000000000000000000000aa",
+            DepositBaseUnits = "10080000",
+            AskedBaseUnits = "10080000",
+            PaymentRequest = "0x00000000000000000000000000000000000000aa",
+            DueAmount = 10m,
+            FeeAmount = 0.08m,
+            ExpectedReceivedBaseUnits = "10000",
+            DestinationAsset = "BTC",
+            ServiceFeeBaseUnits = "80000",
+            ServiceFeeAsset = "USDC",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-2),
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(13)
+        });
+    }
+
+    /// <summary>The inbound transfer the provider delivers a USDC quote with, as the SDK reports it.</summary>
+    private static Payment CrossChainArrival(string id, bool withConversion = true) =>
+        new(
+            id: id,
+            paymentType: PaymentType.Receive,
+            status: SdkPaymentStatus.Completed,
+            amount: new BigInteger(10_000),
+            fees: BigInteger.Zero,
+            timestamp: (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            method: PaymentMethod.Spark,
+            details: new PaymentDetails.Spark(
+                invoiceDetails: null!,
+                htlcDetails: null!,
+                conversionInfo: withConversion
+                    ? new ConversionInfo.Orchestra(
+                        orderId: "order-1",
+                        quoteId: "orchestra-quote-1",
+                        readToken: null!,
+                        chain: "base",
+                        chainId: "8453",
+                        asset: "USDC",
+                        recipientAddress: "spark1pgssfakewalletaddress",
+                        assetAmountIn: new BigInteger(10_080_000),
+                        estimatedOut: new BigInteger(10_000),
+                        deliveredAmount: new BigInteger(10_004),
+                        externalTxHash: "0xpayertx",
+                        status: ConversionStatus.Completed,
+                        feeAmount: new BigInteger(76_000),
+                        serviceFeeAmount: new BigInteger(80_000),
+                        serviceFeeAsset: "USDC",
+                        serviceFeeAssetDecimals: 6,
+                        assetDecimals: 6,
+                        assetContract: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+                    : null!),
+            conversionDetails: null!);
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_usdc_receive_is_credited_to_the_invoice_its_quote_was_made_for()
+    {
+        using var h = await StartedAsync();
+        SeedStablecoinQuote(h);
+
+        // Metadata-updated is how the provider's details usually arrive, after the transfer itself.
+        Emit(h, StoreId, SparkEventKind.PaymentMetadataUpdated, CrossChainArrival("usdc-pay-1"));
+
+        var invoice = h.Stablecoins.Invoices.Invoices["usdc-invoice"];
+        await WaitFor(() => invoice.Payments.Count == 1, "the USDC payment was never credited");
+        Assert.Equal(10.08m, invoice.Payments[0].Value);
+        Assert.Equal(0.08m, invoice.Payments[0].Fee);
+        Assert.Equal("0xpayertx", invoice.Payments[0].Details.ExternalTxHash);
+        Assert.DoesNotContain("cannot be matched to a BTCPay invoice", h.Log.AllText);
+
+        // A duplicate of the same arrival credits nothing more.
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, CrossChainArrival("usdc-pay-1"));
+        await WaitForStable(() => invoice.Payments.Count);
+        Assert.Single(invoice.Payments);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_transfer_awaiting_its_provider_details_is_not_reported_as_unattributable()
+    {
+        // The SDK reports the inbound transfer before the provider confirms the order, with nothing in it to
+        // attribute it by. While the store has open quotes that is the expected first sighting of one of them,
+        // not money nothing can explain — the warning is reserved for that.
+        using var h = await StartedAsync();
+        SeedStablecoinQuote(h);
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, CrossChainArrival("usdc-pay-1", withConversion: false));
+        await WaitFor(() => h.Log.AllText.Contains("waiting for the provider's details"),
+            "the detail-less transfer was not recognised as a likely USDC/USDT receive");
+        Assert.DoesNotContain("cannot be matched to a BTCPay invoice", h.Log.AllText);
+        Assert.Empty(h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments);
+
+        // Then the details arrive and it is credited.
+        Emit(h, StoreId, SparkEventKind.PaymentMetadataUpdated, CrossChainArrival("usdc-pay-1"));
+        await WaitFor(() => h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments.Count == 1,
+            "the USDC payment was never credited once its details arrived");
     }
 
     // ---------------------------------------------------------------------------------------------------

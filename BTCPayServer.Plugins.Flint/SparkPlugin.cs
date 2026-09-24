@@ -3,8 +3,11 @@ using System.Net.Http;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Hosting;
 using BTCPayServer.Lightning;
+using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Plugins.Flint.Payments;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Services.Invoices;
@@ -139,6 +142,21 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ISparkStoreSettingsStore>(provider => provider.GetRequiredService<SparkService>());
         services.AddSingleton<ISparkStoreRuntime>(provider => provider.GetRequiredService<SparkService>());
 
+        // Automatic unilateral-exit backups: the owner-only file each store's backup lives in, the
+        // debounce/safety-net decisions, and the pass that applies them. Registered unconditionally like
+        // the rest of the exit surface — the gate is enforced inside the pass, not by whether the
+        // types exist.
+        //
+        // The file store is registered as itself only, and the seam published to callers is the
+        // tracking decorator: every write and every delete through the store has to move the
+        // scheduler's belief about what is stored with it, and a caller cannot forget the bookkeeping
+        // when the only published route to the file passes through it.
+        services.AddSingleton<FileExitStateBackupStore>();
+        services.AddSingleton<ExitStateBackupScheduler>();
+        services.AddSingleton<IExitStateBackupStore>(provider => new TrackedExitStateBackupStore(
+            provider.GetRequiredService<FileExitStateBackupStore>(),
+            provider.GetRequiredService<ExitStateBackupScheduler>()));
+
         // The setup flow's decisions, kept out of the controller so they can be tested.
         services.AddSingleton<SparkStoreProvisioner>();
 
@@ -257,6 +275,39 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // settings form and the Greenfield sweep endpoints so a configuration one accepts is one the other accepts.
         services.AddSingleton<SparkSweepSettingsService>();
 
+        // Experimental unilateral exit, behind Constants.UnilateralExitEnabled. Registered unconditionally: the
+        // gate is enforced inside the service and the controller, not by whether the type exists, so a host that
+        // sets the variable after startup does not get a half-wired graph.
+        //
+        // Its own named HTTP client, because discovering the CPFP funding UTXO is the one question neither the SDK
+        // nor NBXplorer can answer — the funding address is outside both key trees — so it goes to an esplora
+        // instance. Short timeout: a request thread is waiting on it while the exit page renders.
+        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, client =>
+        {
+            client.Timeout = SparkExitFundingExplorer.RequestTimeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        });
+        services.AddSingleton<SparkExitFundingExplorer>();
+        services.AddSingleton(provider =>
+        {
+            // The chain is resolved once, as for the sweep destination resolver: it decides the funding key's
+            // derivation path, the address format, and which network a destination is parsed against.
+            var networkProvider = provider.GetRequiredService<BTCPayNetworkProvider>();
+            return new SparkUnilateralExitService(
+                provider.GetRequiredService<ISparkStoreSettingsStore>(),
+                provider.GetRequiredService<ISparkStoreRuntime>(),
+                provider.GetRequiredService<IUnilateralExitRecordStore>(),
+                provider.GetRequiredService<SparkMnemonicProtector>(),
+                provider.GetRequiredService<SparkExitFundingExplorer>(),
+                provider.GetRequiredService<IExitStateBackupStore>(),
+                SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType),
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<SparkUnilateralExitService>>());
+        });
+        services.AddSingleton<ISparkUnilateralExitService>(provider =>
+            provider.GetRequiredService<SparkUnilateralExitService>());
+
         // The Greenfield endpoints' OpenAPI fragment, merged into BTCPay's /swagger/v1/swagger.json. Depends on
         // nothing on purpose — see the class remarks, and the Func<T> note above.
         services.AddSingleton<ISwaggerProvider, SparkSwaggerProvider>();
@@ -266,6 +317,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IInvoiceRecordStore, EfInvoiceRecordStore>();
         services.AddSingleton<IOutgoingPaymentStore, EfOutgoingPaymentStore>();
         services.AddSingleton<ISweepRecordStore, EfSweepRecordStore>();
+        services.AddSingleton<IStablecoinQuoteStore, EfStablecoinQuoteStore>();
+        services.AddSingleton<IUnilateralExitRecordStore, EfUnilateralExitRecordStore>();
         services.AddDbContext<SparkPluginDbContext>((provider, options) =>
         {
             var factory = provider.GetRequiredService<SparkPluginDbContextFactory>();
@@ -299,6 +352,17 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // its own. See SparkLightningConfigSweepTask.
         services.AddScheduledTask<SparkLightningConfigSweepTask>(Constants.ConfigSweepInterval);
 
+        // USDC and USDT at checkout, received into the store's Spark wallet as bitcoin (or as its Stable Balance
+        // token, when it holds one). See StablecoinPaymentService for the flow and StablecoinQuoteMatcher for how an
+        // arrival is attributed to the invoice it paid.
+        AddStablecoinPayments(services);
+
+        // Automatic exit-state backups. The task is the passive half: the interesting timing lives in
+        // ExitStateBackupScheduler, and a pass whose only new work is asking ShouldTake costs one
+        // dictionary read per store. One minute matches the resolution every other pass here works at,
+        // and it is what bounds the latency of a debounced post-deposit backup.
+        services.AddScheduledTask<ExitStateBackupTask>(Constants.ExitStateBackupInterval);
+
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");
         services.AddUIExtension("ln-payment-method-setup-tab", "Spark/LNPaymentMethodSetupTab");
@@ -309,6 +373,90 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("spark-setup-post-body", "Spark/SparkSweepSetupStep");
         services.AddUIExtension("spark-status-post-body", "Spark/SparkSweepStatus");
 
+        // USDC/USDT: setup step 3 (after sweeping, by registration order), the checkout body, and the merchant's
+        // view of those payments on an invoice.
+        services.AddUIExtension("spark-setup-post-body", "Spark/SparkStablecoinSetupStep");
+        services.AddUIExtension("checkout-end", "Spark/StablecoinCheckout");
+        services.AddUIExtension("store-invoices-payments", "Spark/StablecoinInvoicePayments");
+
         base.Execute(services);
+    }
+
+    /// <summary>
+    /// The two stablecoin payment methods and everything they stand on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deferred resolution, again.</b> The handlers are built while BTCPay builds its handler dictionary, and the
+    /// service they call reaches the store runtime (<see cref="SparkService"/>), whose own graph reaches that
+    /// dictionary back. So the handlers and <see cref="SparkService"/> both take the service through a
+    /// <c>Func&lt;T&gt;</c>, and the service's BTCPay gateways take core's payment types the same way — the rule at
+    /// the top of <see cref="Execute"/>, applied uniformly.
+    /// </para>
+    /// <para>
+    /// <b>Rates.</b> A prompt is denominated in the coin, so BTCPay needs <c>USDC_X</c> and <c>USDT_X</c> for
+    /// every invoice currency. Both coins are taken at dollar parity — exactly as the SDK sizes the quote — and
+    /// crossed through bitcoin for anything else, so a store needs no rate configuration of its own: the preferred
+    /// exchange that already prices <c>BTC_X</c> prices these too. The exact <c>_USD</c> rule outranks the store's
+    /// catch-all, so a dollar invoice asks for exactly its price rather than for a bid/ask spread's worth more. A
+    /// store on custom rate scripting has to add these itself, which the docs say.
+    /// </para>
+    /// </remarks>
+    private static void AddStablecoinPayments(IServiceCollection services)
+    {
+        services.AddSingleton<StablecoinRouteCache>();
+        services.AddSingleton<IStablecoinInvoiceGateway, BTCPayStablecoinInvoiceGateway>();
+        services.AddSingleton<IStablecoinStoreConfig, BTCPayStablecoinStoreConfig>();
+        services.AddSingleton(provider =>
+        {
+            // Mainnet only, resolved once for the reason Stable Balance's is: the chain is fixed for the life of
+            // the process, and the SDK refuses a cross-chain configuration anywhere else.
+            var networkProvider = provider.GetRequiredService<BTCPayNetworkProvider>();
+            return new StablecoinPaymentService(
+                provider.GetRequiredService<IStablecoinQuoteStore>(),
+                provider.GetRequiredService<IStablecoinInvoiceGateway>(),
+                provider.GetRequiredService<IStablecoinStoreConfig>(),
+                provider.GetRequiredService<ISparkStoreRuntime>(),
+                provider.GetRequiredService<StablecoinRouteCache>(),
+                provider.GetRequiredService<TimeProvider>(),
+                SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType) == Network.Main,
+                provider.GetRequiredService<ILogger<StablecoinPaymentService>>());
+        });
+        services.TryAddSingleton<Func<StablecoinPaymentService>>(provider =>
+            provider.GetRequiredService<StablecoinPaymentService>);
+
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            services.AddSingleton<IPaymentMethodHandler>(provider => new StablecoinPaymentMethodHandler(
+                asset,
+                provider.GetRequiredService<Func<StablecoinPaymentService>>(),
+                provider.GetRequiredService<ILogger<StablecoinPaymentMethodHandler>>()));
+            services.AddSingleton<ICheckoutModelExtension>(provider => new StablecoinCheckoutModelExtension(
+                asset, provider.GetRequiredService<ILogger<StablecoinCheckoutModelExtension>>()));
+            services.AddSingleton<IPaymentLinkExtension>(provider => new StablecoinPaymentLinkExtension(
+                new StablecoinPaymentMethodHandler(
+                    asset,
+                    provider.GetRequiredService<Func<StablecoinPaymentService>>(),
+                    provider.GetRequiredService<ILogger<StablecoinPaymentMethodHandler>>())));
+            services.AddDefaultPrettyName(asset.PaymentMethodId, asset.Symbol);
+            services.AddCurrencyData(new CurrencyData
+            {
+                Code = asset.Symbol,
+                Name = asset.Name,
+                Divisibility = StablecoinPayments.Divisibility,
+                Symbol = null,
+                Crypto = true
+            });
+            services.AddSingleton(new DefaultRules(
+            [
+                $"{asset.Symbol}_USD = 1",
+                $"{asset.Symbol}_X = {asset.Symbol}_BTC * BTC_X",
+                $"{asset.Symbol}_BTC = 1 / BTC_USD"
+            ]));
+        }
+
+        // Crediting what the event stream dropped, and retrying credits that did not land. Same cadence as the
+        // Lightning reconciliation; a store with no open quote costs one indexed query per pass.
+        services.AddScheduledTask<StablecoinReconciliationTask>(Constants.ReconciliationInterval);
     }
 }

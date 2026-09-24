@@ -413,8 +413,21 @@ public sealed class SparkSdkClient : ISparkSdkClient
 
         return response.deposits is null
             ? []
-            : response.deposits.Select(MapDeposit).ToList();
+            : response.deposits.Where(IsUnclaimed).Select(MapDeposit).ToList();
     }
+
+    /// <summary>
+    /// False for a deposit the SDK has already credited but still lists.
+    /// </summary>
+    /// <remarks>
+    /// Since 0.26 the SDK can claim a deposit before it matures, and such a deposit stays in
+    /// <c>ListUnclaimedDeposits</c> with <c>InstantClaimStatus.Claimed</c> until the service provider spends its
+    /// output, some time after the credit. Breez's guidance is to treat that status as settled. Shown as
+    /// unclaimed, it would read as money still on its way — or, once it matured, as a stuck deposit inviting a
+    /// second claim of funds already in the balance.
+    /// </remarks>
+    internal static bool IsUnclaimed(DepositInfo deposit) =>
+        deposit.instantClaimStatus is not InstantClaimStatus.Claimed;
 
     public async Task<SparkClaimDepositResult> ClaimDepositAsync(
         string txId,
@@ -432,8 +445,7 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 .ClaimDeposit(new ClaimDepositRequest(txId, vout, ToSdkMaxFee(maxFee)))
                 .ConfigureAwait(false);
 
-            return new SparkClaimDepositResult(
-                SparkPaymentMapper.Map(response.payment, _bolt11Parser), null);
+            return MapClaimOutcome(response.outcome, _bolt11Parser);
         }
         catch (Exception ex)
         {
@@ -465,6 +477,44 @@ public sealed class SparkSdkClient : ISparkSdkClient
     /// <c>MaxDepositClaimFeeExceeded</c> carries a required fee, and that value is exactly what a one-click
     /// manual claim uses as its ceiling — which is why it is lifted out rather than left inside a message.
     /// </remarks>
+    /// <summary>
+    /// What a manual claim did, from the SDK's three-way outcome.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Since 0.26 a claim no longer simply returns its payment. <c>Settled</c> still does; <c>Submitted</c> is a
+    /// claim made before maturity that settles asynchronously, and the credit arrives later as an ordinary deposit
+    /// payment; <c>Deferred</c> claimed nothing, and the SDK keeps the ceiling it was given on the deposit and
+    /// retries under it by itself. The plugin only ever claims a matured deposit by hand, so the last two are
+    /// unusual here — but a deferral is reported as a failure with its reason rather than as a success, because
+    /// the merchant pressed a button that did not move the money.
+    /// </para>
+    /// </remarks>
+    internal static SparkClaimDepositResult MapClaimOutcome(ClaimDepositOutcome? outcome, IBolt11Parser bolt11Parser) =>
+        outcome switch
+    {
+        ClaimDepositOutcome.Settled settled =>
+            new SparkClaimDepositResult(SparkPaymentMapper.Map(settled.payment, bolt11Parser), null),
+        ClaimDepositOutcome.Submitted => new SparkClaimDepositResult(null, null, Submitted: true),
+        ClaimDepositOutcome.Deferred deferred => new SparkClaimDepositResult(null, DescribeDeferral(deferred.reason)),
+        _ => new SparkClaimDepositResult(null, "Spark did not say what the claim did.")
+    };
+
+    internal static string DescribeDeferral(ClaimDeferredReason? reason) => reason switch
+    {
+        ClaimDeferredReason.MaxFeeExceeded exceeded => string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "Nothing was claimed: claiming this deposit now costs {0:N0} sat, above the {1:N0} sat allowed. "
+            + "Spark keeps that ceiling on the deposit and claims it by itself once the cost fits.",
+            exceeded.requiredFeeSats, exceeded.maxFeeSats),
+        ClaimDeferredReason.NoEarlyClaimAvailable =>
+            "Nothing was claimed yet: the service provider will not credit this deposit early at its current "
+            + "depth. Spark claims it by itself, usually within a confirmation or two.",
+        ClaimDeferredReason.ProviderDeclined declined =>
+            $"Nothing was claimed: the service provider declined ({Describe(declined.message)}).",
+        _ => "Nothing was claimed yet, and Spark did not say why."
+    };
+
     private static SparkDepositInfo MapDeposit(DepositInfo deposit) => new(
         deposit.txid,
         deposit.vout,
@@ -805,15 +855,121 @@ public sealed class SparkSdkClient : ISparkSdkClient
         pair.asset,
         pair.contractAddress,
         pair.decimals,
-        pair.supportedSources is null
+        // acceptedAssets (0.26) is the Spark side of the route: what a send can be funded from, and what a
+        // receive can land as. The per-asset amount limits riding on it are read by the receive path; a send
+        // only needs to know which of the two balances can fund it.
+        pair.acceptedAssets is null
             ? []
-            : pair.supportedSources
-                .Select(source => source is SourceAsset.Token
+            : pair.acceptedAssets
+                .Select(accepted => accepted.asset is SparkAsset.Token
                     ? SparkCrossChainSource.Token
                     : SparkCrossChainSource.Bitcoin)
                 .Distinct()
                 .ToList(),
         pair);
+
+    public async Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        // contractAddress: null lists every source; the caller filters by asset. The SDK already leaves out routes
+        // this wallet could not complete (#1141) and ones the provider only takes with a refund address (TON),
+        // which a receive cannot carry because the payer is not known when the quote is made.
+        var routes = await _sdk
+            .GetCrossChainRoutes(new CrossChainRouteFilter.Receive(contractAddress: null))
+            .ConfigureAwait(false);
+
+        return routes is null ? [] : routes.Select(MapReceiveRoute).ToList();
+    }
+
+    public async Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+        SparkCrossChainReceiveRoute route,
+        BigInteger amount,
+        uint maxSlippageBps,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(route);
+        if (amount <= BigInteger.Zero)
+            throw new ArgumentOutOfRangeException(nameof(amount), amount, "A cross-chain receive needs an amount.");
+
+        if (route.Handle is not CrossChainRoutePair pair)
+        {
+            throw new InvalidOperationException(
+                "This cross-chain route did not come from the SDK's own route table. The SDK is given back the "
+                + "route object it produced, because a reconstructed one is not what the provider quoted.");
+        }
+
+        var response = await _sdk.ReceivePayment(new ReceivePaymentRequest(
+                new ReceivePaymentMethod.CrossChain(
+                    pair,
+                    amount,
+                    // null: the SDK lands the wallet's active Stable Balance token when the route can deliver it,
+                    // and sats otherwise. Forcing Bitcoin would convert a dollar-holding store's receipt to
+                    // bitcoin and then straight back, paying the spread twice.
+                    destination: null,
+                    // The payer covers the provider's fee, which is BTCPay's model for a network fee too: the
+                    // invoice asks for its price plus the cost of this route.
+                    feeMode: CrossChainFeeMode.FeesExcluded,
+                    maxSlippageBps: maxSlippageBps,
+                    targetOverpayBps: null)))
+            .ConfigureAwait(false);
+
+        // Asserted rather than assumed: an address with no quote behind it is one no payer should be shown.
+        if (response.crossChainInfo is not { } info
+            || string.IsNullOrWhiteSpace(info.depositAddress)
+            || info.depositAmount <= BigInteger.Zero)
+        {
+            throw new InvalidOperationException(
+                "Spark returned a cross-chain receive without a deposit address and amount; refusing to show it "
+                + "to a payer.");
+        }
+
+        return new SparkCrossChainReceiveQuote(
+            route,
+            info.depositAddress,
+            info.depositAmount,
+            info.expectedReceivedAmount,
+            string.IsNullOrWhiteSpace(info.destinationAsset) ? "BTC" : info.destinationAsset,
+            string.IsNullOrWhiteSpace(info.tokenIdentifier) ? null : info.tokenIdentifier,
+            info.serviceFeeAmount,
+            string.IsNullOrWhiteSpace(info.serviceFeeAsset) ? null : info.serviceFeeAsset,
+            FromUnixSeconds(info.expiresAt),
+            string.IsNullOrWhiteSpace(response.paymentRequest) ? info.depositAddress : response.paymentRequest);
+    }
+
+    internal static SparkCrossChainReceiveRoute MapReceiveRoute(CrossChainRoutePair pair)
+    {
+        var accepted = pair.acceptedAssets ?? [];
+        var bitcoin = accepted.FirstOrDefault(asset => asset.asset is SparkAsset.Bitcoin);
+
+        return new SparkCrossChainReceiveRoute(
+            pair.provider switch
+            {
+                CrossChainProvider.Orchestra => SparkCrossChainProvider.Orchestra,
+                CrossChainProvider.Boltz => SparkCrossChainProvider.Boltz,
+                _ => SparkCrossChainProvider.Unknown
+            },
+            pair.chain,
+            string.IsNullOrWhiteSpace(pair.chainId) ? null : pair.chainId,
+            pair.asset,
+            string.IsNullOrWhiteSpace(pair.contractAddress) ? null : pair.contractAddress,
+            pair.decimals,
+            LandsAsBitcoin: bitcoin is not null,
+            LandsAsToken: accepted.Any(asset => asset.asset is SparkAsset.Token),
+            BitcoinLimits: bitcoin?.limits is { } limits
+                ? new SparkCrossChainLimits(limits.minAmount, limits.maxAmount, limits.minUsdCents, limits.maxUsdCents)
+                : null,
+            Handle: pair);
+    }
+
+    /// <summary>A unix-seconds expiry, clamped so a malformed value cannot throw out of a checkout.</summary>
+    private static DateTimeOffset FromUnixSeconds(ulong unixSeconds)
+    {
+        const long maxUnixSeconds = 253_402_300_799; // 9999-12-31T23:59:59Z, the limit DateTimeOffset accepts.
+        return DateTimeOffset.FromUnixTimeSeconds(unixSeconds > maxUnixSeconds ? maxUnixSeconds : (long)unixSeconds);
+    }
 
     /// <remarks>
     /// The cross-chain quote reports its expiry as an ISO-8601 <em>string</em>, where the cooperative-exit quote
@@ -829,6 +985,469 @@ public sealed class SparkSdkClient : ISparkSdkClient
             out var parsed)
             ? parsed
             : DateTimeOffset.MinValue;
+
+    #endregion
+
+    #region Unilateral exit
+
+    public async Task<SparkExitQuote> PrepareUnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        var prepared = await PrepareExitAsync(feeRateSatPerVbyte, destinationAddress, leafIds)
+            .ConfigureAwait(false);
+        return MapExitQuote(prepared);
+    }
+
+    public async Task<SparkExitResult> UnilateralExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(fundingUtxos);
+        ArgumentNullException.ThrowIfNull(approveQuote);
+
+        // Asserted rather than left to the SDK. An empty funding list would be quoted and then fail somewhere
+        // inside the build with no indication that the caller simply never found a UTXO, and a zero-length key
+        // produces a signer that signs nothing.
+        if (fundingUtxos.Count == 0)
+        {
+            throw new ArgumentException(
+                "A unilateral exit needs at least one confirmed funding output to pay its on-chain fees.",
+                nameof(fundingUtxos));
+        }
+
+        if (fundingSecretKey is null || fundingSecretKey.Length == 0)
+        {
+            throw new ArgumentException(
+                "A unilateral exit needs the private key for its funding outputs so the CPFP transactions can "
+                + "be signed.",
+                nameof(fundingSecretKey));
+        }
+
+        var inputs = fundingUtxos.Select(ToSdkFundingInput).ToArray();
+
+        // Quoted inside this call rather than accepted from the caller, for the same reason as before the SDK
+        // change: a quote describes the wallet's tree, which moves under it, and 0.25 made the quote the thing
+        // the build consumes rather than an argument it re-derives from. A caller that held one across a
+        // request boundary would hand back a document describing leaves the wallet no longer has.
+        var prepared = await PrepareExitAsync(feeRateSatPerVbyte, destinationAddress, leafIds)
+            .ConfigureAwait(false);
+        var quote = MapExitQuote(prepared);
+
+        var rejection = approveQuote(quote);
+        if (rejection is not null)
+        {
+            _logger.LogInformation(
+                "Store {StoreId}: refused to build a unilateral exit recovering {RecoverableSat} sat for "
+                + "{FeeSat} sat in fees: {Reason}",
+                _storeId, quote.RecoverableValueSat, quote.TotalFeeSat, rejection);
+            throw new SparkExitRefusedException(rejection);
+        }
+
+        // A one-shot signer over the funding key. Created after the veto so a refused exit never materialises
+        // key material, and disposed in a finally because the binding's implementation owns a native handle.
+        var signer = BreezSdkSparkMethods.SingleKeyCpfpSigner(fundingSecretKey);
+        try
+        {
+            UnilateralExitResponse response;
+            try
+            {
+                response = await _sdk
+                    .UnilateralExit(new UnilateralExitRequest(prepared, inputs), signer)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (SparkErrors.TranslateUnilateralExit(ex) is { } typed)
+            {
+                // A funding shortfall means the outputs were wrong, not that the exit is impossible, and it
+                // built and broadcast nothing. Raised as a typed exception so the service above can put the
+                // SDK's own number in front of an operator.
+                throw typed;
+            }
+
+            var transactions = MapExitTransactions(response.transactions);
+            _logger.LogInformation(
+                "Store {StoreId}: built a unilateral exit over {LeafCount} leaves recovering {RecoverableSat} "
+                + "sat for {FeeSat} sat in fees, as {TxCount} signed transactions. Nothing has been broadcast",
+                _storeId, response.leaves?.Length ?? 0, ToLong(response.recoverableValueSat),
+                ToLong(response.totalFeeSat), transactions.Count);
+
+            return new SparkExitResult(
+                ToLong(response.recoverableValueSat),
+                ToLong(response.totalFeeSat),
+                transactions,
+                MapExitLeaves(response.leaves));
+        }
+        finally
+        {
+            // The interface the binding exposes is not IDisposable; its generated implementation is.
+            if (signer is IDisposable disposable)
+                disposable.Dispose();
+        }
+    }
+
+    public async Task<SparkExitProgress> CheckUnilateralExitAsync(
+        SparkExitResult exit,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(exit);
+
+        var request = new CheckUnilateralExitRequest(ToSdkExit(exit));
+        var checkedExit = await _sdk.CheckUnilateralExit(request).ConfigureAwait(false);
+
+        var verdict = checkedExit.verdict switch
+        {
+            UnilateralExitVerdict.Done => SparkExitVerdict.Done,
+            UnilateralExitVerdict.Redo => SparkExitVerdict.Redo,
+            UnilateralExitVerdict.Valid => SparkExitVerdict.Valid,
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(exit), checkedExit.verdict?.GetType().Name,
+                "Spark returned a unilateral-exit verdict this plugin does not know.")
+        };
+
+        return new SparkExitProgress(
+            verdict,
+            ToLong(checkedExit.exit.recoverableValueSat),
+            ToLong(checkedExit.exit.totalFeeSat),
+            MapExitTransactions(checkedExit.exit.transactions));
+    }
+
+    /// <summary>
+    /// Exports the SDK's unilateral-exit backup blob for this wallet.
+    /// </summary>
+    /// <remarks>
+    /// See <see cref="ISparkSdkClient.ExportUnilateralExitStateAsync"/>: this is the one thing that makes the
+    /// exit data survivable without the operators, and it is sensitive because it describes the wallet's whole
+    /// balance and its history.
+    /// </remarks>
+    public async Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var exported = await _sdk.ExportUnilateralExitState().ConfigureAwait(false);
+        return exported.exitState;
+    }
+
+    public async Task<SparkExitStateImport> ImportUnilateralExitStateAsync(
+        string exitState,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentException.ThrowIfNullOrWhiteSpace(exitState);
+
+        var imported = await _sdk
+            .ImportUnilateralExitState(new ImportUnilateralExitStateRequest(exitState))
+            .ConfigureAwait(false);
+
+        return new SparkExitStateImport(
+            imported.importedLeaves, imported.skippedForeignLeaves,
+            imported.skippedConflictingLeaves, imported.skippedChains);
+    }
+
+    /// <summary>
+    /// One <c>PrepareUnilateralExit</c>, with the response's own echo of the request checked.
+    /// </summary>
+    /// <remarks>
+    /// The check is the same discipline <see cref="PrepareOnchainAsync"/> applies to <c>feePolicy</c>, and it
+    /// matters more here: the prepared response is handed straight back to <c>UnilateralExit</c>, which builds
+    /// and signs the sweep against <em>its</em> destination and rate rather than against the arguments passed
+    /// here. If those ever disagreed, the operator would be handed signed transactions paying somewhere else.
+    /// </remarks>
+    private async Task<PrepareUnilateralExitResponse> PrepareExitAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationAddress);
+        ArgumentOutOfRangeException.ThrowIfZero(feeRateSatPerVbyte);
+
+        var prepared = await _sdk.PrepareUnilateralExit(new PrepareUnilateralExitRequest(
+                feeRateSatPerVbyte,
+                // P2WPKH is the only funding kind offered. The SDK also accepts P2TR and an arbitrary script,
+                // and neither is a choice a merchant makes: the funding key is derived on one fixed path, and a
+                // funding kind that disagrees with the input supplied later produces a signature that does not
+                // verify.
+                ToSdkFundingKind(),
+                destinationAddress,
+                ToSdkLeafSelection(leafIds)))
+            .ConfigureAwait(false);
+
+        RequireQuoteEchoesRequest(prepared, feeRateSatPerVbyte, destinationAddress);
+        return prepared;
+    }
+
+    /// <summary>
+    /// The funding kind every exit in this plugin is quoted with.
+    /// </summary>
+    /// <remarks>
+    /// Named once, because the quote and the build have to agree on it. <see cref="ToSdkFundingInput"/> builds
+    /// the P2WPKH half of the same decision, and the two are deliberately adjacent so a future funding kind
+    /// cannot be added to one without the other.
+    /// </remarks>
+    internal static CpfpFundingKind ToSdkFundingKind() => new CpfpFundingKind.P2wpkh();
+
+    /// <summary>
+    /// Refuses a quote that does not describe the exit that was asked for.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Split out as a static so the rule is testable without a live SDK, like
+    /// <see cref="RequireRoutes"/>.
+    /// </para>
+    /// <para>
+    /// The destination comparison ignores case because bech32 and bech32m are case-insensitive and an
+    /// operator's address may be pasted in either form, while still catching the failure this exists for: a
+    /// response describing a <em>different</em> address. The fee rate is a plain integer echo with no
+    /// normalisation possible, so it is compared exactly.
+    /// </para>
+    /// </remarks>
+    internal static void RequireQuoteEchoesRequest(
+        PrepareUnilateralExitResponse prepared,
+        ulong feeRateSatPerVbyte,
+        string destinationAddress)
+    {
+        ArgumentNullException.ThrowIfNull(prepared);
+
+        if (!string.Equals(prepared.destination, destinationAddress, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Spark quoted the unilateral exit against a different destination address than the one "
+                + "requested. The sweep transaction is signed against the quote, so this would pay somewhere "
+                + "else; refusing to build.");
+        }
+
+        if (prepared.feeRateSatPerVbyte != feeRateSatPerVbyte)
+        {
+            throw new InvalidOperationException(
+                $"Spark quoted the unilateral exit at {prepared.feeRateSatPerVbyte} sat/vB rather than the "
+                + $"requested {feeRateSatPerVbyte} sat/vB. Every fee and the funding amount follow from the "
+                + "rate, so refusing to build rather than funding against the wrong figure.");
+        }
+    }
+
+    /// <remarks>
+    /// Null and empty are both automatic selection, because a caller that has no leaf ids and a caller that has
+    /// an empty list mean the same thing, and <c>Specific([])</c> would be a request to exit nothing. Blank ids
+    /// are rejected rather than filtered: a hole in a persisted leaf list means the resume would silently pin a
+    /// smaller exit than the one the operator funded.
+    /// </remarks>
+    internal static ExitLeafSelection ToSdkLeafSelection(IReadOnlyList<string>? leafIds)
+    {
+        if (leafIds is null || leafIds.Count == 0)
+            return new ExitLeafSelection.Auto();
+
+        if (leafIds.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException(
+                "A pinned leaf selection contains a blank leaf id, which would quote a different exit than the "
+                + "one it is resuming.",
+                nameof(leafIds));
+        }
+
+        return new ExitLeafSelection.Specific(leafIds.ToArray());
+    }
+
+    /// <remarks>
+    /// P2WPKH only, matching the funding kind the prepare asks for. The value is clamped rather than wrapped on
+    /// the way to the SDK's <c>u64</c>; a negative one is a caller bug and is refused, because an output the
+    /// SDK believes is worth zero would be signed for a fee it cannot pay.
+    /// </remarks>
+    internal static CpfpInput ToSdkFundingInput(SparkExitFundingUtxo utxo)
+    {
+        ArgumentNullException.ThrowIfNull(utxo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(utxo.Txid);
+        ArgumentException.ThrowIfNullOrWhiteSpace(utxo.PubkeyHex);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(utxo.ValueSat);
+
+        return new CpfpInput.P2wpkh(utxo.Txid, utxo.Vout, ToUlong(utxo.ValueSat), utxo.PubkeyHex);
+    }
+
+    internal static SparkExitQuote MapExitQuote(PrepareUnilateralExitResponse prepared)
+    {
+        ArgumentNullException.ThrowIfNull(prepared);
+
+        return new SparkExitQuote(
+            ToLong(prepared.recoverableValueSat),
+            ToLong(prepared.totalFeeSat),
+            ToLong(prepared.singleUtxoFundingSat),
+            MapExitLeaves(prepared.leaves),
+            ToLong(prepared.fanoutFeeSat),
+            prepared.perBranchFunding is null
+                ? []
+                : prepared.perBranchFunding
+                    .Select(branch => new SparkExitBranchFunding(branch.leafId, ToLong(branch.fundingSat)))
+                    .ToList(),
+            prepared.feeRateSatPerVbyte,
+            prepared.destination);
+    }
+
+    private static IReadOnlyList<SparkExitLeaf> MapExitLeaves(UnilateralExitLeaf[]? leaves) =>
+        leaves is null
+            ? []
+            : leaves.Select(leaf => new SparkExitLeaf(leaf.leafId, ToLong(leaf.value))).ToList();
+
+    private static IReadOnlyList<SparkExitTransaction> MapExitTransactions(
+        UnilateralExitTransaction[]? transactions) =>
+        transactions is null ? [] : transactions.Select(MapExitTransaction).ToList();
+
+    /// <summary>
+    /// Rebuilds an SDK exit response from the stored result, to hand back to <c>CheckUnilateralExit</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>CheckUnilateralExit</c> reads the chain and nothing else — no wallet, no leaves, no signer, no
+    /// funding — which is what makes an exit followable on a device that has lost everything but the stored
+    /// response. So the reconstruction is exact rather than approximate: every transaction is handed back with
+    /// the status the stored copy carries, because the SDK replaces those statuses from the chain and would
+    /// otherwise be judging a set whose <c>dependsOn</c> edges had been quietly dropped.
+    /// </para>
+    /// <para>
+    /// The fields the check does not read (<c>cpfpFeeSat</c>, <c>fanoutFeeSat</c>, <c>sweepFeeSat</c>) are
+    /// reconstructed as zero rather than as their real values, because the plugin's persisted
+    /// <see cref="SparkExitResult"/> does not keep them — it keeps the two totals an operator is shown. That is
+    /// a deliberate omission and not an oversight: adding fields to the record for numbers nothing reads would
+    /// be cargo, and the verdict and the per-transaction statuses are what the follow-up flow acts on.
+    /// </para>
+    /// </remarks>
+    internal static UnilateralExitResponse ToSdkExit(SparkExitResult exit)
+    {
+        ArgumentNullException.ThrowIfNull(exit);
+
+        return new UnilateralExitResponse(
+            ToUlong(exit.RecoverableValueSat),
+            ToUlong(exit.TotalFeeSat),
+            cpfpFeeSat: 0,
+            fanoutFeeSat: 0,
+            sweepFeeSat: 0,
+            exit.Leaves.Select(leaf => new UnilateralExitLeaf(leaf.LeafId, ToUlong(leaf.ValueSat))).ToArray(),
+            exit.Transactions.Select(ToSdkExitTransaction).ToArray(),
+            // Not needed by the check, and not reconstructible from what is stored: the funding outputs are
+            // followed by the SDK at build time, and an exit that is being followed does not rebuild.
+            fundingInputs: []);
+    }
+
+    internal static UnilateralExitTransaction ToSdkExitTransaction(SparkExitTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+
+        return new UnilateralExitTransaction(
+            ToSdkExitTxKind(transaction.Kind),
+            transaction.NodeId,
+            transaction.Txid,
+            transaction.TxHex,
+            transaction.CpfpTxHex,
+            transaction.CsvTimelockBlocks,
+            transaction.DependsOn.ToArray(),
+            ToSdkExitTxStatus(transaction.Status));
+    }
+
+    internal static UnilateralExitTxKind ToSdkExitTxKind(SparkExitTxKind kind) => kind switch
+    {
+        SparkExitTxKind.Fanout => UnilateralExitTxKind.FanOut,
+        SparkExitTxKind.TreeNode => UnilateralExitTxKind.Node,
+        SparkExitTxKind.Refund => UnilateralExitTxKind.Refund,
+        SparkExitTxKind.Sweep => UnilateralExitTxKind.Sweep,
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(kind), kind, "Unknown plugin unilateral-exit transaction kind.")
+    };
+
+    internal static ExitTransactionStatus ToSdkExitTxStatus(SparkExitTxStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        return status.Readiness switch
+        {
+            SparkExitTxReadiness.Confirmed => new ExitTransactionStatus.Confirmed(status.BlockHeight),
+            SparkExitTxReadiness.Ready => new ExitTransactionStatus.Ready(),
+            SparkExitTxReadiness.Unverified => new ExitTransactionStatus.Unverified(),
+            // The plugin collapses the SDK's two waiting cases into one, because what a merchant needs to know
+            // is "not yet" and, when it is a timelock, from which height. Handing it back as
+            // WaitingForDependencies is the safe reconstruction: both are "do not broadcast", and the SDK
+            // replaces the status from the chain on the way out anyway.
+            _ => new ExitTransactionStatus.WaitingForDependencies()
+        };
+    }
+
+    internal static SparkExitTransaction MapExitTransaction(UnilateralExitTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+
+        return new SparkExitTransaction(
+            MapExitTxKind(transaction.kind),
+            transaction.nodeId,
+            transaction.txid,
+            transaction.txHex,
+            transaction.cpfpTxHex,
+            transaction.csvTimelockBlocks,
+            transaction.dependsOn is null ? [] : transaction.dependsOn.ToList(),
+            MapExitTxStatus(transaction.status));
+    }
+
+    /// <remarks>
+    /// Mapped by name, and an unknown variant is a hard failure rather than a fallback. What a transaction is
+    /// decides how it may be broadcast — alone, or packaged with a CPFP child — so a kind this plugin does not
+    /// understand cannot be given broadcast instructions, and guessing would be instructions to lose money.
+    /// Failing here costs nothing: the SDK has broadcast none of it.
+    /// </remarks>
+    internal static SparkExitTxKind MapExitTxKind(UnilateralExitTxKind kind) => kind switch
+    {
+        UnilateralExitTxKind.FanOut => SparkExitTxKind.Fanout,
+        UnilateralExitTxKind.Node => SparkExitTxKind.TreeNode,
+        UnilateralExitTxKind.Refund => SparkExitTxKind.Refund,
+        UnilateralExitTxKind.Sweep => SparkExitTxKind.Sweep,
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(kind), kind,
+            "Spark returned a unilateral-exit transaction of a kind this plugin does not know how to broadcast.")
+    };
+
+    /// <summary>
+    /// Collapses the SDK's status union onto the plugin's readiness plus whatever height that case carries.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Mapped by case rather than by ordinal, and an unknown case is a hard failure. <c>Ready</c> is the one
+    /// answer that authorises a broadcast, so falling back to it for a variant this plugin has never seen would
+    /// be exactly the wrong default — a new SDK state would arrive as permission to push a transaction out.
+    /// </para>
+    /// <para>
+    /// The two waiting cases collapse into <see cref="SparkExitTxReadiness.Waiting"/> deliberately: a merchant
+    /// needs to know "not yet" and, when it is a timelock, the height it unlocks at. Which of the SDK's two
+    /// reasons it is changes nothing an operator does, and <see cref="SparkExitTxStatus.SpendableAtHeight"/>
+    /// carries the part that does.
+    /// </para>
+    /// </remarks>
+    internal static SparkExitTxStatus MapExitTxStatus(ExitTransactionStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        return status switch
+        {
+            ExitTransactionStatus.Confirmed confirmed =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Confirmed, BlockHeight: confirmed.blockHeight),
+            ExitTransactionStatus.Ready =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Ready),
+            ExitTransactionStatus.WaitingForTimelock timelock =>
+                new SparkExitTxStatus(
+                    SparkExitTxReadiness.Waiting, SpendableAtHeight: timelock.spendableAtHeight),
+            ExitTransactionStatus.WaitingForDependencies =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Waiting),
+            ExitTransactionStatus.Unverified =>
+                new SparkExitTxStatus(SparkExitTxReadiness.Unverified),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(status), status.GetType().Name,
+                "Spark returned a unilateral-exit transaction status this plugin does not know how to "
+                + "broadcast; refusing to guess whether it is safe to send.")
+        };
+    }
 
     #endregion
 
