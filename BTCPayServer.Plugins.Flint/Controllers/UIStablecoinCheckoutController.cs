@@ -106,7 +106,8 @@ public class UIStablecoinCheckoutController : Controller
                 paymentRequest = quote.PaymentRequest,
                 contract = quote.ContractAddress,
                 fee = quote.Fee.ToString(CultureInfo.InvariantCulture),
-                expiresAt = quote.ExpiresAt.ToUnixTimeSeconds()
+                // Not the provider's expiry, which is the life of its price; see StablecoinPayments.OfferedPastExpiry.
+                offeredUntil = StablecoinPayments.OfferedUntil(quote.ExpiresAt).ToUnixTimeSeconds()
             }
         });
     }

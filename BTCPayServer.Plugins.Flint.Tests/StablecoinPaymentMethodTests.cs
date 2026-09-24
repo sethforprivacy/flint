@@ -252,6 +252,47 @@ public class StablecoinPaymentMethodTests
     }
 
     [Fact]
+    public void Checkout_offers_only_networks_it_can_show_and_keeps_an_address_for_an_hour_past_the_price()
+    {
+        var details = Details();
+        details.Networks.Add(new StablecoinNetworkOption { Chain = "optimism", Name = "Optimism" });
+
+        var (_, data) = Checkout(details, destination: "0xdep");
+
+        Assert.Equal(["ethereum", "base"], data["networks"]!.Select(n => (string)n["chain"]!).ToArray());
+        Assert.Null(data["networks"]![0]!["contract"]);
+        Assert.Equal(
+            (details.Quote!.ExpiresAt + StablecoinPayments.OfferedPastExpiry).ToUnixTimeSeconds(),
+            (long)data["quote"]!["offeredUntil"]!);
+    }
+
+    [Fact]
+    public void Every_icon_the_checkout_names_is_served_from_the_plugin_and_is_inert()
+    {
+        // BTCPay serves each plugin's embedded Resources/** from its web root through an EmbeddedFileProvider over
+        // the plugin's assembly; this asks the same provider for the same paths the checkout writes.
+        var files = new Microsoft.Extensions.FileProviders.EmbeddedFileProvider(typeof(SparkPlugin).Assembly);
+        var paths = StablecoinPayments.NetworkIconPaths.Values
+            .Concat(StablecoinPayments.Assets.Select(StablecoinPayments.TokenIcon))
+            .ToList();
+
+        Assert.Equal(8 + 2, paths.Count);
+        foreach (var path in paths)
+        {
+            var file = files.GetFileInfo(path);
+            Assert.True(file.Exists, $"{path} is not embedded");
+            using var reader = new StreamReader(file.CreateReadStream());
+            var svg = reader.ReadToEnd();
+            Assert.StartsWith("<svg", svg);
+            Assert.DoesNotContain("<script", svg, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("href=\"http", svg, StringComparison.OrdinalIgnoreCase);
+        }
+
+        Assert.Equal("Resources/img/networks/bsc.svg", StablecoinPayments.NetworkIcon("BSC"));
+        Assert.Null(StablecoinPayments.NetworkIcon("optimism"));
+    }
+
+    [Fact]
     public void A_checkout_that_cannot_be_prepared_shows_the_method_as_unavailable_instead_of_throwing()
     {
         // The public checkout is BTCPay's request, and an exception from here would disable the plugin and restart

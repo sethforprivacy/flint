@@ -54,3 +54,16 @@ The sweep destination pattern is theirs: reserve a fresh, labelled address from 
 derivation scheme via `BTCPayWallet.ReserveAddressAsync(storeId, derivation.AccountDerivation,
 label)`, and rotate it per sweep. See Services/BTCPayWalletSweepAddressSource.cs. No Boltz code is
 included.
+
+
+4. Cake Wallet — MIT
+--------------------
+Copyright (c) 2018-2025 Cake Labs LLC
+https://github.com/cake-tech/cake_wallet
+
+The network and token icons shown at the USDC/USDT checkout —
+Resources/img/networks/*.svg and Resources/img/tokens/*.svg — are Cake Wallet's
+res/pictures/crypto_full_icons artwork, copied unmodified and renamed after the provider's chain
+identifiers (bnb.svg is bsc.svg, avax.svg is avalanche.svg). The packaged plugin redistributes
+them, so this notice travels with it. The marks they depict belong to their respective projects
+and are used only to name the network or token a payer is sending on.

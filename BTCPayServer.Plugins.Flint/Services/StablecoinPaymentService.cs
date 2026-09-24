@@ -77,7 +77,10 @@ public sealed class StablecoinPaymentService
     /// </remarks>
     internal const decimal MaxFeeShareOfDue = 0.5m;
 
-    /// <summary>A quote is reused only while at least this long remains before it expires.</summary>
+    /// <summary>
+    /// A quote is reused only while at least this long remains of the time it is offered for
+    /// (<see cref="StablecoinPayments.OfferedUntil"/>).
+    /// </summary>
     internal static readonly TimeSpan ReuseMargin = TimeSpan.FromMinutes(2);
 
     /// <summary>How far before the oldest open quote the reconciliation scan starts, for clock skew.</summary>
@@ -211,8 +214,8 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
-    /// The routes a prompt offers: Orchestra's, for exactly this asset, that can land as sats, and whose published
-    /// USD band admits the due — once per network, in checkout order.
+    /// The routes a prompt offers: Orchestra's, for exactly this asset, on a network the plugin can show, that can
+    /// land as sats, and whose published bounds admit the due — once per network, in checkout order.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -221,8 +224,14 @@ public sealed class StablecoinPaymentService
     /// without one, so it is not offered to any.
     /// </para>
     /// <para>
-    /// A published band that excludes the due hides the network; an absent one hides nothing — the quote itself is
-    /// the authority, and it says so in words when an amount does not fit.
+    /// <b>Only networks with an icon</b> (<see cref="StablecoinPayments.NetworkIcon"/>): the icon is how a payer
+    /// checks they are sending on the right network, so a network without one is not offered.
+    /// </para>
+    /// <para>
+    /// A published bound that excludes the due hides the network — the USD band, and the floor and ceiling in the
+    /// payer's token. The deposit is the due plus the route's cost, so the due is the conservative side of a floor.
+    /// An absent bound hides nothing: the quote itself is the authority, and says which bound an amount missed when
+    /// a route enforces one it does not publish — as Tron's did for a three-dollar invoice on mainnet.
     /// </para>
     /// </remarks>
     internal static IReadOnlyList<StablecoinNetworkOption> SelectNetworks(
@@ -234,7 +243,10 @@ public sealed class StablecoinPaymentService
                             && string.Equals(route.Asset, asset.Symbol, StringComparison.OrdinalIgnoreCase)
                             && route.LandsAsBitcoin
                             && !string.IsNullOrWhiteSpace(route.Chain)
-                            && (route.BitcoinLimits is not { } limits || limits.AdmitsUsd(due)))
+                            && StablecoinPayments.NetworkIcon(route.Chain) is not null
+                            && (route.BitcoinLimits is not { } limits
+                                || (limits.AdmitsUsd(due)
+                                    && limits.AdmitsAmount(StablecoinAmounts.ToBaseUnits(due, (int)route.Decimals)))))
             .GroupBy(route => route.Chain.ToLowerInvariant())
             .Select(group => group.First())
             .OrderBy(route => StablecoinPayments.ChainOrder(route.Chain).Rank)
@@ -251,6 +263,45 @@ public sealed class StablecoinPaymentService
     #endregion
 
     #region Quoting
+
+    /// <summary>
+    /// What a payer reads when a network will not take this amount. The provider's own words ("Increase the input
+    /// amount") are written for the integrator, not for someone who cannot change the price; this points at the fix
+    /// the payer does have, which is another network, and names the bound when the bound is the reason.
+    /// </summary>
+    /// <remarks>
+    /// <b>A published bound is named only when it explains the refusal</b> — a floor above what was asked, a ceiling
+    /// below it. The SDK warns that a route can enforce a tighter bound than it publishes, and on mainnet USDT on
+    /// Tron refused a three-dollar invoice while publishing an eighty-cent floor: "the smallest payment Tron takes is
+    /// $0.80" would have been false in front of the payer it was meant to help.
+    /// </remarks>
+    internal static string OutOfRange(
+        StablecoinAsset asset,
+        string network,
+        SparkAmountOutOfRange range,
+        int decimals,
+        BigInteger requested)
+    {
+        var requestedCents = StablecoinAmounts.FromBaseUnits(requested, decimals, StablecoinPayments.Divisibility) * 100m;
+        bool Explains(decimal boundCents) => range.TooSmall ? boundCents > requestedCents : boundCents < requestedCents;
+
+        string? bound = null;
+        if (range.BoundAmount is { } units && units > 0 && (range.TooSmall ? units > requested : units < requested))
+            bound = $"{StablecoinAmounts.Format(units, decimals)} {asset.Symbol}";
+        else if (range.BoundUsdCents is { } cents && cents > 0 && Explains(cents))
+            bound = $"${(cents / 100m).ToString("#,0.00", CultureInfo.InvariantCulture)}";
+
+        if (range.TooSmall)
+        {
+            return bound is null
+                ? $"This payment is too small for {asset.Symbol} on {network}. Choose another network."
+                : $"The smallest {asset.Symbol} payment {network} takes is {bound}. Choose another network.";
+        }
+
+        return bound is null
+            ? $"This payment is too large for {asset.Symbol} on {network}. Choose another network, or pay another way."
+            : $"The largest {asset.Symbol} payment {network} takes is {bound}. Choose another network, or pay another way.";
+    }
 
     /// <summary>
     /// A quote for paying <paramref name="invoiceId"/>'s <paramref name="paymentMethodId"/> prompt from
@@ -280,8 +331,10 @@ public sealed class StablecoinPaymentService
         if (invoice.Due <= 0m)
             return StablecoinQuoteResult.Refused("Nothing is left to pay on this invoice.");
 
+        // A network without an icon is not offered (see SelectNetworks), including on an invoice listed before that
+        // rule: its checkout no longer shows it, and a request naming it anyway is refused like any other.
         var network = invoice.Details.Networks.FirstOrDefault(n => StablecoinPayments.Same(n.Chain, chain));
-        if (network is null)
+        if (network is null || StablecoinPayments.NetworkIcon(network.Chain) is null)
             return StablecoinQuoteResult.Refused($"This invoice does not take {asset.Symbol} on that network.");
 
         var sdk = await _runtime.GetSdkClientAsync(invoice.StoreId).ConfigureAwait(false);
@@ -319,7 +372,7 @@ public sealed class StablecoinPaymentService
             && StablecoinPayments.Same(quote.ContractAddress, network.ContractAddress)
             && quote.SdkPaymentId is null
             && quote.DueAmount == invoice.Due
-            && quote.ExpiresAt > now + ReuseMargin);
+            && StablecoinPayments.OfferedUntil(quote.ExpiresAt) > now + ReuseMargin);
         if (reusable is not null)
         {
             var shown = ToActiveQuote(reusable);
@@ -385,8 +438,16 @@ public sealed class StablecoinPaymentService
             _logger.LogInformation(
                 "Store {StoreId}: could not quote {Asset} on {Chain} for invoice {InvoiceId} ({Reason})",
                 invoice.StoreId, asset.Symbol, route.Chain, invoice.InvoiceId, reason);
+            // The two typed refusals get the payer's own sentence; the provider's words, written for the integrator,
+            // are in the log line above. Anything else is relayed, scrubbed, as the provider put it.
             return StablecoinQuoteResult.Refused(
-                $"{asset.Symbol} on {network.Name} cannot take this payment right now: {reason}");
+                SparkErrors.AmountOutOfRange(ex) is { } range
+                    ? OutOfRange(asset, network.Name, range, decimals, amount)
+                    : SparkErrors.RouteUnavailable(ex) is { } temporary
+                        ? temporary
+                            ? $"{asset.Symbol} on {network.Name} is unavailable right now. Try again shortly, or choose another network."
+                            : $"{asset.Symbol} on {network.Name} can't take this payment. Choose another network."
+                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now: {reason}");
         }
 
         // What the payer is asked for: the SDK's deposit at the prompt's precision, nudged by millionths when

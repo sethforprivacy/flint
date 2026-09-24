@@ -83,6 +83,31 @@ public static class StablecoinPayments
     /// </remarks>
     public static readonly TimeSpan MatchWindow = TimeSpan.FromHours(48);
 
+    /// <summary>
+    /// How long past the provider's own expiry a quote's address stays on the checkout, and is reused for the same
+    /// network and due.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The provider's expiry is the life of its <em>price</em> — about two minutes, measured on mainnet — not of its
+    /// address. The SDK calls it "not authoritative for the receive lifecycle": the provider reprices a deposit that
+    /// arrives later, and the SDK keeps watching an unpaid quote for a day past it. Treating those two minutes as
+    /// the address's life told payers to fetch a new address before most wallets could have sent to the first, and
+    /// minted a provider row each time they did.
+    /// </para>
+    /// <para>
+    /// A reprice changes nothing for the payer, who sends the amount the quote asked for, and nothing for the
+    /// invoice, which is credited with what was sent; it moves how much bitcoin reaches the wallet, the same
+    /// exposure any crypto invoice carries between its rate and its payment. An hour keeps an address on screen
+    /// while a payer funds a wallet or waits on an exchange withdrawal, and ends 23 hours before the SDK stops
+    /// watching it.
+    /// </para>
+    /// </remarks>
+    public static readonly TimeSpan OfferedPastExpiry = TimeSpan.FromHours(1);
+
+    /// <summary>Until when a quote the provider says expires at <paramref name="expiresAt"/> is offered to payers.</summary>
+    public static DateTimeOffset OfferedUntil(DateTimeOffset expiresAt) => expiresAt + OfferedPastExpiry;
+
     /// <summary>Quotes one invoice may request across every network, so a checkout page cannot mint without bound.</summary>
     /// <remarks>
     /// Every quote is a provider row the SDK polls for a day, whether or not it is paid. Ten covers a payer
@@ -108,8 +133,8 @@ public static class StablecoinPayments
     public static readonly TimeSpan QuoteDeadline = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// How the provider's chain identifiers read at checkout. Anything missing is shown capitalised, so a network
-    /// the provider adds tomorrow is offered with a passable name rather than hidden.
+    /// How the provider's chain identifiers read. Anything missing is shown capitalised; only the networks in
+    /// <see cref="NetworkIcons"/> are offered at checkout, but a payment recorded on another one still needs a name.
     /// </summary>
     private static readonly IReadOnlyDictionary<string, string> ChainNames =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -145,6 +170,49 @@ public static class StablecoinPayments
     /// </summary>
     private static readonly string[] PreferredChainOrder =
         ["tron", "ethereum", "solana", "base", "arbitrum", "polygon", "bsc", "optimism", "avalanche"];
+
+    /// <summary>
+    /// The networks the plugin ships an icon for, by the provider's chain identifier, and the file under
+    /// <c>Resources/img/networks/</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only these networks are offered.</b> The icon is the payer's visual check that the network they are
+    /// sending on is the one this QR code and address are for — the mistake that loses a payment outright — so a
+    /// network the plugin cannot show is a network it does not offer. The provider serves more; adding one is its
+    /// icon from the network's own brand assets, a line here, and a NOTICE entry for wherever the artwork came from.
+    /// </remarks>
+    private static readonly IReadOnlyDictionary<string, string> NetworkIcons =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["arbitrum"] = "arbitrum.svg",
+            ["avalanche"] = "avalanche.svg",
+            ["base"] = "base.svg",
+            ["bsc"] = "bsc.svg",
+            ["ethereum"] = "ethereum.svg",
+            ["polygon"] = "polygon.svg",
+            ["solana"] = "solana.svg",
+            ["tron"] = "tron.svg"
+        };
+
+    /// <summary>
+    /// The web path of a network's icon, relative to the application root, or null when the plugin has none — which
+    /// also means the network is not offered.
+    /// </summary>
+    /// <remarks>
+    /// BTCPay serves a plugin's embedded <c>Resources/**</c> from its web root, under the same path.
+    /// </remarks>
+    public static string? NetworkIcon(string? chain) =>
+        chain is not null && NetworkIcons.TryGetValue(chain.Trim(), out var file)
+            ? $"Resources/img/networks/{file}"
+            : null;
+
+    /// <summary>Every network icon, keyed by the lower-case chain identifier, for the checkout to look up.</summary>
+    public static IReadOnlyDictionary<string, string> NetworkIconPaths { get; } =
+        NetworkIcons.ToDictionary(pair => pair.Key.ToLowerInvariant(), pair => $"Resources/img/networks/{pair.Value}");
+
+    /// <summary>The web path of a coin's icon, relative to the application root.</summary>
+    public static string TokenIcon(StablecoinAsset asset) =>
+        $"Resources/img/tokens/{asset.Symbol.ToLowerInvariant()}.svg";
 
     public static string ChainName(string chain)
     {

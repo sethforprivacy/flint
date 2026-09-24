@@ -133,6 +133,31 @@ public static class SparkErrors
     }
 
     /// <summary>
+    /// The typed cross-chain amount refusal (0.26), read into the plugin's own terms; null for anything else.
+    /// </summary>
+    /// <remarks>
+    /// The SDK carries which bound was missed and the bound itself as fields, so nothing here parses the
+    /// provider's prose — whose wording ("Increase the input amount") is addressed to the integrator in any case.
+    /// </remarks>
+    public static SparkAmountOutOfRange? AmountOutOfRange(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.CrossChainAmountOutOfRange outOfRange
+            ? new SparkAmountOutOfRange(outOfRange.tooSmall, outOfRange.boundAmount, outOfRange.boundUsdCents)
+            : null;
+    }
+
+    /// <summary>
+    /// For the typed "provider won't serve this route" refusal (0.26): whether the provider expects the route back
+    /// shortly. Null for anything else.
+    /// </summary>
+    public static bool? RouteUnavailable(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.CrossChainRouteUnavailable unavailable ? unavailable.temporary : null;
+    }
+
+    /// <summary>
     /// True when the SDK reported "no such row", which is how it reports "not found".
     /// </summary>
     /// <remarks>

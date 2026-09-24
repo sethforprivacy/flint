@@ -25,10 +25,7 @@ public sealed record SparkCrossChainLimits(
     ulong? MinUsdCents,
     ulong? MaxUsdCents)
 {
-    /// <summary>
-    /// Whether a USD-par amount sits inside the published USD band. Base-unit bounds are left to the prepare call,
-    /// which sees the deposit it actually sized.
-    /// </summary>
+    /// <summary>Whether a USD-par amount sits inside the published USD band.</summary>
     public bool AdmitsUsd(decimal usd)
     {
         if (usd <= 0m)
@@ -41,7 +38,29 @@ public sealed record SparkCrossChainLimits(
             return false;
         return true;
     }
+
+    /// <summary>Whether an amount in the payer's token's base units sits inside the published floor and ceiling.</summary>
+    public bool AdmitsAmount(BigInteger baseUnits)
+    {
+        if (baseUnits <= BigInteger.Zero)
+            return false;
+        if (MinAmount is { } min && baseUnits < min)
+            return false;
+        if (MaxAmount is { } max && baseUnits > max)
+            return false;
+        return true;
+    }
 }
+
+/// <summary>
+/// A provider's refusal of an amount as outside what a route takes, in the plugin's own terms.
+/// </summary>
+/// <param name="TooSmall">True below the minimum; false above the maximum or beyond available liquidity.</param>
+/// <param name="BoundAmount">
+/// The bound the route publishes in the base units of the asset paid in — on a receive, the payer's token.
+/// </param>
+/// <param name="BoundUsdCents">The same bound as an order value in USD cents, when published that way.</param>
+public sealed record SparkAmountOutOfRange(bool TooSmall, BigInteger? BoundAmount, ulong? BoundUsdCents);
 
 /// <summary>
 /// One place a payer can send USDC or USDT from, into this wallet: a chain, an asset on it, and how it lands.

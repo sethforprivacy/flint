@@ -29,13 +29,13 @@ public class StablecoinPaymentServiceTests
         public InMemoryStablecoinQuoteStore Quotes => Harness.Quotes;
     }
 
-    private static Setup Create(bool available = true, bool walletRunning = true)
+    private static Setup Create(bool available = true, bool walletRunning = true, TimeProvider? time = null)
     {
         var sdk = new FakeSparkSdkClient();
         var runtime = new FakeSparkStoreRuntime();
         if (walletRunning)
             runtime.Clients[StoreId] = sdk;
-        return new Setup(new StablecoinHarness(runtime, available), sdk);
+        return new Setup(new StablecoinHarness(runtime, available, time), sdk);
     }
 
     /// <summary>An invoice with both prompts, offering every network the fake's route table carries for each.</summary>
@@ -91,6 +91,34 @@ public class StablecoinPaymentServiceTests
 
         Assert.Equal(["base"], StablecoinPaymentService.SelectNetworks(routes, StablecoinPayments.Usdc, 10m).Select(n => n.Chain).ToArray());
         Assert.Equal(["ethereum", "base"], StablecoinPaymentService.SelectNetworks(routes, StablecoinPayments.Usdc, 25m).Select(n => n.Chain).ToArray());
+    }
+
+    [Fact]
+    public void A_network_the_plugin_has_no_icon_for_is_not_offered()
+    {
+        // The icon is the payer's check that they are sending on the right network.
+        var routes = new List<SparkCrossChainReceiveRoute>
+        {
+            FakeSparkSdkClient.ReceiveRoute("optimism", "10", "USDC", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6),
+            FakeSparkSdkClient.ReceiveRoute("monad", "143", "USDC", "0x754704bc059f8c67012fed69bc8a327a5aafb603", 6),
+            FakeSparkSdkClient.ReceiveRoute("base", "8453", "USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6)
+        };
+
+        Assert.Equal(["base"], StablecoinPaymentService.SelectNetworks(routes, StablecoinPayments.Usdc, 10m).Select(n => n.Chain).ToArray());
+    }
+
+    [Fact]
+    public void A_published_floor_in_the_payers_token_above_the_due_hides_that_network()
+    {
+        var routes = new List<SparkCrossChainReceiveRoute>
+        {
+            FakeSparkSdkClient.ReceiveRoute("tron", "728126428", "USDT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6,
+                bitcoinLimits: new SparkCrossChainLimits(MinAmount: 5_000_000, MaxAmount: null, null, null)),
+            FakeSparkSdkClient.ReceiveRoute("ethereum", "1", "USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6)
+        };
+
+        Assert.Equal(["ethereum"], StablecoinPaymentService.SelectNetworks(routes, StablecoinPayments.Usdt, 3m).Select(n => n.Chain).ToArray());
+        Assert.Equal(["tron", "ethereum"], StablecoinPaymentService.SelectNetworks(routes, StablecoinPayments.Usdt, 5m).Select(n => n.Chain).ToArray());
     }
 
     [Fact]
@@ -282,19 +310,100 @@ public class StablecoinPaymentServiceTests
             "invoice-1", new BTCPayServer.Payments.PaymentMethodId("BTC-LN"), "base", Ct)).NotFound);
     }
 
-    [Fact]
-    public async Task The_providers_refusal_reaches_the_payer_in_its_own_words()
+    [Theory]
+    [InlineData(true, null, 2_000UL, "The smallest USDC payment Ethereum takes is $20.00. Choose another network.")]
+    [InlineData(true, "15000000", null, "The smallest USDC payment Ethereum takes is 15 USDC. Choose another network.")]
+    [InlineData(true, null, null, "This payment is too small for USDC on Ethereum. Choose another network.")]
+    // What Tron did on mainnet: refused a due above the floor it publishes. That floor is not the reason, so it
+    // is not named.
+    [InlineData(true, null, 80UL, "This payment is too small for USDC on Ethereum. Choose another network.")]
+    [InlineData(false, null, 500UL,
+        "The largest USDC payment Ethereum takes is $5.00. Choose another network, or pay another way.")]
+    [InlineData(false, null, 100_000_000UL,
+        "This payment is too large for USDC on Ethereum. Choose another network, or pay another way.")]
+    public async Task An_amount_a_network_will_not_take_is_explained_to_the_payer_with_its_bound(
+        bool tooSmall, string? boundAmount, ulong? boundUsdCents, string expected)
     {
+        // The provider's own words are for the integrator ("Increase the input amount", seen on mainnet for USDT on
+        // Tron), and a payer cannot change the price. They go to the log; the payer is told the bound and the fix.
         var setup = Create();
         Invoice(setup);
         setup.Sdk.FailCrossChainReceiveWith = new SdkException.CrossChainAmountOutOfRange(
-            "Amount below the route minimum of $20", true, null, 2_000);
+            "Amount is below the minimum for this route. Increase the input amount.", tooSmall,
+            boundAmount is null ? null : BigInteger.Parse(boundAmount), boundUsdCents);
 
         var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
 
         Assert.Null(result.Quote);
-        Assert.Contains("Amount below the route minimum of $20", result.Error);
+        Assert.Equal(expected, result.Error);
         Assert.Empty(setup.Quotes.Quotes);
+    }
+
+    [Theory]
+    [InlineData(true, "USDC on Ethereum is unavailable right now. Try again shortly, or choose another network.")]
+    // What Tron answered on mainnet for a three-dollar invoice, a few minutes after it had quoted ten.
+    [InlineData(false, "USDC on Ethereum can't take this payment. Choose another network.")]
+    public async Task A_route_the_provider_will_not_serve_sends_the_payer_to_another_network(bool temporary, string expected)
+    {
+        var setup = Create();
+        Invoice(setup);
+        setup.Sdk.FailCrossChainReceiveWith = new SdkException.CrossChainRouteUnavailable("This route is not supported", temporary);
+
+        var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
+
+        Assert.Null(result.Quote);
+        Assert.Equal(expected, result.Error);
+    }
+
+    [Fact]
+    public async Task Any_other_refusal_reaches_the_payer_in_the_providers_words()
+    {
+        var setup = Create();
+        Invoice(setup);
+        setup.Sdk.FailCrossChainReceiveWith = new SdkException.NetworkException("@v1=provider timed out");
+
+        var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
+
+        Assert.Null(result.Quote);
+        Assert.Contains("provider timed out", result.Error);
+    }
+
+    [Fact]
+    public async Task A_quote_past_the_providers_expiry_is_still_offered_and_reused_for_an_hour()
+    {
+        // The provider's expiry is the life of its price, two minutes on mainnet, not of its address: it reprices a
+        // late deposit, and the SDK watches an unpaid quote for a day. Re-quoting every two minutes would move the
+        // address under a payer who had already copied it.
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        Invoice(setup);
+        var first = await QuoteOk(setup, "base");
+
+        time.Advance(TimeSpan.FromMinutes(30));
+        var again = await QuoteOk(setup, "base");
+        Assert.Equal(first.QuoteId, again.QuoteId);
+        Assert.Single(setup.Sdk.CrossChainReceiveCalls);
+
+        time.Advance(StablecoinPayments.OfferedPastExpiry);
+        var fresh = await QuoteOk(setup, "base");
+        Assert.NotEqual(first.QuoteId, fresh.QuoteId);
+        Assert.Equal(2, setup.Sdk.CrossChainReceiveCalls.Count);
+    }
+
+    [Fact]
+    public async Task A_network_listed_before_networks_needed_an_icon_is_refused_without_asking_the_provider()
+    {
+        var setup = Create();
+        var invoice = Invoice(setup);
+        invoice.Prompts[StablecoinPayments.Usdc.PaymentMethodId].Networks.Add(
+            new StablecoinNetworkOption { Chain = "optimism", Name = "Optimism", ChainId = "10" });
+        setup.Sdk.CrossChainReceiveRoutes.Add(
+            FakeSparkSdkClient.ReceiveRoute("optimism", "10", "USDC", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6));
+
+        var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "optimism", Ct);
+
+        Assert.Null(result.Quote);
+        Assert.Empty(setup.Sdk.CrossChainReceiveCalls);
     }
 
     [Fact]

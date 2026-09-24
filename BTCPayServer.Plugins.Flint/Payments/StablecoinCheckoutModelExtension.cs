@@ -46,7 +46,10 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
 
     public PaymentMethodId PaymentMethodId => Asset.PaymentMethodId;
 
-    /// <summary>No image: the component names the coin and the network in words, and draws no icon over its QR code.</summary>
+    /// <summary>
+    /// None here: the icon a payer needs is the network's, not the coin's, and the component draws it over its own
+    /// QR code once a network is picked.
+    /// </summary>
     public string Image => "";
 
     public string Badge => "";
@@ -109,7 +112,11 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
                 nameof(Controllers.UIStablecoinCheckoutController.Quote),
                 "UIStablecoinCheckout",
                 new { invoiceId = context.InvoiceEntity.Id, paymentMethodId = PaymentMethodId.ToString() }),
-            networks = details.Networks.Select(n => new { chain = n.Chain, name = n.Name, contract = n.ContractAddress }),
+            // Filtered here as well as at invoice creation, so an invoice made before a network lost its place
+            // (or before networks needed an icon) offers only what the checkout can show.
+            networks = details.Networks
+                .Where(n => StablecoinPayments.NetworkIcon(n.Chain) is not null)
+                .Select(n => new { chain = n.Chain, name = n.Name }),
             quote = current && quote is not null
                 ? new
                 {
@@ -121,7 +128,7 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
                     paymentRequest = quote.PaymentRequest,
                     contract = quote.ContractAddress,
                     fee = quote.Fee.ToString(CultureInfo.InvariantCulture),
-                    expiresAt = quote.ExpiresAt.ToUnixTimeSeconds()
+                    offeredUntil = StablecoinPayments.OfferedUntil(quote.ExpiresAt).ToUnixTimeSeconds()
                 }
                 : null
         });

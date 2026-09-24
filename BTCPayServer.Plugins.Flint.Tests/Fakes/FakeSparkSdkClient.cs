@@ -1052,7 +1052,8 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>Where a receive lands: sats, or the Stable Balance token when a test sets this.</summary>
     public bool ReceiveLandsAsToken { get; set; }
 
-    public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(15);
+    /// <summary>How long the provider holds a receive quote's price: about two minutes, measured on mainnet.</summary>
+    public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(2);
 
     public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
 
