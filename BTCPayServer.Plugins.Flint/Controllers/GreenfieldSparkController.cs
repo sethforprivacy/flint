@@ -32,7 +32,8 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// <see cref="SparkController"/> calls as well — <see cref="SparkSeedResolver"/> for seed sources and the
 /// hot-wallet policy gate, <see cref="SparkStoreProvisioner"/> for provisioning and removal,
 /// <see cref="SparkStoreStatusReader"/> for status, <see cref="SparkSweepSettingsService"/> for the sweep
-/// configuration, and <see cref="SparkSweepEngine"/> for sweeping. If the two surfaces ever behave differently,
+/// configuration, <see cref="SparkSweepEngine"/> for sweeping, and <see cref="StablecoinPaymentService"/> for the
+/// USDC and USDT switch. If the two surfaces ever behave differently,
 /// that is a bug in one of them and not a feature of either.
 /// </para>
 /// <para>
@@ -85,6 +86,7 @@ public class GreenfieldSparkController : ControllerBase
     private readonly SparkSweepEngine _sweepEngine;
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
+    private readonly StablecoinPaymentService _stablecoins;
     private readonly ILogger<GreenfieldSparkController> _logger;
 
     public GreenfieldSparkController(
@@ -96,6 +98,7 @@ public class GreenfieldSparkController : ControllerBase
         SparkSweepEngine sweepEngine,
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
+        StablecoinPaymentService stablecoins,
         ILogger<GreenfieldSparkController> logger)
     {
         _settingsStore = settingsStore;
@@ -106,6 +109,7 @@ public class GreenfieldSparkController : ControllerBase
         _sweepEngine = sweepEngine;
         _deposits = deposits;
         _stableBalance = stableBalance;
+        _stablecoins = stablecoins;
         _logger = logger;
     }
 
@@ -603,6 +607,77 @@ public class GreenfieldSparkController : ControllerBase
         var view = await _stableBalance.ReadAsync(store.Id, cancellationToken).ConfigureAwait(false);
         return Ok(SparkStableBalanceData.From(view, result.Message));
     }
+
+    #endregion
+
+    #region USDC and USDT at checkout
+
+    /// <summary>
+    /// Whether the store's checkout takes USDC and USDT, received into its Spark wallet as bitcoin.
+    /// </summary>
+    [Authorize(Policy = Policies.CanViewStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpGet("~/api/v1/stores/{storeId}/spark/stablecoins")]
+    public async Task<IActionResult> GetStablecoins([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+            return NotConfigured();
+
+        return Ok(await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Turns USDC and USDT on or off for the store's checkout — both payment methods, as the Flint page's switch does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It changes what <em>new</em> invoices offer and moves no money: turning it off leaves every quote already
+    /// shown payable, and each one still settles onto its invoice. So an empty body, which a full replacement reads
+    /// as <c>enabled: false</c>, is taken at its word here, unlike Stable Balance's.
+    /// </para>
+    /// <para>
+    /// Mainnet only. Enabling anywhere else is refused rather than stored: the provider serves no other network, and
+    /// a switch that reads "on" while checkout never offers the coins would be a promise the server cannot keep.
+    /// </para>
+    /// </remarks>
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPut("~/api/v1/stores/{storeId}/spark/stablecoins")]
+    public async Task<IActionResult> UpdateStablecoins(
+        [FromRoute] string storeId,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] SparkStablecoinsInput? request,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+            return NotConfigured();
+
+        request ??= new SparkStablecoinsInput();
+        if (request.Enabled && !_stablecoins.Available)
+        {
+            ModelState.AddModelError(
+                JsonName(nameof(SparkStablecoinsInput.Enabled)),
+                "USDC and USDT payments are only available on Bitcoin mainnet.");
+            return this.CreateValidationError(ModelState);
+        }
+
+        if (!await _stablecoins.SetEnabledAsync(store.Id, request.Enabled, cancellationToken).ConfigureAwait(false))
+        {
+            return this.CreateAPIError(
+                500, "stablecoins-not-updated", "The store's payment methods could not be updated.");
+        }
+
+        return Ok(await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false));
+    }
+
+    private async Task<SparkStablecoinsData> ReadStablecoinsAsync(string storeId, CancellationToken cancellationToken) =>
+        new()
+        {
+            Available = _stablecoins.Available,
+            Enabled = await _stablecoins.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false),
+            PaymentMethodIds = StablecoinPayments.Assets.Select(asset => asset.PaymentMethodId.ToString()).ToList()
+        };
 
     #endregion
 

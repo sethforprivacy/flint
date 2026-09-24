@@ -210,4 +210,50 @@ public class SparkMigrationTests
         Assert.Equal(operation.Schema, drop.Schema);
         Assert.Equal(operation.Table, drop.Table);
     }
+
+    /// <summary>
+    /// The quote table is new, touches no existing table, and carries the unique index attribution rests on.
+    /// </summary>
+    /// <remarks>
+    /// The partial unique index on <c>SdkPaymentId</c> is the database half of "one payment settles one quote": the
+    /// store's compare-and-set also checks it, but a filter widened to cover nulls would refuse every unsettled row
+    /// after the first, and a dropped index would leave only the application check between one arrival and two
+    /// credited invoices. The open-quote index is partial the other way round, so the matching walk reads only the
+    /// small unsettled tail of a table that otherwise only grows.
+    /// </remarks>
+    [Fact]
+    public void The_stablecoin_quote_table_indexes_what_attribution_depends_on()
+    {
+        var migration = new StablecoinQuotes();
+
+        var create = Assert.Single(migration.UpOperations.OfType<CreateTableOperation>());
+        Assert.Equal("StablecoinQuotes", create.Name);
+        Assert.Equal("BTCPayServer.Plugins.Flint", create.Schema);
+        Assert.DoesNotContain(migration.UpOperations, operation => operation is AddColumnOperation or AlterColumnOperation);
+
+        var indexes = migration.UpOperations.OfType<CreateIndexOperation>().ToDictionary(i => i.Name);
+
+        var byPayment = indexes["IX_StablecoinQuotes_SdkPaymentId"];
+        Assert.True(byPayment.IsUnique);
+        Assert.Equal(new[] { nameof(StablecoinQuote.SdkPaymentId) }, byPayment.Columns);
+        Assert.Equal("\"SdkPaymentId\" IS NOT NULL", byPayment.Filter);
+
+        var open = indexes["IX_StablecoinQuotes_StoreId_ExpiresAt_Open"];
+        Assert.Equal(new[] { nameof(StablecoinQuote.StoreId), nameof(StablecoinQuote.ExpiresAt) }, open.Columns);
+        Assert.Equal("\"SdkPaymentId\" IS NULL", open.Filter);
+
+        var drop = Assert.Single(migration.DownOperations.OfType<DropTableOperation>());
+        Assert.Equal("StablecoinQuotes", drop.Name);
+        Assert.Equal("BTCPayServer.Plugins.Flint", drop.Schema);
+    }
+
+    /// <summary>The migrations describe the model the code runs against: nothing is left for a future one to find.</summary>
+    [Fact]
+    public void The_model_has_no_changes_the_migrations_do_not_carry()
+    {
+        using var context = new SparkPluginDesignTimeDbContextFactory().CreateDbContext([]);
+
+        Assert.False(
+            Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.HasPendingModelChanges(context.Database));
+    }
 }

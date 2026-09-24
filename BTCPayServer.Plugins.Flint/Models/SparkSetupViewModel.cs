@@ -63,6 +63,13 @@ public class SparkSetupViewModel
     public long SweepBalanceThresholdSats { get; set; } = SweepSettings.DefaultBalanceThresholdSats;
 
     /// <summary>
+    /// Offer USDC and USDT at checkout as well, as part of setup. The one question the feature asks; the status
+    /// page carries the same switch afterwards. Ignored off mainnet, where the page does not render it.
+    /// </summary>
+    [Display(Name = "Also accept USDC and USDT, received as bitcoin")]
+    public bool EnableStablecoins { get; set; }
+
+    /// <summary>
     /// True when this store already has a Spark wallet, so the page can frame itself as replacing a seed
     /// rather than as first-time setup.
     /// </summary>

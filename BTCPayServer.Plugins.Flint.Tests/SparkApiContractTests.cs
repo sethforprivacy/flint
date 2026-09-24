@@ -230,7 +230,9 @@ public class SparkApiContractTests
         { "SparkSweepResultData", typeof(SparkSweepResultData) },
         { "SparkSweepPreviewData", typeof(SparkSweepPreviewData) },
         { "SparkSweepDestinationData", typeof(SparkSweepDestinationData) },
-        { "SparkSweepQuoteData", typeof(SparkSweepQuoteData) }
+        { "SparkSweepQuoteData", typeof(SparkSweepQuoteData) },
+        { "SparkStablecoinsData", typeof(SparkStablecoinsData) },
+        { "SparkStablecoinsInput", typeof(SparkStablecoinsInput) }
     };
 
     [Theory]

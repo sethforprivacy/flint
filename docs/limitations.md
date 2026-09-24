@@ -72,6 +72,27 @@
   Lightning backend. The one case it is deliberately not written is a superseded BOLT11 — the prompt is
   offering the replacement by then, and its preimage is a different value.
 - **Testnet and signet are unsupported**, because the SDK only offers mainnet and regtest.
+- **USDC and USDT at checkout** ([Accepting USDC and USDT](stablecoin-payments.md)) have their own list:
+  - **Mainnet only**, and not testable anywhere else: the provider serves no other network, so the unit tests run
+    against a fake modelled on the SDK's real shapes, and the path has been exercised on mainnet up to a live quote
+    and a checkout, not yet a paid invoice.
+  - **One quote, one transaction, the exact amount.** A payment is matched to its quote by the provider's figures
+    for that quote, never by who sent it. A different amount is credited with what arrived when its quote can still
+    be told apart; one that cannot is left in the wallet and reported once in BTCPay's log for a human.
+  - **An order the provider refunds or abandons is invisible.** The SDK reports conversions that complete; one that
+    never delivers leaves its invoice unpaid, with nothing in the plugin to say why. The payer's recourse is the
+    provider.
+  - **Only networks the plugin ships an icon for are offered** — eight today. The provider serves more; adding one
+    is its icon and a line of code.
+  - **A custom rate script needs USDC and USDT rules**, or the two payment methods cannot be priced. The plugin's
+    defaults (`USDC_USD = 1`, `USDT_USD = 1`, crossed through bitcoin for other currencies) apply only to stores on
+    BTCPay's default rules.
+  - **Replacing a store's recovery phrase strands its open quotes.** A quote names the wallet it pays into, and the
+    old wallet stops running when its phrase is replaced, so a payment to a quote made before the replacement does
+    not credit its invoice. Whatever the provider delivers for it is the old wallet's, reachable only with the old
+    phrase. Replace a phrase when no USDC or USDT invoice is open.
+  - **Quotes are bounded**: ten per invoice and 500 unsettled per store, since each is a provider order the SDK
+    watches for a day.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
   logging subscriber, which writes `<DataDir>/Plugins/Flint/logs/sdk.log` *and* forwards every line into
   BTCPay's log. What it emits at each level was read line by line against a throwaway regtest wallet: at

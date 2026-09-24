@@ -14,6 +14,9 @@ Everything about the plugin beyond "what is it and how do I install it". Start a
   that leaves a deposit unclaimed forever if nothing intervenes.
 - **[Holding the balance in dollars: Stable Balance](stable-balance.md)** — converting to USDB between
   sweeps, and the freeze risk that comes with it.
+- **[Accepting USDC and USDT, received as bitcoin](stablecoin-payments.md)** — customers pay in a stablecoin
+  from the network they hold it on, and the store's wallet receives bitcoin: what checkout shows, what each
+  network costs, and how a payment finds its invoice.
 - **[Known limitations](limitations.md)** — the full list, stated rather than implied. Read it before you
   put money through this.
 - **[Trust model](trust-model.md)** — every party the plugin depends on, what each can do, and what
@@ -21,7 +24,7 @@ Everything about the plugin beyond "what is it and how do I install it". Start a
 
 ## Automating it
 
-- **[Greenfield API](greenfield-api.md)** — the ten endpoints that do everything the pages do, their
+- **[Greenfield API](greenfield-api.md)** — the twelve endpoints that do everything the pages do, their
   API-key permissions, and a worked `curl` script for provisioning a store headlessly.
 
 ## Working on it

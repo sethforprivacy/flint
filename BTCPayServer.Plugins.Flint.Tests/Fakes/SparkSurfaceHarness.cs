@@ -139,6 +139,9 @@ public sealed class SparkSurfaceHarness
     /// <summary>Every HTTP request the catalogue made, so "rendering costs no round trip" is falsifiable.</summary>
     public StubHttpMessageHandler CrossChainRequests { get; }
 
+    /// <summary>The USDC/USDT path the MVC controller's switch goes through, over in-memory fakes.</summary>
+    public StablecoinHarness Stablecoins { get; private init; } = null!;
+
     public FakeSparkSdkClient VictimWallet => (FakeSparkSdkClient)Runtime.Clients[VictimStore];
 
     public FakeSparkSdkClient WalletOf(string storeId) => (FakeSparkSdkClient)Runtime.Clients[storeId];
@@ -263,15 +266,17 @@ public sealed class SparkSurfaceHarness
             TimeProvider.System,
             NullLogger<CrossChainCatalog>.Instance);
 
+        var stablecoins = new StablecoinHarness(runtime, available: mainnet, writeLog: writeLog);
+
         var mvc = new SparkController(
             settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
-            depositService, stableBalanceService, crossChainCatalog,
+            depositService, stableBalanceService, crossChainCatalog, stablecoins.Service,
             new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
         var api = new GreenfieldSparkController(
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
-            depositService, stableBalanceService,
+            depositService, stableBalanceService, stablecoins.Service,
             NullLogger<GreenfieldSparkController>.Instance);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };
@@ -282,7 +287,10 @@ public sealed class SparkSurfaceHarness
         return new SparkSurfaceHarness(
             mvc, api, settings, lightning, seedReader, sweepRecords, sweepAddresses, runtime, writeLog,
             provisionerLog, protector, sweepEngine, depositService, stableBalanceService,
-            crossChainCatalog, crossChainRequests);
+            crossChainCatalog, crossChainRequests)
+        {
+            Stablecoins = stablecoins
+        };
     }
 
     /// <summary>

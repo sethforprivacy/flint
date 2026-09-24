@@ -14,6 +14,7 @@ public class SparkPluginDbContext : DbContext
     public DbSet<OutgoingPaymentRecord> OutgoingPayments { get; set; } = null!;
     public DbSet<SweepRecord> SweepRecords { get; set; } = null!;
     public DbSet<InvoicePaymentHash> InvoicePaymentHashes { get; set; } = null!;
+    public DbSet<StablecoinQuote> StablecoinQuotes { get; set; } = null!;
 
     public SparkPluginDbContext(DbContextOptions<SparkPluginDbContext> options) : base(options)
     {
@@ -101,6 +102,32 @@ public class SparkPluginDbContext : DbContext
             // pins its own.
             entity.HasIndex(record => record.FirstSeenAt)
                 .HasDatabaseName("IX_InvoicePaymentHashes_FirstSeenAt");
+        });
+
+        modelBuilder.Entity<StablecoinQuote>(entity =>
+        {
+            entity.HasKey(quote => quote.Id);
+            entity.ToTable("StablecoinQuotes");
+            // One Spark payment settles one quote. Partial, because every unsettled quote holds null here; this is
+            // the database backstop under the compare-and-set in EfStablecoinQuoteStore.TrySettleAsync.
+            // Quoted identifier: the column is mixed-case and Postgres would otherwise fold the filter to lowercase.
+            entity.HasIndex(quote => quote.SdkPaymentId)
+                .IsUnique()
+                .HasFilter("\"SdkPaymentId\" IS NOT NULL")
+                .HasDatabaseName("IX_StablecoinQuotes_SdkPaymentId");
+            // The quotes one checkout reuses, caps and lists.
+            entity.HasIndex(quote => quote.InvoiceId);
+            // The matching candidates and the reconciliation pass's store list: unsettled quotes still inside
+            // their window, which is a small tail of a table that otherwise only grows.
+            entity.HasIndex(quote => new { quote.StoreId, quote.ExpiresAt })
+                .HasFilter("\"SdkPaymentId\" IS NULL")
+                .HasDatabaseName("IX_StablecoinQuotes_StoreId_ExpiresAt_Open");
+            // The credit retry walk: settled, not yet on the BTCPay invoice.
+            entity.HasIndex(quote => new { quote.StoreId, quote.SettledAt })
+                .HasFilter("\"SdkPaymentId\" IS NOT NULL AND \"CreditedAt\" IS NULL")
+                .HasDatabaseName("IX_StablecoinQuotes_StoreId_SettledAt_Uncredited");
+            entity.Property(quote => quote.DueAmount).HasPrecision(38, 18);
+            entity.Property(quote => quote.FeeAmount).HasPrecision(38, 18);
         });
     }
 }

@@ -2,7 +2,7 @@
     "tags": [
         {
             "name": "Spark",
-            "description": "Nodeless Lightning for a store, powered by the Breez Spark SDK: set the store's Spark wallet up, read its state, configure automatic on-chain sweeps, and sweep now. Every sweep is a cooperative exit through the Spark service provider; the plugin has no unilateral-exit path."
+            "description": "Nodeless Lightning for a store, powered by the Breez Spark SDK: set the store's Spark wallet up, read its state, configure automatic on-chain sweeps, sweep now, and take USDC and USDT at checkout, received as bitcoin. Every sweep is a cooperative exit through the Spark service provider; the plugin has no unilateral-exit path."
         }
     ],
     "paths": {
@@ -497,6 +497,99 @@
                     },
                     "422": {
                         "description": "The configuration was refused, or Spark would not apply it"
+                    }
+                },
+                "security": [
+                    {
+                        "API_Key": [
+                            "btcpay.store.canmodifystoresettings"
+                        ],
+                        "Basic": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/stores/{storeId}/spark/stablecoins": {
+            "get": {
+                "tags": [
+                    "Spark"
+                ],
+                "summary": "Get whether the store's checkout takes USDC and USDT",
+                "description": "Whether new invoices offer USDC and USDT, which payers send from a network of their choice and the store's Spark wallet **receives as bitcoin** — the store never holds the stablecoin, unless it holds its balance in USDB through Stable Balance, in which case a payment lands there with the rest of it.\n\n`enabled` is true while either payment method is configured and not switched off in BTCPay's own checkout settings. `paymentMethodIds` are the ids an invoice's payment-methods endpoint lists them under.\n\nMainnet only; `available` is false everywhere else.",
+                "operationId": "Spark_GetStablecoins",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/StoreId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Whether the store takes USDC and USDT",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SparkStablecoinsData"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "If you are authenticated but forbidden to view the specified store"
+                    },
+                    "404": {
+                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
+                    }
+                },
+                "security": [
+                    {
+                        "API_Key": [
+                            "btcpay.store.canviewstoresettings"
+                        ],
+                        "Basic": []
+                    }
+                ]
+            },
+            "put": {
+                "tags": [
+                    "Spark"
+                ],
+                "summary": "Turn USDC and USDT at checkout on or off",
+                "description": "Both payment methods together, as the Flint page's switch does. This changes what **new** invoices offer and moves no money: turning it off leaves every quote already shown payable, and each still settles onto its invoice.\n\nA full replacement, as `PUT` implies: a `null` or `{}` body means off — which, unlike Stable Balance's default, converts nothing.\n\nMainnet only. Enabling anywhere else is refused with `422` rather than stored.",
+                "operationId": "Spark_UpdateStablecoins",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/StoreId"
+                    }
+                ],
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SparkStablecoinsInput"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "The store's setting after the change",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SparkStablecoinsData"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "If you are authenticated but forbidden to modify the specified store"
+                    },
+                    "404": {
+                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
+                    },
+                    "422": {
+                        "description": "Enabling was refused: USDC and USDT are only available on Bitcoin mainnet"
                     }
                 },
                 "security": [
@@ -1442,6 +1535,39 @@
                         "format": "int64",
                         "nullable": true,
                         "description": "Balance at which Spark auto-converts. Null leaves Spark's own minimum in force; a value below that minimum is raised to it rather than honoured."
+                    }
+                }
+            },
+            "SparkStablecoinsData": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Whether the store's checkout takes USDC and USDT, received into its Spark wallet as bitcoin.",
+                "properties": {
+                    "available": {
+                        "type": "boolean",
+                        "description": "Whether this server can offer them at all. Mainnet only; false everywhere else."
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Whether new invoices offer them: true while either payment method is configured and not switched off in BTCPay's own checkout settings."
+                    },
+                    "paymentMethodIds": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "The BTCPay payment method ids they are offered as: `USDC-FLINT` and `USDT-FLINT`."
+                    }
+                }
+            },
+            "SparkStablecoinsInput": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Whether new invoices offer USDC and USDT. A `PUT` replaces the whole thing, so an omitted `enabled` means off.",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Offer USDC and USDT on new invoices (both, or neither). Mainnet only."
                     }
                 }
             },

@@ -1,0 +1,47 @@
+@using BTCPayServer
+@using BTCPayServer.Plugins.Flint.Models
+@using Microsoft.AspNetCore.Mvc.TagHelpers
+@inject StablecoinPaymentService Stablecoins
+@*
+    Injected at "spark-setup-post-body", after the sweep step: step 3 of setup, the one question USDC and USDT ask.
+
+    Renders inside the setup page's form, like the sweep step, so it holds a field and no form of its own. Only on
+    mainnet, where the provider operates; elsewhere the step would be a promise the server cannot keep. Once the
+    store is configured the switch lives on the status page, so a seed replacement points there instead.
+
+    The copy leads with what a bitcoin-only merchant needs to hear: the customer pays in a stablecoin, the store
+    receives and keeps bitcoin, and never holds the stablecoin itself.
+*@
+@{
+    var setup = Model as SparkSetupViewModel;
+    var storeId = setup?.StoreId ?? Context.GetCurrentStoreId();
+    var configured = setup?.AlreadyConfigured ?? false;
+}
+@if (Stablecoins.Available && setup is not null)
+{
+    <div class="mt-5" id="SparkStablecoinSetupStep">
+        <h3 class="mb-3">Step 3 — USDC and USDT (optional)</h3>
+        <p class="text-secondary">
+            Let customers pay in USDC or USDT from Ethereum, Solana, Tron, Base and other networks. It is converted to
+            bitcoin on the way in, so this wallet receives and keeps bitcoin — you never hold the stablecoin. The
+            conversion fee is added to what the customer pays.
+        </p>
+        @if (configured && !string.IsNullOrEmpty(storeId))
+        {
+            <p class="text-secondary mb-0">
+                <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@storeId">Turn it on or off on the Flint page.</a>
+            </p>
+        }
+        else
+        {
+            <div class="form-group mb-0">
+                <div class="form-check">
+                    <input asp-for="@setup.EnableStablecoins" type="checkbox" class="form-check-input"
+                           id="SparkSetupEnableStablecoins" />
+                    <label asp-for="@setup.EnableStablecoins" class="form-check-label"
+                           for="SparkSetupEnableStablecoins"></label>
+                </div>
+            </div>
+        }
+    </div>
+}

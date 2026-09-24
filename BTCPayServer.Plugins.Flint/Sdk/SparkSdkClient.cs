@@ -413,8 +413,21 @@ public sealed class SparkSdkClient : ISparkSdkClient
 
         return response.deposits is null
             ? []
-            : response.deposits.Select(MapDeposit).ToList();
+            : response.deposits.Where(IsUnclaimed).Select(MapDeposit).ToList();
     }
+
+    /// <summary>
+    /// False for a deposit the SDK has already credited but still lists.
+    /// </summary>
+    /// <remarks>
+    /// Since 0.26 the SDK can claim a deposit before it matures, and such a deposit stays in
+    /// <c>ListUnclaimedDeposits</c> with <c>InstantClaimStatus.Claimed</c> until the service provider spends its
+    /// output, some time after the credit. Breez's guidance is to treat that status as settled. Shown as
+    /// unclaimed, it would read as money still on its way — or, once it matured, as a stuck deposit inviting a
+    /// second claim of funds already in the balance.
+    /// </remarks>
+    internal static bool IsUnclaimed(DepositInfo deposit) =>
+        deposit.instantClaimStatus is not InstantClaimStatus.Claimed;
 
     public async Task<SparkClaimDepositResult> ClaimDepositAsync(
         string txId,
@@ -432,8 +445,7 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 .ClaimDeposit(new ClaimDepositRequest(txId, vout, ToSdkMaxFee(maxFee)))
                 .ConfigureAwait(false);
 
-            return new SparkClaimDepositResult(
-                SparkPaymentMapper.Map(response.payment, _bolt11Parser), null);
+            return MapClaimOutcome(response.outcome, _bolt11Parser);
         }
         catch (Exception ex)
         {
@@ -465,6 +477,44 @@ public sealed class SparkSdkClient : ISparkSdkClient
     /// <c>MaxDepositClaimFeeExceeded</c> carries a required fee, and that value is exactly what a one-click
     /// manual claim uses as its ceiling — which is why it is lifted out rather than left inside a message.
     /// </remarks>
+    /// <summary>
+    /// What a manual claim did, from the SDK's three-way outcome.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Since 0.26 a claim no longer simply returns its payment. <c>Settled</c> still does; <c>Submitted</c> is a
+    /// claim made before maturity that settles asynchronously, and the credit arrives later as an ordinary deposit
+    /// payment; <c>Deferred</c> claimed nothing, and the SDK keeps the ceiling it was given on the deposit and
+    /// retries under it by itself. The plugin only ever claims a matured deposit by hand, so the last two are
+    /// unusual here — but a deferral is reported as a failure with its reason rather than as a success, because
+    /// the merchant pressed a button that did not move the money.
+    /// </para>
+    /// </remarks>
+    internal static SparkClaimDepositResult MapClaimOutcome(ClaimDepositOutcome? outcome, IBolt11Parser bolt11Parser) =>
+        outcome switch
+    {
+        ClaimDepositOutcome.Settled settled =>
+            new SparkClaimDepositResult(SparkPaymentMapper.Map(settled.payment, bolt11Parser), null),
+        ClaimDepositOutcome.Submitted => new SparkClaimDepositResult(null, null, Submitted: true),
+        ClaimDepositOutcome.Deferred deferred => new SparkClaimDepositResult(null, DescribeDeferral(deferred.reason)),
+        _ => new SparkClaimDepositResult(null, "Spark did not say what the claim did.")
+    };
+
+    internal static string DescribeDeferral(ClaimDeferredReason? reason) => reason switch
+    {
+        ClaimDeferredReason.MaxFeeExceeded exceeded => string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "Nothing was claimed: claiming this deposit now costs {0:N0} sat, above the {1:N0} sat allowed. "
+            + "Spark keeps that ceiling on the deposit and claims it by itself once the cost fits.",
+            exceeded.requiredFeeSats, exceeded.maxFeeSats),
+        ClaimDeferredReason.NoEarlyClaimAvailable =>
+            "Nothing was claimed yet: the service provider will not credit this deposit early at its current "
+            + "depth. Spark claims it by itself, usually within a confirmation or two.",
+        ClaimDeferredReason.ProviderDeclined declined =>
+            $"Nothing was claimed: the service provider declined ({Describe(declined.message)}).",
+        _ => "Nothing was claimed yet, and Spark did not say why."
+    };
+
     private static SparkDepositInfo MapDeposit(DepositInfo deposit) => new(
         deposit.txid,
         deposit.vout,
@@ -805,15 +855,121 @@ public sealed class SparkSdkClient : ISparkSdkClient
         pair.asset,
         pair.contractAddress,
         pair.decimals,
-        pair.supportedSources is null
+        // acceptedAssets (0.26) is the Spark side of the route: what a send can be funded from, and what a
+        // receive can land as. The per-asset amount limits riding on it are read by the receive path; a send
+        // only needs to know which of the two balances can fund it.
+        pair.acceptedAssets is null
             ? []
-            : pair.supportedSources
-                .Select(source => source is SourceAsset.Token
+            : pair.acceptedAssets
+                .Select(accepted => accepted.asset is SparkAsset.Token
                     ? SparkCrossChainSource.Token
                     : SparkCrossChainSource.Bitcoin)
                 .Distinct()
                 .ToList(),
         pair);
+
+    public async Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        // contractAddress: null lists every source; the caller filters by asset. The SDK already leaves out routes
+        // this wallet could not complete (#1141) and ones the provider only takes with a refund address (TON),
+        // which a receive cannot carry because the payer is not known when the quote is made.
+        var routes = await _sdk
+            .GetCrossChainRoutes(new CrossChainRouteFilter.Receive(contractAddress: null))
+            .ConfigureAwait(false);
+
+        return routes is null ? [] : routes.Select(MapReceiveRoute).ToList();
+    }
+
+    public async Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+        SparkCrossChainReceiveRoute route,
+        BigInteger amount,
+        uint maxSlippageBps,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(route);
+        if (amount <= BigInteger.Zero)
+            throw new ArgumentOutOfRangeException(nameof(amount), amount, "A cross-chain receive needs an amount.");
+
+        if (route.Handle is not CrossChainRoutePair pair)
+        {
+            throw new InvalidOperationException(
+                "This cross-chain route did not come from the SDK's own route table. The SDK is given back the "
+                + "route object it produced, because a reconstructed one is not what the provider quoted.");
+        }
+
+        var response = await _sdk.ReceivePayment(new ReceivePaymentRequest(
+                new ReceivePaymentMethod.CrossChain(
+                    pair,
+                    amount,
+                    // null: the SDK lands the wallet's active Stable Balance token when the route can deliver it,
+                    // and sats otherwise. Forcing Bitcoin would convert a dollar-holding store's receipt to
+                    // bitcoin and then straight back, paying the spread twice.
+                    destination: null,
+                    // The payer covers the provider's fee, which is BTCPay's model for a network fee too: the
+                    // invoice asks for its price plus the cost of this route.
+                    feeMode: CrossChainFeeMode.FeesExcluded,
+                    maxSlippageBps: maxSlippageBps,
+                    targetOverpayBps: null)))
+            .ConfigureAwait(false);
+
+        // Asserted rather than assumed: an address with no quote behind it is one no payer should be shown.
+        if (response.crossChainInfo is not { } info
+            || string.IsNullOrWhiteSpace(info.depositAddress)
+            || info.depositAmount <= BigInteger.Zero)
+        {
+            throw new InvalidOperationException(
+                "Spark returned a cross-chain receive without a deposit address and amount; refusing to show it "
+                + "to a payer.");
+        }
+
+        return new SparkCrossChainReceiveQuote(
+            route,
+            info.depositAddress,
+            info.depositAmount,
+            info.expectedReceivedAmount,
+            string.IsNullOrWhiteSpace(info.destinationAsset) ? "BTC" : info.destinationAsset,
+            string.IsNullOrWhiteSpace(info.tokenIdentifier) ? null : info.tokenIdentifier,
+            info.serviceFeeAmount,
+            string.IsNullOrWhiteSpace(info.serviceFeeAsset) ? null : info.serviceFeeAsset,
+            FromUnixSeconds(info.expiresAt),
+            string.IsNullOrWhiteSpace(response.paymentRequest) ? info.depositAddress : response.paymentRequest);
+    }
+
+    internal static SparkCrossChainReceiveRoute MapReceiveRoute(CrossChainRoutePair pair)
+    {
+        var accepted = pair.acceptedAssets ?? [];
+        var bitcoin = accepted.FirstOrDefault(asset => asset.asset is SparkAsset.Bitcoin);
+
+        return new SparkCrossChainReceiveRoute(
+            pair.provider switch
+            {
+                CrossChainProvider.Orchestra => SparkCrossChainProvider.Orchestra,
+                CrossChainProvider.Boltz => SparkCrossChainProvider.Boltz,
+                _ => SparkCrossChainProvider.Unknown
+            },
+            pair.chain,
+            string.IsNullOrWhiteSpace(pair.chainId) ? null : pair.chainId,
+            pair.asset,
+            string.IsNullOrWhiteSpace(pair.contractAddress) ? null : pair.contractAddress,
+            pair.decimals,
+            LandsAsBitcoin: bitcoin is not null,
+            LandsAsToken: accepted.Any(asset => asset.asset is SparkAsset.Token),
+            BitcoinLimits: bitcoin?.limits is { } limits
+                ? new SparkCrossChainLimits(limits.minAmount, limits.maxAmount, limits.minUsdCents, limits.maxUsdCents)
+                : null,
+            Handle: pair);
+    }
+
+    /// <summary>A unix-seconds expiry, clamped so a malformed value cannot throw out of a checkout.</summary>
+    private static DateTimeOffset FromUnixSeconds(ulong unixSeconds)
+    {
+        const long maxUnixSeconds = 253_402_300_799; // 9999-12-31T23:59:59Z, the limit DateTimeOffset accepts.
+        return DateTimeOffset.FromUnixTimeSeconds(unixSeconds > maxUnixSeconds ? maxUnixSeconds : (long)unixSeconds);
+    }
 
     /// <remarks>
     /// The cross-chain quote reports its expiry as an ISO-8601 <em>string</em>, where the cooperative-exit quote

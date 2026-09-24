@@ -124,6 +124,21 @@ public class SparkEventListenerAdapterTests
     }
 
     [Fact]
+    public void A_metadata_update_is_forwarded_with_its_payment()
+    {
+        // The one event that carries a cross-chain receive's conversion details. Folded into Other, a USDC or
+        // USDT payment would reach the plugin only through the next reconciliation pass.
+        var (adapter, channel) = Create();
+        var payment = SamplePayment();
+
+        adapter.OnEvent(new SdkEvent.PaymentMetadataUpdated(payment));
+
+        Assert.True(channel.Reader.TryRead(out var envelope));
+        Assert.Equal(SparkEventKind.PaymentMetadataUpdated, envelope!.Kind);
+        Assert.Same(payment, envelope.Payment);
+    }
+
+    [Fact]
     public void Deposit_events_are_forwarded()
     {
         // On-chain deposits are real money arriving and the operator should see them, even though they settle

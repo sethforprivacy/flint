@@ -23,11 +23,13 @@ engine with the same guards.
 | `POST` | `/api/v1/stores/{storeId}/spark/deposit/claim` | `btcpay.store.canmodifystoresettings` |
 | `GET` | `/api/v1/stores/{storeId}/spark/stable-balance` | `btcpay.store.canviewstoresettings` |
 | `PUT` | `/api/v1/stores/{storeId}/spark/stable-balance` | `btcpay.store.canmodifystoresettings` |
+| `GET` | `/api/v1/stores/{storeId}/spark/stablecoins` | `btcpay.store.canviewstoresettings` |
+| `PUT` | `/api/v1/stores/{storeId}/spark/stablecoins` | `btcpay.store.canmodifystoresettings` |
 
 A key scoped to a single store works; `btcpay.store.canmodifystoresettings` covers the read endpoints too.
 Basic authentication is accepted wherever an API key is, as everywhere in Greenfield.
 
-Four things are worth knowing before scripting against it.
+Five things are worth knowing before scripting against it.
 
 - **A key that generates or imports a seed needs `btcpay.server.canmodifyserversettings` as well**, even
   when it belongs to an administrator. `seedSource` `generate`, `import` and `hotWallet` all create a hot
@@ -48,6 +50,11 @@ Four things are worth knowing before scripting against it.
   so gate on `outcome`, and read `refusalCode` for the stable identity of a refusal.
 - **`balanceSats` is indicative.** It is read from the SDK's cache without forcing a sync, lags settlement
   by around 20 seconds, and drifts by a few sats. Do not reconcile against it.
+- **`PUT .../spark/stablecoins` switches USDC and USDT at checkout for new invoices, and moves no money.**
+  `{"enabled": true}` offers both on mainnet (anywhere else it is a `422`); an empty body turns them off, and
+  quotes already shown still settle. The invoices then list them as the `USDC-FLINT` and `USDT-FLINT` payment
+  methods, which BTCPay's own invoice endpoints report like any other — see
+  [Accepting USDC and USDT](stablecoin-payments.md).
 
 Setting a store up with a fresh seed and reading its state back:
 

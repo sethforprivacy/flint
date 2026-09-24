@@ -45,6 +45,12 @@ public static class SparkErrors
             SdkException.Signer signer => $"Spark signer error: {Strip(signer.v1)}",
             SdkException.InvalidUuid uuid => $"Invalid identifier: {Strip(uuid.v1)}",
             SdkException.Generic generic => Strip(generic.v1),
+            // The two typed cross-chain refusals (0.26) carry the provider's own reason in a named field rather
+            // than v1, and the reason is the whole message: which bound an amount missed, or that a route is down.
+            SdkException.CrossChainAmountOutOfRange outOfRange => Strip(outOfRange.reason),
+            SdkException.CrossChainRouteUnavailable unavailable => Strip(unavailable.reason),
+            SdkException.DepositClaimInProgress =>
+                "A claim for this deposit is already in progress. Nothing more is needed; check the balance shortly.",
             // MissingUtxo and MaxDepositClaimFeeExceeded carry several named fields rather than a
             // single v1, so there is nothing better to do than strip the synthesised prefix.
             SdkException => Strip(exception.Message),
@@ -124,6 +130,31 @@ public static class SparkErrors
         ArgumentNullException.ThrowIfNull(exception);
         return exception is SdkException.NetworkException network &&
                network.v1?.Contains("amount too small", StringComparison.OrdinalIgnoreCase) is true;
+    }
+
+    /// <summary>
+    /// The typed cross-chain amount refusal (0.26), read into the plugin's own terms; null for anything else.
+    /// </summary>
+    /// <remarks>
+    /// The SDK carries which bound was missed and the bound itself as fields, so nothing here parses the
+    /// provider's prose — whose wording ("Increase the input amount") is addressed to the integrator in any case.
+    /// </remarks>
+    public static SparkAmountOutOfRange? AmountOutOfRange(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.CrossChainAmountOutOfRange outOfRange
+            ? new SparkAmountOutOfRange(outOfRange.tooSmall, outOfRange.boundAmount, outOfRange.boundUsdCents)
+            : null;
+    }
+
+    /// <summary>
+    /// For the typed "provider won't serve this route" refusal (0.26): whether the provider expects the route back
+    /// shortly. Null for anything else.
+    /// </summary>
+    public static bool? RouteUnavailable(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.CrossChainRouteUnavailable unavailable ? unavailable.temporary : null;
     }
 
     /// <summary>

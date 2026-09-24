@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -361,6 +362,51 @@ public interface ISparkSdkClient : IDisposable
         uint? maxSlippageBps,
         string? idempotencyKey,
         Func<SparkCrossChainQuote, Task<string?>> approveQuote,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The USDC/USDT sources a payer can send from into this wallet.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Unfiltered by asset, and possibly empty. Unlike <see cref="GetCrossChainRoutesAsync"/> an empty list is not
+    /// raised as a configuration fault: checkout asks for these on invoice creation, and a provider outage there
+    /// must cost the store its stablecoin option, not its invoice.
+    /// </para>
+    /// <para>A live provider call. Cache the answer; never call this per page view.</para>
+    /// </remarks>
+    Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Quotes a cross-chain receive into this wallet: a provider deposit address on the route's chain, and the
+    /// amount the payer must send to it.
+    /// </summary>
+    /// <param name="amount">
+    /// What the wallet should end up with, in the <em>route's</em> base units at USD parity — so
+    /// <c>10 × 10^decimals</c> is ten dollars. The SDK sizes the deposit above it to cover the provider's fee
+    /// (<c>FeesExcluded</c>), which is the payer's to pay, exactly as a network fee is on-chain.
+    /// </param>
+    /// <param name="maxSlippageBps">
+    /// How far the delivery may fall short of the quote before the provider refuses it, in basis points (the SDK
+    /// accepts 10–500). Also the drift the SDK tolerates between its own estimate and the provider's firm quote.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>This persists a provider row that the SDK polls for up to 24 hours past the quote's expiry</b>, whether or
+    /// not anyone ever pays it. Callers must not mint these freely: reuse a live quote, and cap how many one
+    /// invoice may request.
+    /// </para>
+    /// <para>
+    /// Where the payment lands is the SDK's choice and the right one: the wallet's active Stable Balance token when
+    /// the route can deliver it, so a dollar-holding store is not converted to bitcoin and back, and sats
+    /// otherwise.
+    /// </para>
+    /// </remarks>
+    Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+        SparkCrossChainReceiveRoute route,
+        BigInteger amount,
+        uint maxSlippageBps,
         CancellationToken cancellationToken = default);
 
     #endregion

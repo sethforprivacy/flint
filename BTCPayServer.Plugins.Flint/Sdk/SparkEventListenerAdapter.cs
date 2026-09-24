@@ -32,6 +32,18 @@ public enum SparkEventKind
     /// <summary>An on-chain static deposit was seen, before it is claimed.</summary>
     NewDeposits,
 
+    /// <summary>
+    /// A payment the SDK already reported gained provider metadata — for this plugin, the Orchestra conversion
+    /// details on an inbound USDC/USDT receive.
+    /// </summary>
+    /// <remarks>
+    /// Routed exactly like a completion, because for a cross-chain receive it usually <em>is</em> the
+    /// completion as far as the plugin can tell: the inbound Spark transfer is reported first as a plain
+    /// transfer with nothing tying it to a quote, and the conversion details arrive only with this event, once
+    /// the provider confirms the order.
+    /// </remarks>
+    PaymentMetadataUpdated,
+
     Other
 }
 
@@ -116,6 +128,8 @@ public sealed class SparkEventListenerAdapter : EventListener
                 SdkEvent.Synced => new SparkEventEnvelope(_storeId, SparkEventKind.Synced, null),
                 SdkEvent.ClaimedDeposits => new SparkEventEnvelope(_storeId, SparkEventKind.ClaimedDeposits, null),
                 SdkEvent.NewDeposits => new SparkEventEnvelope(_storeId, SparkEventKind.NewDeposits, null),
+                SdkEvent.PaymentMetadataUpdated updated =>
+                    new SparkEventEnvelope(_storeId, SparkEventKind.PaymentMetadataUpdated, updated.payment),
                 _ => new SparkEventEnvelope(_storeId, SparkEventKind.Other, null)
             };
 

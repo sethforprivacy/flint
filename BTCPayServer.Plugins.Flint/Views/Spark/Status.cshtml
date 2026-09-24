@@ -186,6 +186,46 @@
         }
 
         @*
+            One switch, both coins. A button that flips the state rather than a checkbox that auto-submits: an
+            inline change handler is exactly what a strict CSP refuses, and a button is one click either way.
+        *@
+        <h3 class="mt-4 mb-3">USDC and USDT</h3>
+        @if (!Model.StablecoinsAvailable)
+        {
+            <p class="text-secondary" id="SparkStablecoinsSummary">Only available on Bitcoin mainnet.</p>
+        }
+        else
+        {
+            @*
+                The sentence that sells the feature to a bitcoin-only merchant is the at-rest one: the customer pays
+                in a stablecoin and the store never holds it. It is only untrue for a store that separately chose to
+                hold dollars through Stable Balance, and the page says that rather than promising bitcoin.
+            *@
+            <p id="SparkStablecoinsSummary" class="@(Model.StablecoinsEnabled ? "" : "text-secondary")">
+                @if (Model.StablecoinsEnabled && Model.StableBalanceActive)
+                {
+                    <span>On. Customers can pay in USDC or USDT. Because Stable Balance is on, it is kept in dollars with the rest of this balance.</span>
+                }
+                else if (Model.StablecoinsEnabled)
+                {
+                    <span>On. Customers can pay in USDC or USDT, and it arrives in this wallet as bitcoin — you never hold the stablecoin.</span>
+                }
+                else
+                {
+                    <span>Off. Let customers pay in USDC or USDT from Ethereum, Solana, Tron, Base and more, while you receive and keep bitcoin.</span>
+                }
+            </p>
+            <form method="post" asp-action="Stablecoins" asp-route-storeId="@Model.StoreId"
+                  permission="@Policies.CanModifyStoreSettings" id="SparkStablecoinsForm">
+                <input type="hidden" name="enabled" value="@(Model.StablecoinsEnabled ? "false" : "true")" />
+                <button type="submit" class="btn @(Model.StablecoinsEnabled ? "btn-outline-secondary" : "btn-secondary")"
+                        id="SparkStablecoinsToggle">
+                    @(Model.StablecoinsEnabled ? "Turn off USDC and USDT" : "Accept USDC and USDT")
+                </button>
+            </form>
+        }
+
+        @*
             Wave 4's sweep settings and sweep history render here. The location is already live, so adding
             them needs no change to this view.
         *@

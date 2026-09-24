@@ -995,6 +995,184 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
 
     #endregion
 
+    #region Cross-chain receive
+
+    /// <summary>
+    /// The receive route table, in the shape the provider's live table had when this was written.
+    /// </summary>
+    /// <remarks>
+    /// Chosen for what can go wrong with each. USDC and USDT on six-decimal EVM chains, Solana and Tron are the
+    /// ordinary case. BSC is eighteen decimals, where a six-decimal assumption misprices every amount by 10^12.
+    /// <c>arc</c> can only land a token, so it must not be offered to a store without Stable Balance. <c>USDT0</c>
+    /// is a different token from <c>USDT</c>, and Boltz serves no receive at all.
+    /// </remarks>
+    public List<SparkCrossChainReceiveRoute> CrossChainReceiveRoutes { get; } =
+    [
+        ReceiveRoute("base", "8453", "USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
+        ReceiveRoute("ethereum", "1", "USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
+        ReceiveRoute("solana", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6),
+        ReceiveRoute("bsc", "56", "USDC", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", 18),
+        ReceiveRoute("arc", "5042", "USDC", "0x3600000000000000000000000000000000000000", 6, landsAsBitcoin: false),
+        ReceiveRoute("tron", "728126428", "USDT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6),
+        ReceiveRoute("ethereum", "1", "USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6),
+        ReceiveRoute("bsc", "56", "USDT", "0x55d398326f99059ff775485246999027b3197955", 18),
+        ReceiveRoute("arbitrum", "42161", "USDT0", "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", 6),
+        ReceiveRoute("polygon", "137", "USDT", "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", 6,
+            provider: SparkCrossChainProvider.Boltz)
+    ];
+
+    public static SparkCrossChainReceiveRoute ReceiveRoute(
+        string chain,
+        string? chainId,
+        string asset,
+        string? contract,
+        uint decimals,
+        bool landsAsBitcoin = true,
+        SparkCrossChainLimits? bitcoinLimits = null,
+        SparkCrossChainProvider provider = SparkCrossChainProvider.Orchestra) =>
+        new(provider, chain, chainId, asset, contract, decimals, landsAsBitcoin, LandsAsToken: true,
+            bitcoinLimits, Handle: $"receive-route:{provider}:{chain}:{asset}");
+
+    public Exception? FailCrossChainReceiveRoutesWith { get; set; }
+
+    public Exception? FailCrossChainReceiveWith { get; set; }
+
+    /// <summary>When set, a quote waits on this before answering — for a test to hold one mid-flight.</summary>
+    public TaskCompletionSource? HoldCrossChainReceiveUntil { get; set; }
+
+    /// <summary>BTC price used to size the sats a receive is expected to land, in USD.</summary>
+    public long ReceiveBitcoinPriceUsd { get; set; } = 100_000;
+
+    /// <summary>The provider's fixed fee on a receive, in USD millionths; it rides on the deposit.</summary>
+    public long ReceiveFixedFeeMicroUsd { get; set; } = 50_000;
+
+    /// <summary>The provider's proportional fee on a receive, in basis points of the amount.</summary>
+    public long ReceiveFeeBps { get; set; } = 30;
+
+    /// <summary>Where a receive lands: sats, or the Stable Balance token when a test sets this.</summary>
+    public bool ReceiveLandsAsToken { get; set; }
+
+    /// <summary>How long the provider holds a receive quote's price: about two minutes, measured on mainnet.</summary>
+    public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(2);
+
+    public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
+
+    private int _receiveCount;
+
+    public Task<IReadOnlyList<SparkCrossChainReceiveRoute>> GetCrossChainReceiveRoutesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        _writeLog?.Record("sdk:cc-receive-routes");
+        if (FailCrossChainReceiveRoutesWith is not null)
+            throw FailCrossChainReceiveRoutesWith;
+        return Task.FromResult<IReadOnlyList<SparkCrossChainReceiveRoute>>(CrossChainReceiveRoutes.ToList());
+    }
+
+    /// <summary>
+    /// A receive quote sized the way the SDK sizes one on <c>FeesExcluded</c>: the payer's deposit is the amount
+    /// plus the provider's fee, and the wallet expects the amount's worth of sats (or USDB). Each quote gets its own
+    /// deposit address, as the provider's do.
+    /// </summary>
+    public async Task<SparkCrossChainReceiveQuote> ReceiveCrossChainAsync(
+        SparkCrossChainReceiveRoute route,
+        BigInteger amount,
+        uint maxSlippageBps,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfConfigured();
+        CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
+        _writeLog?.Record("sdk:cc-receive");
+
+        if (HoldCrossChainReceiveUntil is { } hold)
+            await hold.Task.ConfigureAwait(false);
+        if (FailCrossChainReceiveWith is not null)
+            throw FailCrossChainReceiveWith;
+        if (route.Handle is null)
+            throw new InvalidOperationException("The route did not come from the SDK's own route table.");
+
+        var index = Interlocked.Increment(ref _receiveCount);
+        var scale = BigInteger.Pow(10, (int)route.Decimals);
+        var fixedFee = ReceiveFixedFeeMicroUsd * scale / 1_000_000;
+        var proportional = amount * ReceiveFeeBps / 10_000;
+        var deposit = amount + fixedFee + proportional;
+
+        // Sats for the amount at the configured price, or USDB base units (6 dp) at par.
+        var expected = ReceiveLandsAsToken
+            ? amount * 1_000_000 / scale
+            : amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+
+        var address = route.Chain switch
+        {
+            "tron" => $"TFake{index:D29}",
+            "solana" => $"So1Fake{index:D37}",
+            _ => "0x" + index.ToString("x40", System.Globalization.CultureInfo.InvariantCulture)
+        };
+
+        return new SparkCrossChainReceiveQuote(
+            route,
+            address,
+            deposit,
+            expected,
+            ReceiveLandsAsToken ? "USDB" : "BTC",
+            ReceiveLandsAsToken ? Usdb.Value : null,
+            fixedFee + proportional,
+            route.Asset,
+            DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
+            address);
+    }
+
+    /// <summary>
+    /// The inbound payment the SDK reports once the provider delivers a quote: a Spark transfer (or a token one)
+    /// carrying the provider's conversion details, frozen from the quote exactly as the real provider row does.
+    /// </summary>
+    /// <param name="paid">What the payer actually deposited, in route base units. Defaults to the SDK's deposit.</param>
+    /// <param name="withConversion">
+    /// False reproduces the first report of a receive, before the provider's details arrive — a plain transfer
+    /// with nothing to attribute it by.
+    /// </param>
+    public static SparkPayment CrossChainReceivePayment(
+        SparkCrossChainReceiveQuote quote,
+        string sdkPaymentId,
+        BigInteger? paid = null,
+        bool withConversion = true,
+        SparkPaymentStatus status = SparkPaymentStatus.Completed,
+        DateTimeOffset? at = null) =>
+        new(
+            sdkPaymentId,
+            SparkPaymentDirection.Receive,
+            status,
+            quote.TokenIdentifier is null ? SparkPaymentMethod.Spark : SparkPaymentMethod.Token,
+            (long)quote.ExpectedReceivedAmount,
+            0,
+            at ?? DateTimeOffset.UtcNow,
+            PaymentHash: null,
+            Bolt11: null,
+            Preimage: null,
+            Description: null,
+            Conversion: withConversion
+                ? new SparkConversionState(
+                    SparkCrossChainProvider.Orchestra,
+                    SparkConversionStatus.Completed,
+                    ProviderQuoteId: $"orchestra-quote-{sdkPaymentId}",
+                    ProviderOrderId: $"orchestra-order-{sdkPaymentId}",
+                    DeliveredAmount: quote.ExpectedReceivedAmount,
+                    RecipientAddress: "spark1pgssfakewalletaddress",
+                    Chain: quote.Route.Chain,
+                    Asset: quote.Route.Asset,
+                    AssetDecimals: quote.Route.Decimals,
+                    ChainId: quote.Route.ChainId,
+                    AssetContract: quote.Route.ContractAddress,
+                    AssetAmountIn: paid ?? quote.DepositAmount,
+                    EstimatedOut: quote.ExpectedReceivedAmount,
+                    ServiceFeeAmount: quote.ServiceFeeAmount,
+                    ExternalTxHash: $"0xpayer{sdkPaymentId}")
+                : null);
+
+    public sealed record CrossChainReceiveCall(SparkCrossChainReceiveRoute Route, BigInteger Amount, uint MaxSlippageBps);
+
+    #endregion
+
     public Task DisconnectAsync()
     {
         Disconnected = true;

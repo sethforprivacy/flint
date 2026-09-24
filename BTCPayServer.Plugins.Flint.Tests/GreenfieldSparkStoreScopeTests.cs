@@ -217,6 +217,21 @@ public class GreenfieldSparkStoreScopeTests
         Assert.Null(h.VictimWallet.StableBalanceActiveLabel);
     }
 
+    [Fact]
+    public async Task Switching_usdc_and_usdt_refuses_a_store_id_that_is_not_the_authorised_store()
+    {
+        // Turning it on would put the victim's checkout on a provider the victim never chose.
+        var h = SparkSurfaceHarness.Create(mainnet: true);
+
+        var read = await h.Api.GetStablecoins(SparkSurfaceHarness.VictimStore, CancellationToken.None);
+        var write = await h.Api.UpdateStablecoins(
+            SparkSurfaceHarness.VictimStore, new SparkStablecoinsInput { Enabled = true }, CancellationToken.None);
+
+        AssertStoreNotFound(read);
+        AssertStoreNotFound(write);
+        Assert.Empty(h.Stablecoins.StoreConfig.Enabled);
+    }
+
     [Theory]
     [InlineData("status")]
     [InlineData("provision")]
@@ -228,6 +243,8 @@ public class GreenfieldSparkStoreScopeTests
     [InlineData("deposit-claim")]
     [InlineData("stable-get")]
     [InlineData("stable-put")]
+    [InlineData("stablecoins-get")]
+    [InlineData("stablecoins-put")]
     public async Task Every_endpoint_refuses_when_no_store_was_authorised_at_all(string endpoint)
     {
         // The other half of the guard: HttpContext carries no authorised store, which is what a future filter
@@ -256,6 +273,10 @@ public class GreenfieldSparkStoreScopeTests
                 SparkSurfaceHarness.AttackerStore, CancellationToken.None),
             "stable-put" => await h.Api.UpdateStableBalance(
                 SparkSurfaceHarness.AttackerStore, new StableBalanceInput(), CancellationToken.None),
+            "stablecoins-get" => await h.Api.GetStablecoins(
+                SparkSurfaceHarness.AttackerStore, CancellationToken.None),
+            "stablecoins-put" => await h.Api.UpdateStablecoins(
+                SparkSurfaceHarness.AttackerStore, new SparkStablecoinsInput { Enabled = true }, CancellationToken.None),
             _ => await h.Api.Sweep(SparkSurfaceHarness.AttackerStore, null, CancellationToken.None)
         };
 
