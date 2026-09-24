@@ -276,7 +276,7 @@ public sealed class SparkSurfaceHarness
         var api = new GreenfieldSparkController(
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
-            depositService, stableBalanceService,
+            depositService, stableBalanceService, stablecoins.Service,
             NullLogger<GreenfieldSparkController>.Instance);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };

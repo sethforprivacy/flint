@@ -832,6 +832,44 @@ public sealed record SparkTokenBalanceData(
 
 #endregion
 
+#region USDC and USDT at checkout
+
+/// <summary>
+/// Response to the USDC and USDT endpoints: whether the store's checkout takes them, received into its Spark wallet
+/// as bitcoin.
+/// </summary>
+public class SparkStablecoinsData
+{
+    /// <summary>Whether this server can offer them at all. Mainnet only; false everywhere else.</summary>
+    public bool Available { get; set; }
+
+    /// <summary>
+    /// Whether new invoices offer them: true while either payment method is configured and not switched off in
+    /// BTCPay's own checkout settings, which the plugin respects rather than overrides.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// The BTCPay payment method ids they are offered as — the ids an invoice's payment-methods endpoint lists them
+    /// under.
+    /// </summary>
+    public IReadOnlyList<string> PaymentMethodIds { get; set; } = [];
+}
+
+/// <summary>The body of <c>PUT .../spark/stablecoins</c>.</summary>
+/// <remarks>
+/// A full replacement, as <c>PUT</c> implies: an omitted <see cref="Enabled"/> means off. Unlike Stable Balance's,
+/// that default moves no money — it stops new invoices offering USDC and USDT, and every quote already shown still
+/// settles.
+/// </remarks>
+public class SparkStablecoinsInput
+{
+    /// <summary>Offer USDC and USDT on new invoices (both, or neither).</summary>
+    public bool Enabled { get; set; }
+}
+
+#endregion
+
 /// <summary>
 /// A cross-chain quote, for a store sweeping to an EVM address.
 /// </summary>
