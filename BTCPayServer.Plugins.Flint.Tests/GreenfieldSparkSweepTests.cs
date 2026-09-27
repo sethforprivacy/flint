@@ -325,8 +325,8 @@ public class GreenfieldSparkSweepTests
         h.Settings.Settings[Store]!.Sweep = new SweepSettings { Enabled = true, BalanceThresholdSats = 1 };
         h.WalletOf(Store).BalanceSats = 1_000;
         var engine = h.SweepEngine;
-        await engine.RunAsync(Store, SweepTrigger.Automatic, CancellationToken.None);
-        await engine.RunAsync(Store, SweepTrigger.Automatic, CancellationToken.None);
+        await engine.RunAsync(Store, SweepTrigger.Automatic, cancellationToken: CancellationToken.None);
+        await engine.RunAsync(Store, SweepTrigger.Automatic, cancellationToken: CancellationToken.None);
 
         var configuration = AssertOk<SparkSweepConfigurationData>(
             await h.Api.GetSweepConfiguration(Store, 0, 25, CancellationToken.None));

@@ -89,7 +89,7 @@ public class SweepTask : IPeriodicTask
     private async Task SweepStoreAsync(string storeId, CancellationToken cancellationToken)
     {
         var result = await _engine
-            .RunAsync(storeId, SweepTrigger.Automatic, cancellationToken)
+            .RunAsync(storeId, SweepTrigger.Automatic, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         // Only the interesting outcomes are logged at Information. A skip is the overwhelmingly common case —

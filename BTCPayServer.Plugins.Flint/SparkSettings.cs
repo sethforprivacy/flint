@@ -663,6 +663,16 @@ public class SweepSettings
     /// </summary>
     public string? StaticAddress { get; set; }
 
+    /// <summary>
+    /// Optional HTTP(S) URL that receives a POST with sweep details after each successful sweep.
+    /// The payload is a JSON object with <c>storeId</c>, <c>idempotencyKey</c>, <c>txId</c>,
+    /// <c>amountSats</c>, <c>feeSats</c>, <c>destination</c>, <c>destinationMode</c>,
+    /// <c>trigger</c>, and <c>completedAt</c>.
+    /// Delivery failures are logged as warnings and never retried; the sweep record is the
+    /// authoritative source of truth.
+    /// </summary>
+    public string? SweepWebhookUrl { get; set; }
+
     #region Cross-chain
 
     /// <summary>
@@ -826,6 +836,7 @@ public class SweepSettings
         EvmChain = EvmChain,
         EvmAsset = EvmAsset,
         CrossChainSlippageBps = CrossChainSlippageBps,
-        CrossChainMinimumStableUnits = CrossChainMinimumStableUnits
+        CrossChainMinimumStableUnits = CrossChainMinimumStableUnits,
+        SweepWebhookUrl = SweepWebhookUrl
     };
 }

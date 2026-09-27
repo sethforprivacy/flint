@@ -1,4 +1,5 @@
 using System.Reflection;
+using Microsoft.AspNetCore.Mvc.Routing;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Plugins.Flint.Controllers;
 using BTCPayServer.Plugins.Flint.Data;
@@ -228,6 +229,8 @@ public class GreenfieldSparkStoreScopeTests
     [InlineData("deposit-claim")]
     [InlineData("stable-get")]
     [InlineData("stable-put")]
+    [InlineData("sync")]
+    [InlineData("sweep-record")]
     public async Task Every_endpoint_refuses_when_no_store_was_authorised_at_all(string endpoint)
     {
         // The other half of the guard: HttpContext carries no authorised store, which is what a future filter
@@ -256,6 +259,8 @@ public class GreenfieldSparkStoreScopeTests
                 SparkSurfaceHarness.AttackerStore, CancellationToken.None),
             "stable-put" => await h.Api.UpdateStableBalance(
                 SparkSurfaceHarness.AttackerStore, new StableBalanceInput(), CancellationToken.None),
+            "sync" => await h.Api.SyncBalance(SparkSurfaceHarness.AttackerStore, CancellationToken.None),
+            "sweep-record" => await h.Api.GetSweepRecord(SparkSurfaceHarness.AttackerStore, "key", CancellationToken.None),
             _ => await h.Api.Sweep(SparkSurfaceHarness.AttackerStore, null, CancellationToken.None)
         };
 
@@ -275,9 +280,13 @@ public class GreenfieldSparkStoreScopeTests
     [Fact]
     public void The_no_authorised_store_theory_covers_every_action_on_the_controller()
     {
+        // Server-level endpoints (no {storeId} in route) do not use ResolveStore and are not
+        // covered by this theory; they are gated by CanModifyServerSettings instead.
         var actions = typeof(GreenfieldSparkController)
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(m => typeof(Task<IActionResult>).IsAssignableFrom(m.ReturnType))
+            .Where(m => m.GetCustomAttributes<HttpMethodAttribute>()
+                .Any(a => a.Template?.Contains("{storeId}", StringComparison.Ordinal) == true))
             .Select(m => m.Name)
             .ToList();
 

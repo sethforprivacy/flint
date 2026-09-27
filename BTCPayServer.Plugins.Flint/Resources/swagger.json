@@ -1,1548 +1,1783 @@
 {
-    "tags": [
-        {
-            "name": "Spark",
-            "description": "Nodeless Lightning for a store, powered by the Breez Spark SDK: set the store's Spark wallet up, read its state, configure automatic on-chain sweeps, and sweep now. Every sweep is a cooperative exit through the Spark service provider; the plugin has no unilateral-exit path."
-        }
-    ],
-    "paths": {
-        "/api/v1/stores/{storeId}/spark": {
-            "get": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Get the store's Spark status",
-                "description": "Whether the store has Spark configured, whether its wallet is running, its indicative balance, its Spark identity, the Spark network's published status, where its seed came from, and what its Lightning payment method currently points at. Answers 200 with `configured: false` for a store that has never set Spark up — that is a state, not an error.",
-                "operationId": "Spark_GetStatus",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "The store's Spark status",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkStatusData"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to view the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, or the request named a store it was not authorised for"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canviewstoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            },
-            "post": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Set the store's Spark wallet up",
-                "description": "Configures the store's Spark wallet from a chosen seed source, confirms the wallet is running, and then points the store's Lightning payment method at it. Calling this on a store that already has Spark configured replaces its seed, carrying over its sweep configuration.\n\n**A generated recovery phrase is returned exactly once, in this response, and never again.** There is no endpoint that reads a seed back. Persist it before doing anything else.\n\nAll three seed sources are gated on the server's hot-wallet policy (`AllowHotWalletForAll`, or being a server administrator) — including reusing the store's existing on-chain seed, because that copies key material into a second wallet.\n\nThe seed is stored encrypted on this server, and whoever operates the server can decrypt it and spend the store's Lightning funds. Provisioning a store here places those funds in the server operator's custody; a tenant who does not operate the server should not put a seed here.",
-                "operationId": "Spark_Provision",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/SparkProvisionRequest"
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "The store is configured. `mnemonic` is set only when `seedSource` was `generate`.",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkProvisionResponse"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden to modify the specified store, or a server administrator has not allowed non-admins to create hot wallets on this server (`hot-wallet-not-allowed`)",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ProblemDetails"
-                                }
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "The store was not found, or the request named a store it was not authorised for"
-                    },
-                    "422": {
-                        "description": "The seed source was not recognised, the recovery phrase was not usable, or the wallet could not be started — in which case nothing was left behind",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ValidationProblemDetails"
-                                }
-                            }
-                        }
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canmodifystoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            },
-            "delete": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Remove the store's Spark wallet",
-                "description": "Destroys this server's copy of the store's Spark keys and clears the store's Lightning payment-method configuration — but only when that configuration still points at this store's Spark wallet. Another Lightning node's connection string is left untouched.\n\nThe SDK storage directory is kept. After this call the merchant's recovery phrase is the only way to reach any remaining funds.",
-                "operationId": "Spark_Remove",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "The store's Spark configuration was removed"
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to modify the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canmodifystoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            }
-        },
-        "/api/v1/stores/{storeId}/spark/sweep": {
-            "get": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Get the store's sweep configuration and history",
-                "description": "The automatic-sweep configuration in force, plus a page of sweep records newest first. The history includes sweeps that did not happen: a `Refused` record carries the stable `refusalCode`, the sentence a merchant would read, and an `attemptCount` — a recurring automatic refusal is folded onto one row per cause per day rather than filed once per pass.",
-                "operationId": "Spark_GetSweepConfiguration",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    },
-                    {
-                        "name": "skip",
-                        "in": "query",
-                        "required": false,
-                        "description": "How many records to skip. Negative values are clamped to zero.",
-                        "schema": {
-                            "type": "integer",
-                            "format": "int32",
-                            "default": 0
-                        }
-                    },
-                    {
-                        "name": "count",
-                        "in": "query",
-                        "required": false,
-                        "description": "How many records to return. Clamped to 1..100.",
-                        "schema": {
-                            "type": "integer",
-                            "format": "int32",
-                            "default": 25
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "The store's sweep configuration and history",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkSweepConfigurationData"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to view the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canviewstoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            },
-            "put": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Replace the store's sweep configuration",
-                "description": "A full replacement: a field the body omits takes its default rather than keeping its current value. Read the configuration first and send it back modified.\n\nValidated by exactly the rules the settings page is validated by. **No configuration accepted here switches the fee guard off** — clearing `maxFeePercent` without setting `maxFeeFlatSats` is refused, a `maxFeeFlatSats` above `minimumSweepSats` is refused, and whatever is stored, the engine applies a hard backstop no configuration can lift at the moment money would move.",
-                "operationId": "Spark_UpdateSweepConfiguration",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/SparkSweepSettings"
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "The configuration now in force, re-read from storage",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkSweepConfigurationData"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to modify the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
-                    },
-                    "422": {
-                        "description": "The configuration was refused and nothing was written",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ValidationProblemDetails"
-                                }
-                            }
-                        }
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canmodifystoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            },
-            "post": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Sweep the store's Spark balance on-chain now, or quote a sweep",
-                "description": "Runs the same engine method the periodic task runs, with the trigger set to manual. A manual trigger relaxes only the automatic-sweep switch and the balance threshold; every safety and economic guard — the minimum sweep, the fee ceiling, the dust floor, the destination rules, the single-flight lock, and the refusal to send while an earlier sweep's fate is unknown — applies identically. The sweep is recorded with its idempotency key before the send.\n\nWith `preview: true` nothing is sent, no address is reserved from the store's wallet, and no record is written; the response is a live quote that expires in about a minute.\n\n**Always a cooperative exit.** No parameter selects a unilateral exit.\n\n**A 200 means the engine reached a decision, not that money moved.** Read `outcome`: only `Swept` means a cooperative exit was accepted. `Refused`, `Skipped` and `InFlight` are routine steady states of an engine designed to decline, so they are not reported as an error status — a store whose fee ceiling sits below the current exit fee stays on `Refused` indefinitely and nothing is wrong.",
-                "operationId": "Spark_Sweep",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/SparkSweepRequest"
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "The engine's decision — a `SparkSweepResultData` for a real sweep, a `SparkSweepPreviewData` when `preview` was true",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "oneOf": [
-                                        {
-                                            "$ref": "#/components/schemas/SparkSweepResultData"
-                                        },
-                                        {
-                                            "$ref": "#/components/schemas/SparkSweepPreviewData"
-                                        }
-                                    ]
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to modify the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canmodifystoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            }
-        },
-        "/api/v1/stores/{storeId}/spark/deposit": {
-            "get": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Get the store's on-chain deposit address and unclaimed deposits",
-                "description": "The static Bitcoin address that tops the store's Spark wallet up, plus anything sent to it that has not been credited. The address is stable across calls and safe to save; it is also the string to render as a QR code, since the plugin returns no image.\n\nFunds credit after **three confirmations**, and only then does Spark attempt the claim — budget half an hour or more, not seconds.\n\n**Read `deposits`, not only `address`.** A claim is capped by a fee ceiling, and a deposit needing more than the ceiling allows is *not* retried at a lower price: it sits unclaimed indefinitely and appears nowhere else. An entry with `isMature: false` is merely waiting for confirmations and needs nobody; one with `needsAttention: true` is stuck and needs the claim endpoint. Spark's own default ceiling of 1 sat/vB is below the mainnet floor essentially always, which is why the plugin overrides it with a rate that tracks the mempool.",
-                "operationId": "Spark_GetDeposits",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "The deposit address and unclaimed deposits",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkDepositData"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to view the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canviewstoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            }
-        },
-        "/api/v1/stores/{storeId}/spark/deposit/claim": {
-            "post": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Claim an on-chain deposit Spark could not claim itself",
-                "description": "Claims one matured deposit whose automatic claim was refused on fee grounds.\n\nOmit `maxFeeSats` for the ordinary case: Spark reports the fee the claim actually needs on the very error that stranded the deposit, and that is what will be used.\n\n**Guarded beyond the store's configured ceiling.** Whatever `maxManualClaimFeeSats` says, the plugin refuses to spend more than half a deposit on claiming it — a rate-based cap knows nothing about the size of the deposit it is paid out of, and this is the only place the two are compared.\n\n**A 200 means the plugin reached a decision, not that a claim was broadcast.** Read `status`: only `Claimed` did anything. A refusal spends nothing and leaves the deposit claimable.",
-                "operationId": "Spark_ClaimDeposit",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/SparkClaimDepositRequest"
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "The plugin's decision",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkClaimDepositResponse"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to modify the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
-                    },
-                    "422": {
-                        "description": "The request did not name a deposit"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canmodifystoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            }
-        },
-        "/api/v1/stores/{storeId}/spark/stable-balance": {
-            "get": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Get the store's Stable Balance configuration and state",
-                "description": "`desiredActive` is what the store asked for; `activeLabel` is what its wallet reports. **The two can legitimately disagree** — Spark caches the active label per wallet, so a store whose recovery phrase was replaced starts deactivated whatever its setting says. The plugin reports the disagreement rather than reconciling it, because converging them converts the merchant's balance. `needsReapply` says when they differ; `PUT` converges them.\n\n`balance.isFreezable` is **true for USDB**: the issuer can freeze it. That is a real counterparty on top of Spark's own operators.\n\nMainnet only; `available` is false everywhere else.",
-                "operationId": "Spark_GetStableBalance",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "The store's Stable Balance state",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkStableBalanceData"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to view the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canviewstoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            },
-            "put": {
-                "tags": [
-                    "Spark"
-                ],
-                "summary": "Replace the store's Stable Balance configuration",
-                "description": "**This moves money.** Enabling queues a conversion of the store's Bitcoin balance into the configured stablecoin; disabling queues the reverse. Both run on Spark's own background worker, both take a spread, and **no SDK event reports either one** — the only way to observe the result is to read this resource again later.\n\nA full replacement, as `PUT` implies: an omitted field takes its default, it does not keep its current value. A `null` or `{}` body therefore means off.\n\n`disclosureAcknowledged` must be true to enable. Holding a store's balance in USDB adds a regulated issuer who can freeze it; the API enforces the same acknowledgement the settings page does, because a disclosure one surface skips is a disclosure with a documented bypass.\n\nMainnet only. Elsewhere this is refused rather than stored, because Spark would accept the configuration and then silently never convert anything.\n\nThe token identifier is checked against Spark before it is stored.",
-                "operationId": "Spark_UpdateStableBalance",
-                "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    }
-                ],
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/StableBalanceInput"
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "The stored configuration and the wallet's state",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SparkStableBalanceData"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "If you are authenticated but forbidden to modify the specified store"
-                    },
-                    "404": {
-                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
-                    },
-                    "422": {
-                        "description": "The configuration was refused, or Spark would not apply it"
-                    }
-                },
-                "security": [
-                    {
-                        "API_Key": [
-                            "btcpay.store.canmodifystoresettings"
-                        ],
-                        "Basic": []
-                    }
-                ]
-            }
-        }
-    },
-    "components": {
-        "schemas": {
-            "SparkStatusData": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "configured": {
-                        "type": "boolean",
-                        "description": "False when this store has never set Spark up. Everything below is then meaningless."
-                    },
-                    "seedSource": {
-                        "$ref": "#/components/schemas/SparkSeedSource"
-                    },
-                    "walletRunning": {
-                        "type": "boolean",
-                        "description": "Whether a Spark wallet is live for this store right now. False while `configured` is true means the store looks set up and takes no payments — a seed the server can no longer decrypt, a second store on the same wallet, or an unsupported chain."
-                    },
-                    "identityPubkey": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The wallet's Spark identity public key, or null when it is not running or has not synced. Public by design — it does publicly link this wallet to anything else sharing its seed."
-                    },
-                    "balanceSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Spark balance in satoshi. **Indicative only**: read from the SDK's cache without forcing a sync, it lags settlement by around 20 seconds and drifts by a few sats around the SDK's background leaf optimisation. Never reconcile against it and never derive an accounting figure from it."
-                    },
-                    "walletError": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Set when the wallet is running but could not be read."
-                    },
-                    "networkStatus": {
-                        "nullable": true,
-                        "allOf": [
-                            {
-                                "$ref": "#/components/schemas/SparkNetworkStatusData"
-                            }
-                        ]
-                    },
-                    "lightningWiring": {
-                        "$ref": "#/components/schemas/SparkLightningWiringState"
-                    },
-                    "lightningEnabledForCheckout": {
-                        "type": "boolean",
-                        "description": "False when a Lightning payment method exists but is excluded from checkout."
-                    },
-                    "storageDirectory": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Absolute path of this store's SDK storage directory on the server. Null unless the caller is a server administrator: it describes the host's filesystem rather than the store, and every role that can view store settings can reach this endpoint."
-                    }
-                }
-            },
-            "SparkNetworkStatusData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "Spark's own published service status. Read without a wallet; null in a response means it could not be read.",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "description": "`Operational`, `Degraded`, `Partial`, `Major` or `Unknown`.",
-                        "example": "Operational"
-                    },
-                    "lastUpdated": {
-                        "type": "string",
-                        "format": "date-time",
-                        "description": "When the Spark operators last published that status."
-                    },
-                    "isOperational": {
-                        "type": "boolean",
-                        "description": "True only for an explicitly operational network. `Unknown` is not treated as healthy."
-                    }
-                }
-            },
-            "SparkProvisionRequest": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "seedSource": {
-                        "type": "string",
-                        "description": "Where the seed comes from. `generate` mints a new phrase and returns it once in the response. `import` uses the phrase in `mnemonic`. `hotWallet` reuses the store's on-chain BTCPay wallet seed, which requires that wallet to be a hot wallet with a stored recovery phrase.",
-                        "enum": [
-                            "generate",
-                            "import",
-                            "hotWallet"
-                        ]
-                    },
-                    "mnemonic": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The BIP39 recovery phrase, for `import` only. Never echoed back — not in a success response, not in a validation error, not in a log line."
-                    }
-                }
-            },
-            "SparkProvisionResponse": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "mnemonic": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The generated recovery phrase — **returned exactly once, here, and never again**. Set only when the request asked for `generate`; null for `import` (you already hold it) and for `hotWallet` (it is the store's on-chain seed, which this API will not hand out). There is no endpoint that reads a seed back, so if this value is not persisted now the store's funds depend entirely on the server's data directory surviving. Do not log it."
-                    },
-                    "status": {
-                        "$ref": "#/components/schemas/SparkStatusData"
-                    }
-                }
-            },
-            "SparkSweepSettings": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "A store's automatic-sweep configuration. Off until a merchant or an API caller opts in.",
-                "properties": {
-                    "enabled": {
-                        "type": "boolean",
-                        "description": "Whether the periodic task may sweep this store. A manual sweep works either way."
-                    },
-                    "balanceThresholdSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Balance at which an automatic sweep is considered. Defaults to 200,000 sat, which makes a default-configured sweep cost roughly 1% in exit fees at regtest fee levels.",
-                        "default": 200000
-                    },
-                    "reserveSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Amount left on Spark after a sweep, to keep receiving cheaply. With `drainWhenSweeping` false the exit fee is charged on top of the swept amount, so the reserve is also what pays it — a reserve smaller than the fee is refused rather than allowed to overdraw.",
-                        "default": 0
-                    },
-                    "minimumSweepSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Smallest amount worth sweeping. A cooperative exit costs a flat fee independent of the amount, so this is the guard against paying 40% of a small balance to move it. Cannot be below the 294 sat on-chain minimum.",
-                        "default": 100000
-                    },
-                    "confirmationSpeed": {
-                        "$ref": "#/components/schemas/SparkSweepConfirmationSpeed"
-                    },
-                    "maxFeePercent": {
-                        "type": "number",
-                        "format": "double",
-                        "description": "Ceiling on the exit fee as a percentage of the amount delivered, 0 to 100. Zero disables the percentage guard, in which case `maxFeeFlatSats` must be set — there is no configuration with no fee ceiling at all.",
-                        "default": 3.0
-                    },
-                    "maxFeeFlatSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Optional absolute ceiling on the exit fee. When both guards are set the stricter one wins. Must not exceed `minimumSweepSats`, otherwise it would permit a sweep costing more than it delivers."
-                    },
-                    "drainWhenSweeping": {
-                        "type": "boolean",
-                        "description": "Take the exit fee out of the swept amount rather than charging it on top. **This is a cooperative exit either way** — it selects the SDK's `FeesIncluded` fee policy and has nothing to do with a unilateral exit, which this plugin does not implement.",
-                        "default": true
-                    },
-                    "destinationMode": {
-                        "$ref": "#/components/schemas/SparkSweepDestinationMode"
-                    },
-                    "staticAddress": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The fixed Bitcoin address used in `StaticAddress` mode, validated against this server's chain on save and again before every send. Cleared when the mode is `StoreWallet`."
-                    },
-                    "evmAddress": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The EVM address a cross-chain sweep delivers to. **An address carries no chain** — Spark's own parser returns no chain id for a bare one — so `evmChain` is a separate choice and getting it wrong sends funds somewhere unreachable."
-                    },
-                    "evmChain": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Destination chain, e.g. `arbitrum`. Checked against the live route table before every sweep."
-                    },
-                    "evmAsset": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Destination asset, e.g. `USDT`. Matched **exactly**: `USDT0` is a different asset and will not be substituted."
-                    },
-                    "crossChainSlippageBps": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Cross-chain slippage in basis points, 10–500. Null uses 50. A *different* setting from the Stable Balance conversion slippage; Spark's own fallback here is 100, which is ten times looser."
-                    },
-                    "crossChainMinimumStableUnits": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Smallest cross-chain sweep to make from a stablecoin balance, in **whole units** of that token — 20 means twenty dollars. Used only when Stable Balance is on, because only then is the amount not in satoshi."
-                    }
-                }
-            },
-            "SparkSweepConfigurationData": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "settings": {
-                        "$ref": "#/components/schemas/SparkSweepSettings"
-                    },
-                    "walletRunning": {
-                        "type": "boolean"
-                    },
-                    "balanceSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Indicative — see `SparkStatusData.balanceSats`."
-                    },
-                    "storeWalletStatus": {
-                        "$ref": "#/components/schemas/SparkSweepAddressStatus"
-                    },
-                    "storeWalletReason": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Why the store's own wallet is not usable as a destination, when it is not."
-                    },
-                    "network": {
-                        "type": "string",
-                        "description": "The chain a static destination address is validated against.",
-                        "example": "Mainnet"
-                    },
-                    "total": {
-                        "type": "integer",
-                        "format": "int32",
-                        "description": "Total number of sweep records for this store."
-                    },
-                    "skip": {
-                        "type": "integer",
-                        "format": "int32",
-                        "description": "The offset actually used, after clamping."
-                    },
-                    "count": {
-                        "type": "integer",
-                        "format": "int32",
-                        "description": "The page size actually used, after clamping."
-                    },
-                    "history": {
-                        "type": "array",
-                        "description": "The requested page of sweep history, newest first.",
-                        "items": {
-                            "$ref": "#/components/schemas/SparkSweepRecordData"
-                        }
-                    }
-                }
-            },
-            "SparkSweepRecordData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "One sweep attempt, including the ones that were refused.",
-                "properties": {
-                    "idempotencyKey": {
-                        "type": "string",
-                        "description": "The UUID this sweep was sent under, which the SDK adopts as its own payment id. Written before the send, which is what makes a crashed sweep resolvable rather than a guess."
-                    },
-                    "destinationAddress": {
-                        "type": "string",
-                        "description": "Where it went. Empty for a refusal that never resolved a destination."
-                    },
-                    "destinationMode": {
-                        "$ref": "#/components/schemas/SparkSweepDestinationMode"
-                    },
-                    "amountSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Amount asked of the SDK. Not necessarily what the destination receives."
-                    },
-                    "recipientAmountSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "What the destination receives, after the fee when `feesIncluded` is true."
-                    },
-                    "feesIncluded": {
-                        "type": "boolean"
-                    },
-                    "confirmationSpeed": {
-                        "$ref": "#/components/schemas/SparkSweepConfirmationSpeed"
-                    },
-                    "quotedFeeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Fee the quote promised when the row was written."
-                    },
-                    "feeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Fee actually paid, or null until Spark reports the payment."
-                    },
-                    "feePercent": {
-                        "type": "number",
-                        "format": "double",
-                        "description": "The fee as a percentage of what the destination receives."
-                    },
-                    "balanceAtDecisionSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "The Spark balance this sweep was decided from, read after an explicit sync."
-                    },
-                    "txId": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "On-chain txid of the cooperative exit, or null until Spark reports one."
-                    },
-                    "trigger": {
-                        "$ref": "#/components/schemas/SparkSweepTrigger"
-                    },
-                    "status": {
-                        "$ref": "#/components/schemas/SparkSweepRecordStatus"
-                    },
-                    "refusalCode": {
-                        "$ref": "#/components/schemas/SparkSweepRefusalCode"
-                    },
-                    "error": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Why this sweep was refused or failed, in words fit for a merchant. Never contains secrets. **Not an identity** — it embeds live figures, so use `refusalCode` to decide whether two refusals are the same refusal."
-                    },
-                    "attemptCount": {
-                        "type": "integer",
-                        "format": "int32",
-                        "description": "How many times this row's outcome has been reached. One for a sweep; more for a recurring refusal, which is folded onto a single row per cause per day."
-                    },
-                    "createdAt": {
-                        "type": "string",
-                        "format": "date-time"
-                    },
-                    "completedAt": {
-                        "type": "string",
-                        "format": "date-time",
-                        "nullable": true
-                    },
-                    "lastSeenAt": {
-                        "type": "string",
-                        "format": "date-time",
-                        "nullable": true,
-                        "description": "When a recurring refusal was last reached. Null while it has only happened once."
-                    },
-                    "destinationKind": {
-                        "$ref": "#/components/schemas/SparkSweepDestinationKind"
-                    },
-                    "amount": {
-                        "type": "string",
-                        "description": "The amount sent, rendered with its own unit. Read this rather than `amountSats`, which is **zero and meaningless** on a sweep funded from a stablecoin balance."
-                    },
-                    "destinationChain": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "destinationAsset": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "provider": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Which bridge provider carried it. Recorded because provider availability is not stable."
-                    },
-                    "providerQuoteId": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The provider's quote id, written before the send. On a token-funded sweep this is the **only** thing identifying the send: Spark rejects an idempotency key on any transfer with a token leg."
-                    },
-                    "idempotencyKeyAccepted": {
-                        "type": "boolean",
-                        "description": "Whether `idempotencyKey` is also a Spark payment id. False when the send had a token leg — looking a payment up by the key would then return nothing, which read as evidence would say the sweep never happened."
-                    },
-                    "sourceTokenIdentifier": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "sourceAmountBaseUnits": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The amount sent in the source token's base units, as a decimal string."
-                    },
-                    "estimatedOutBaseUnits": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "deliveredAmountBaseUnits": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "What actually arrived, in destination-asset base units. Null until the provider reports delivery — which arrives through **no event**."
-                    },
-                    "delivered": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "What arrived, or is expected to, as a readable quantity with its asset."
-                    },
-                    "conversionStatus": {
-                        "$ref": "#/components/schemas/SparkConversionStatus"
-                    }
-                }
-            },
-            "SparkSweepRequest": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "Deliberately carries no amount, destination or fee tier: the engine re-derives those from the store's stored configuration and a live quote, so a request cannot change where a merchant's money goes.",
-                "properties": {
-                    "preview": {
-                        "type": "boolean",
-                        "description": "True to quote the sweep without sending it. A dry run reserves no address and writes no record.",
-                        "default": false
-                    }
-                }
-            },
-            "SparkSweepResultData": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "outcome": {
-                        "$ref": "#/components/schemas/SparkSweepOutcomeKind"
-                    },
-                    "succeeded": {
-                        "type": "boolean",
-                        "description": "True exactly when `outcome` is `Swept`."
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Always set, always fit for a merchant to read."
-                    },
-                    "refusalCode": {
-                        "$ref": "#/components/schemas/SparkSweepRefusalCode"
-                    },
-                    "record": {
-                        "nullable": true,
-                        "description": "The record this pass created or resolved. Null for a `Skipped` outcome, where nothing happened and nothing is written.",
-                        "allOf": [
-                            {
-                                "$ref": "#/components/schemas/SparkSweepRecordData"
-                            }
-                        ]
-                    }
-                }
-            },
-            "SparkSweepPreviewData": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "canSweep": {
-                        "type": "boolean",
-                        "description": "True when the engine would proceed. False means `refusalReason` is set."
-                    },
-                    "refusalReason": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "balanceSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Spark balance the plan was made from, after an explicit sync."
-                    },
-                    "sweepableSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Balance minus the configured reserve, whether or not it is worth sweeping."
-                    },
-                    "amountSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Amount that would be asked of the SDK. Null when there would be no sweep."
-                    },
-                    "recipientAmountSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "What the destination would receive at the store's chosen tier."
-                    },
-                    "destination": {
-                        "nullable": true,
-                        "allOf": [
-                            {
-                                "$ref": "#/components/schemas/SparkSweepDestinationData"
-                            }
-                        ]
-                    },
-                    "quote": {
-                        "nullable": true,
-                        "allOf": [
-                            {
-                                "$ref": "#/components/schemas/SparkSweepQuoteData"
-                            }
-                        ]
-                    },
-                    "settings": {
-                        "$ref": "#/components/schemas/SparkSweepSettings"
-                    },
-                    "crossChainQuote": {
-                        "$ref": "#/components/schemas/SparkCrossChainQuoteData"
-                    },
-                    "amount": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "What would be sent, rendered with its own unit. Read this rather than `amountSats` when Stable Balance may be on."
-                    }
-                }
-            },
-            "SparkSweepDestinationData": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "address": {
-                        "type": "string"
-                    },
-                    "mode": {
-                        "$ref": "#/components/schemas/SparkSweepDestinationMode"
-                    },
-                    "rotates": {
-                        "type": "boolean",
-                        "description": "True when a real sweep would reserve a fresh address rather than reuse this one."
-                    }
-                }
-            },
-            "SparkSweepQuoteData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "A live cooperative-exit quote. **An estimate**: it expires in about a minute, and a real sweep re-quotes and re-checks the fee ceiling against the number it commits to.",
-                "properties": {
-                    "feeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "The fee at the tier the store's configuration selects."
-                    },
-                    "feesIncluded": {
-                        "type": "boolean"
-                    },
-                    "totalDebitedSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "What would leave the Spark balance in total."
-                    },
-                    "feePercentOfRecipientAmount": {
-                        "type": "number",
-                        "format": "double",
-                        "description": "The fee as a percentage of what the destination receives — the number that makes a flat exit fee honest."
-                    },
-                    "slowFeeSats": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "mediumFeeSats": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "fastFeeSats": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "expiresAt": {
-                        "type": "string",
-                        "format": "date-time"
-                    }
-                }
-            },
-            "SparkSeedSource": {
-                "type": "string",
-                "description": "Where a store's Spark seed came from. Reusing the on-chain hot-wallet seed means one compromise reaches both balances, and the Spark identity pubkey publicly links them.",
-                "enum": [
-                    "Generated",
-                    "Imported",
-                    "HotWallet"
-                ]
-            },
-            "SparkLightningWiringState": {
-                "type": "string",
-                "description": "What a store's Lightning payment method points at. `StaleSpark` is this store's Spark wallet under a superseded payment key — still ours, and dead. `OtherStoreSpark` is another store's Spark wallet — refused at save time, and cleared at startup with the victim's payment key rotated.",
-                "enum": [
-                    "StoreNotFound",
-                    "NotConfigured",
-                    "InternalNode",
-                    "OtherNode",
-                    "Spark",
-                    "StaleSpark",
-                    "OtherStoreSpark"
-                ]
-            },
-            "SparkSweepDestinationMode": {
-                "type": "string",
-                "description": "`StoreWallet` takes a fresh, labelled address from the store's BTC derivation scheme and rotates it every sweep. `StaticAddress` uses one fixed address, for stores with no on-chain BTCPay wallet. `EvmAddress` delivers a stablecoin to an address on an EVM chain through a bridge provider; mainnet only, because Spark refuses to start a wallet configured for cross-chain sending on any other network.",
-                "enum": [
-                    "StoreWallet",
-                    "StaticAddress",
-                    "EvmAddress"
-                ]
-            },
-            "SparkSweepConfirmationSpeed": {
-                "type": "string",
-                "description": "Which of the SDK's three cooperative-exit fee tiers to use.",
-                "enum": [
-                    "Slow",
-                    "Medium",
-                    "Fast"
-                ]
-            },
-            "SparkSweepAddressStatus": {
-                "type": "string",
-                "description": "Whether the store has an on-chain BTCPay wallet to sweep into.",
-                "enum": [
-                    "Available",
-                    "NoOnchainWallet",
-                    "Unavailable"
-                ]
-            },
-            "SparkSweepTrigger": {
-                "type": "string",
-                "description": "What set a sweep in motion. Both run the identical engine path.",
-                "enum": [
-                    "Automatic",
-                    "Manual"
-                ]
-            },
-            "SparkSweepRecordStatus": {
-                "type": "string",
-                "description": "`Pending` means the outcome is not yet known and is resolved against the SDK rather than by retrying blind. `Refused` means the plugin declined and nothing was sent.",
-                "enum": [
-                    "Pending",
-                    "Sent",
-                    "Confirmed",
-                    "Failed",
-                    "Refused"
-                ]
-            },
-            "SparkSweepOutcomeKind": {
-                "type": "string",
-                "description": "What one pass of the sweep engine did. Only `Swept` means a cooperative exit was accepted. `Unresolved` means the send's fate is unknown and nothing further will be sent until the SDK answers.",
-                "enum": [
-                    "Swept",
-                    "InFlight",
-                    "Skipped",
-                    "Refused",
-                    "Failed",
-                    "Unresolved"
-                ]
-            },
-            "SparkSweepRefusalCode": {
-                "type": "string",
-                "description": "The stable identity of a reason the plugin declined to sweep. Use this rather than the message, which embeds live figures.",
-                "enum": [
-                    "None",
-                    "WalletNotRunning",
-                    "BalanceUnreadable",
-                    "NothingAboveReserve",
-                    "BelowMinimumSweep",
-                    "NoDestination",
-                    "QuoteFailed",
-                    "InsufficientFunds",
-                    "BelowDustFloor",
-                    "ReserveBelowFee",
-                    "FeeAboveLimit",
-                    "CrossChainUnavailable",
-                    "NoCrossChainRoute",
-                    "CrossChainOverpayExceedsBalance",
-                    "StableBalanceHoldsTheFunds",
-                    "CrossChainQuoteUnusable",
-                    "CrossChainValueUnverifiable"
-                ]
-            },
-            "SparkDepositData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "The store's on-chain deposit address and everything sent to it that has not been credited.",
-                "properties": {
-                    "address": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The static Bitcoin deposit address, or null when it could not be read. Stable across calls and safe to save."
-                    },
-                    "addressError": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Why the address could not be read."
-                    },
-                    "walletRunning": {
-                        "type": "boolean"
-                    },
-                    "deposits": {
-                        "type": "array",
-                        "items": {
-                            "$ref": "#/components/schemas/SparkDepositEntryData"
-                        },
-                        "description": "Unclaimed deposits. Entries with `needsAttention` true are stuck and will never arrive without a claim."
-                    },
-                    "recommendedFees": {
-                        "$ref": "#/components/schemas/SparkRecommendedFeesData"
-                    },
-                    "claimFeeLeewaySatPerVbyte": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Headroom over the network-recommended rate that automatic claims are allowed, after clamping to the plugin's maximum of 100. The plugin configures Spark's ceiling as 'network-recommended plus this', never as a fixed rate — Spark's own default is a fixed 1 sat/vB, below the mainnet floor essentially always. Read-only: there is no endpoint that sets it, and a rate is the only bound on an automatic claim, since Spark offers no cap relative to the size of the deposit."
-                    },
-                    "maxManualClaimFeeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Ceiling on a manual claim, in satoshi. Read-only: there is no endpoint that sets it."
-                    },
-                    "claimPolicyLooksTooLow": {
-                        "type": "boolean",
-                        "description": "True when the configured ceiling already looks too low for the current fee market, so a deposit arriving now may not be claimed automatically."
-                    }
-                }
-            },
-            "SparkDepositEntryData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "One on-chain deposit Spark knows about and has not credited.",
-                "properties": {
-                    "txId": {
-                        "type": "string"
-                    },
-                    "vout": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "amountSats": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "isMature": {
-                        "type": "boolean",
-                        "description": "False while the deposit is still waiting for its third confirmation. Nothing needs doing."
-                    },
-                    "needsAttention": {
-                        "type": "boolean",
-                        "description": "True when the deposit has matured and its claim failed. Spark will not retry it."
-                    },
-                    "claimError": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Why the claim failed."
-                    },
-                    "requiredFeeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "What the claim would actually cost. The value the claim endpoint uses when none is supplied."
-                    },
-                    "requiredFeeRateSatPerVbyte": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true
-                    }
-                }
-            },
-            "SparkRecommendedFeesData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "Mempool fee rates in sat/vB.",
-                "properties": {
-                    "fastestFee": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "halfHourFee": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "hourFee": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "economyFee": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "minimumFee": {
-                        "type": "integer",
-                        "format": "int64"
-                    }
-                }
-            },
-            "SparkClaimDepositRequest": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "Which deposit to claim, and at what ceiling.",
-                "properties": {
-                    "txId": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "Transaction id of the deposit, as reported by the deposit endpoint."
-                    },
-                    "vout": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Output index of the deposit."
-                    },
-                    "maxFeeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Ceiling for this claim, in satoshi. Omit to use the fee Spark said the claim needs — the right answer almost always. No value lifts the backstop that refuses to spend more than half a deposit on claiming it."
-                    }
-                }
-            },
-            "SparkClaimDepositResponse": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "The plugin's decision about a manual claim. Only `Claimed` broadcast anything.",
-                "properties": {
-                    "status": {
-                        "$ref": "#/components/schemas/SparkClaimStatus"
-                    },
-                    "succeeded": {
-                        "type": "boolean",
-                        "description": "True exactly when `status` is `Claimed`."
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Always set, always fit for a merchant to read."
-                    },
-                    "feeSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "The ceiling the claim was issued at."
-                    }
-                }
-            },
-            "SparkStableBalanceData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "The store's Stable Balance configuration and what its wallet is actually doing.",
-                "properties": {
-                    "desiredActive": {
-                        "type": "boolean",
-                        "description": "What the store asked for."
-                    },
-                    "activeLabel": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The label the wallet reports as active, or null when stable balance is off there. **This, not `desiredActive`, is what the wallet is doing.**"
-                    },
-                    "needsReapply": {
-                        "type": "boolean",
-                        "description": "True when the setting and the wallet disagree. Reported rather than reconciled, because converging them converts the balance."
-                    },
-                    "available": {
-                        "type": "boolean",
-                        "description": "False on any network but mainnet, where the feature cannot work at all."
-                    },
-                    "walletRunning": {
-                        "type": "boolean"
-                    },
-                    "walletError": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "balance": {
-                        "$ref": "#/components/schemas/SparkTokenBalanceData"
-                    },
-                    "conversionMinimumSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Spark's own floor on a Bitcoin-to-token conversion. A configured `autoConvertThresholdSats` below this is clamped *up* to it rather than honoured."
-                    },
-                    "settings": {
-                        "$ref": "#/components/schemas/StableBalanceInput"
-                    },
-                    "message": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "What the last write did, when this is a write's response."
-                    }
-                }
-            },
-            "SparkTokenBalanceData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "A token balance the wallet holds.",
-                "properties": {
-                    "identifier": {
-                        "type": "string"
-                    },
-                    "ticker": {
-                        "type": "string"
-                    },
-                    "name": {
-                        "type": "string"
-                    },
-                    "baseUnits": {
-                        "type": "string",
-                        "description": "**Base units as a decimal string, not satoshi and not a quantity.** $35.60 of a 6-decimal token is `\"35600000\"`. A string because the value is a u128 and an 18-decimal token overflows every JSON number a client is likely to parse it into."
-                    },
-                    "amount": {
-                        "type": "string",
-                        "description": "The same figure as a human-readable quantity, e.g. `35.6`."
-                    },
-                    "decimals": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "isFreezable": {
-                        "type": "boolean",
-                        "description": "Whether the issuer can freeze this balance. **True for USDB.** The counterparty risk a merchant accepts by holding one."
-                    }
-                }
-            },
-            "StableBalanceInput": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "A store's Stable Balance configuration. A `PUT` replaces the whole thing.",
-                "properties": {
-                    "enabled": {
-                        "type": "boolean",
-                        "description": "Whether the store wants its balance held in a stablecoin. Changing this converts the balance, in the background, with nothing to report when it finishes."
-                    },
-                    "disclosureAcknowledged": {
-                        "type": "boolean",
-                        "description": "Confirmation that the freezable-issuer warning has been read. **Required to enable.**"
-                    },
-                    "tokenIdentifier": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The token identifier. Defaults to mainnet USDB, which the plugin supplies because Spark ships no default for it. Checked against Spark before it is stored."
-                    },
-                    "label": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The label the wallet activates by. An arbitrary display string with no protocol meaning — not a ticker and not the identifier."
-                    },
-                    "maxSlippageBps": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Conversion slippage tolerance in basis points; Spark's own default is 10. A *different* setting from the cross-chain slippage on the sweep configuration, which defaults to 100 if unset."
-                    },
-                    "autoConvertThresholdSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "nullable": true,
-                        "description": "Balance at which Spark auto-converts. Null leaves Spark's own minimum in force; a value below that minimum is raised to it rather than honoured."
-                    }
-                }
-            },
-            "SparkCrossChainQuoteData": {
-                "type": "object",
-                "additionalProperties": false,
-                "description": "A live cross-chain quote. **An estimate**: it expires in about a minute, and a real sweep re-quotes and re-checks the fee ceiling against the number it commits to. There is **no arrival estimate** — Spark exposes none, so nothing here can offer one.",
-                "properties": {
-                    "provider": {
-                        "type": "string",
-                        "description": "Which bridge provider would carry it, e.g. `Orchestra`."
-                    },
-                    "chain": {
-                        "type": "string"
-                    },
-                    "chainId": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "asset": {
-                        "type": "string"
-                    },
-                    "assetDecimals": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "Read from the route rather than assumed: 6 on every Orchestra USDT route except BSC, which is 18."
-                    },
-                    "amountInSats": {
-                        "type": "integer",
-                        "format": "int64",
-                        "description": "**Larger than the amount being sent.** The provider overpays the source leg to absorb its fee and slippage, so a sweep sized to exactly the sweepable balance cannot be funded. The pad is not derivable from a slippage setting; read it here."
-                    },
-                    "assetAmountIn": {
-                        "type": "string",
-                        "description": "Gross destination-asset base units, as a decimal string."
-                    },
-                    "estimatedOut": {
-                        "type": "string",
-                        "description": "Destination-asset base units expected to arrive, as a decimal string."
-                    },
-                    "estimatedOutAmount": {
-                        "type": "string",
-                        "description": "The same figure as a readable quantity with its asset."
-                    },
-                    "feeAmount": {
-                        "type": "string",
-                        "description": "In **destination-asset base units**, not satoshi."
-                    },
-                    "serviceFeeAmount": {
-                        "type": "string",
-                        "description": "In `serviceFeeAsset`'s base units — which may be a *third* asset again; USDC was observed on a USDT route. Do not add this to `feeAmount`."
-                    },
-                    "serviceFeeAsset": {
-                        "type": "string",
-                        "nullable": true
-                    },
-                    "sourceTransferFeeSats": {
-                        "type": "integer",
-                        "format": "int64"
-                    },
-                    "expiresAt": {
-                        "type": "string",
-                        "format": "date-time"
-                    },
-                    "providerQuoteId": {
-                        "type": "string",
-                        "nullable": true,
-                        "description": "The provider's own quote id, persisted before the send. On a sweep funded from a stablecoin balance this is the only thing that identifies the send afterwards."
-                    }
-                }
-            },
-            "SparkClaimStatus": {
-                "type": "string",
-                "description": "`Claimed` broadcast a claim. `Refused` means the plugin declined and spent nothing. `Failed` means Spark attempted it and reported an error. `Unavailable` means the store has no running wallet.",
-                "enum": [
-                    "Claimed",
-                    "Unavailable",
-                    "Refused",
-                    "Failed"
-                ]
-            },
-            "SparkConversionStatus": {
-                "type": "string",
-                "description": "How far a bridge provider or conversion has got. **No SDK event reports any transition here** — every value is discovered by polling. `RefundNeeded` is the one that needs a human: Spark is holding funds it could not convert, and the plugin requests a refund on the next sweep pass.",
-                "enum": [
-                    "Pending",
-                    "Completed",
-                    "Failed",
-                    "RefundNeeded",
-                    "Refunded",
-                    "Unknown"
-                ]
-            },
-            "SparkSweepDestinationKind": {
-                "type": "string",
-                "description": "Which rail a sweep used. `BitcoinAddress` is a cooperative exit; `EvmAddress` is a cross-chain send through a bridge provider — still an ordinary Spark transfer at the point money leaves the wallet, so there is no unilateral exit either way.",
-                "enum": [
-                    "BitcoinAddress",
-                    "EvmAddress"
-                ]
-            }
-        }
+  "tags": [
+    {
+      "name": "Spark",
+      "description": "Nodeless Lightning for a store, powered by the Breez Spark SDK: set the store's Spark wallet up, read its state, configure automatic on-chain sweeps, and sweep now. Every sweep is a cooperative exit through the Spark service provider; the plugin has no unilateral-exit path."
     }
+  ],
+  "paths": {
+    "/api/v1/stores/{storeId}/spark": {
+      "get": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Get the store's Spark status",
+        "description": "Whether the store has Spark configured, whether its wallet is running, its indicative balance, its Spark identity, the Spark network's published status, where its seed came from, and what its Lightning payment method currently points at. Answers 200 with `configured: false` for a store that has never set Spark up — that is a state, not an error.",
+        "operationId": "Spark_GetStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The store's Spark status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkStatusData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to view the specified store"
+          },
+          "404": {
+            "description": "The store was not found, or the request named a store it was not authorised for"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canviewstoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Set the store's Spark wallet up",
+        "description": "Configures the store's Spark wallet from a chosen seed source, confirms the wallet is running, and then points the store's Lightning payment method at it. Calling this on a store that already has Spark configured replaces its seed, carrying over its sweep configuration.\n\n**A generated recovery phrase is returned exactly once, in this response, and never again.** There is no endpoint that reads a seed back. Persist it before doing anything else.\n\nAll three seed sources are gated on the server's hot-wallet policy (`AllowHotWalletForAll`, or being a server administrator) — including reusing the store's existing on-chain seed, because that copies key material into a second wallet.",
+        "operationId": "Spark_Provision",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SparkProvisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The store is configured. `mnemonic` is set only when `seedSource` was `generate`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkProvisionResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden to modify the specified store, or a server administrator has not allowed non-admins to create hot wallets on this server (`hot-wallet-not-allowed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The store was not found, or the request named a store it was not authorised for"
+          },
+          "422": {
+            "description": "The seed source was not recognised, the recovery phrase was not usable, or the wallet could not be started — in which case nothing was left behind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Remove the store's Spark wallet",
+        "description": "Destroys this server's copy of the store's Spark keys and clears the store's Lightning payment-method configuration — but only when that configuration still points at this store's Spark wallet. Another Lightning node's connection string is left untouched.\n\nThe SDK storage directory is kept. After this call the merchant's recovery phrase is the only way to reach any remaining funds.",
+        "operationId": "Spark_Remove",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The store's Spark configuration was removed"
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stores/{storeId}/spark/sweep": {
+      "get": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Get the store's sweep configuration and history",
+        "description": "The automatic-sweep configuration in force, plus a page of sweep records newest first. The history includes sweeps that did not happen: a `Refused` record carries the stable `refusalCode`, the sentence a merchant would read, and an `attemptCount` — a recurring automatic refusal is folded onto one row per cause per day rather than filed once per pass.",
+        "operationId": "Spark_GetSweepConfiguration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          },
+          {
+            "name": "skip",
+            "in": "query",
+            "required": false,
+            "description": "How many records to skip. Negative values are clamped to zero.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 0
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "required": false,
+            "description": "How many records to return. Clamped to 1..100.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 25
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The store's sweep configuration and history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkSweepConfigurationData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to view the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canviewstoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Replace the store's sweep configuration",
+        "description": "A full replacement: a field the body omits takes its default rather than keeping its current value. Read the configuration first and send it back modified.\n\nValidated by exactly the rules the settings page is validated by. **No configuration accepted here switches the fee guard off** — clearing `maxFeePercent` without setting `maxFeeFlatSats` is refused, a `maxFeeFlatSats` above `minimumSweepSats` is refused, and whatever is stored, the engine applies a hard backstop no configuration can lift at the moment money would move.",
+        "operationId": "Spark_UpdateSweepConfiguration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SparkSweepSettings"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The configuration now in force, re-read from storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkSweepConfigurationData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
+          },
+          "422": {
+            "description": "The configuration was refused and nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Sweep the store's Spark balance on-chain now, or quote a sweep",
+        "description": "Runs the same engine method the periodic task runs, with the trigger set to manual. A manual trigger relaxes only the automatic-sweep switch and the balance threshold; every safety and economic guard — the minimum sweep, the fee ceiling, the dust floor, the destination rules, the single-flight lock, and the refusal to send while an earlier sweep's fate is unknown — applies identically. The sweep is recorded with its idempotency key before the send.\n\nWith `preview: true` nothing is sent, no address is reserved from the store's wallet, and no record is written; the response is a live quote that expires in about a minute.\n\n**Always a cooperative exit.** No parameter selects a unilateral exit.\n\n**A 200 means the engine reached a decision, not that money moved.** Read `outcome`: only `Swept` means a cooperative exit was accepted. `Refused`, `Skipped` and `InFlight` are routine steady states of an engine designed to decline, so they are not reported as an error status — a store whose fee ceiling sits below the current exit fee stays on `Refused` indefinitely and nothing is wrong.",
+        "operationId": "Spark_Sweep",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SparkSweepRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The engine's decision — a `SparkSweepResultData` for a real sweep, a `SparkSweepPreviewData` when `preview` was true",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/SparkSweepResultData"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SparkSweepPreviewData"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store (`spark-not-configured`)"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stores/{storeId}/spark/deposit": {
+      "get": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Get the store's on-chain deposit address and unclaimed deposits",
+        "description": "The static Bitcoin address that tops the store's Spark wallet up, plus anything sent to it that has not been credited. The address is stable across calls and safe to save; it is also the string to render as a QR code, since the plugin returns no image.\n\nFunds credit after **three confirmations**, and only then does Spark attempt the claim — budget half an hour or more, not seconds.\n\n**Read `deposits`, not only `address`.** A claim is capped by a fee ceiling, and a deposit needing more than the ceiling allows is *not* retried at a lower price: it sits unclaimed indefinitely and appears nowhere else. An entry with `isMature: false` is merely waiting for confirmations and needs nobody; one with `needsAttention: true` is stuck and needs the claim endpoint. Spark's own default ceiling of 1 sat/vB is below the mainnet floor essentially always, which is why the plugin overrides it with a rate that tracks the mempool.",
+        "operationId": "Spark_GetDeposits",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The deposit address and unclaimed deposits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkDepositData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to view the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canviewstoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stores/{storeId}/spark/deposit/claim": {
+      "post": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Claim an on-chain deposit Spark could not claim itself",
+        "description": "Claims one matured deposit whose automatic claim was refused on fee grounds.\n\nOmit `maxFeeSats` for the ordinary case: Spark reports the fee the claim actually needs on the very error that stranded the deposit, and that is what will be used.\n\n**Guarded beyond the store's configured ceiling.** Whatever `maxManualClaimFeeSats` says, the plugin refuses to spend more than half a deposit on claiming it — a rate-based cap knows nothing about the size of the deposit it is paid out of, and this is the only place the two are compared.\n\n**A 200 means the plugin reached a decision, not that a claim was broadcast.** Read `status`: only `Claimed` did anything. A refusal spends nothing and leaves the deposit claimable.",
+        "operationId": "Spark_ClaimDeposit",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SparkClaimDepositRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The plugin's decision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkClaimDepositResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
+          },
+          "422": {
+            "description": "The request did not name a deposit"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stores/{storeId}/spark/stable-balance": {
+      "get": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Get the store's Stable Balance configuration and state",
+        "description": "`desiredActive` is what the store asked for; `activeLabel` is what its wallet reports. **The two can legitimately disagree** — Spark caches the active label per wallet, so a store whose recovery phrase was replaced starts deactivated whatever its setting says. The plugin reports the disagreement rather than reconciling it, because converging them converts the merchant's balance. `needsReapply` says when they differ; `PUT` converges them.\n\n`balance.isFreezable` is **true for USDB**: the issuer can freeze it. That is a real counterparty on top of Spark's own operators.\n\nMainnet only; `available` is false everywhere else.",
+        "operationId": "Spark_GetStableBalance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The store's Stable Balance state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkStableBalanceData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to view the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canviewstoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Replace the store's Stable Balance configuration",
+        "description": "**This moves money.** Enabling queues a conversion of the store's Bitcoin balance into the configured stablecoin; disabling queues the reverse. Both run on Spark's own background worker, both take a spread, and **no SDK event reports either one** — the only way to observe the result is to read this resource again later.\n\nA full replacement, as `PUT` implies: an omitted field takes its default, it does not keep its current value. A `null` or `{}` body therefore means off.\n\n`disclosureAcknowledged` must be true to enable. Holding a store's balance in USDB adds a regulated issuer who can freeze it; the API enforces the same acknowledgement the settings page does, because a disclosure one surface skips is a disclosure with a documented bypass.\n\nMainnet only. Elsewhere this is refused rather than stored, because Spark would accept the configuration and then silently never convert anything.\n\nThe token identifier is checked against Spark before it is stored.",
+        "operationId": "Spark_UpdateStableBalance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StableBalanceInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored configuration and the wallet's state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkStableBalanceData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for it"
+          },
+          "422": {
+            "description": "The configuration was refused, or Spark would not apply it"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stores/{storeId}/spark/sync": {
+      "post": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Force a wallet sync and return the current balance",
+        "description": "The status endpoint caches balance for up to 20 seconds. `POST /spark/sync` forces an explicit sync before reading — use it when you need the current balance immediately rather than a cached value. `walletRunning: false` means no Spark wallet is live for this store; `balanceSats` will be 0 in that case.",
+        "operationId": "Spark_SyncBalance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The balance after a forced wallet sync",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkBalanceSyncData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canmodifystoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}": {
+      "get": {
+        "summary": "Get a sweep record by its idempotency key",
+        "description": "Returns the record for a single sweep, identified by the idempotency key the engine assigned it when the sweep was initiated.",
+        "operationId": "Spark_GetSweepRecord",
+        "tags": [
+          "Spark"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StoreId"
+          },
+          {
+            "name": "idempotencyKey",
+            "in": "path",
+            "required": true,
+            "description": "The idempotency key returned in `idempotencyKey` on the sweep result.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sweep record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkSweepRecordData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to view the specified store"
+          },
+          "404": {
+            "description": "The store was not found, the request named a store it was not authorised for, Spark is not set up for this store (`spark-not-configured`), or no sweep record with that idempotency key exists (`sweep-record-not-found`)"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.store.canviewstoresettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    },
+    "/api/v1/server/spark": {
+      "get": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Get Flint server-level settings",
+        "description": "Returns the server-level Flint configuration shared across all stores on this BTCPay instance. Currently contains the `updateWebhookUrl` for plugin update notifications.",
+        "operationId": "Spark_GetServerSettings",
+        "responses": {
+          "200": {
+            "description": "The server-level Flint settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkServerSettingsData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify server settings"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.server.canmodifyserversettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Update Flint server-level settings",
+        "description": "Replaces the server-level Flint configuration. Set `updateWebhookUrl` to an http/https URL to receive a `plugin.update-available` notification when a new Flint version is detected on the plugin registry (checked once per day). Clear it by sending `null` or an empty string.",
+        "operationId": "Spark_UpdateServerSettings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SparkServerSettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored server-level settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkServerSettingsData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify server settings"
+          },
+          "422": {
+            "description": "The update webhook URL is not a valid http/https URL"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.server.canmodifyserversettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SparkStatusData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "False when this store has never set Spark up. Everything below is then meaningless."
+          },
+          "seedSource": {
+            "$ref": "#/components/schemas/SparkSeedSource"
+          },
+          "walletRunning": {
+            "type": "boolean",
+            "description": "Whether a Spark wallet is live for this store right now. False while `configured` is true means the store looks set up and takes no payments — a seed the server can no longer decrypt, a second store on the same wallet, or an unsupported chain."
+          },
+          "identityPubkey": {
+            "type": "string",
+            "nullable": true,
+            "description": "The wallet's Spark identity public key, or null when it is not running or has not synced. Public by design — it does publicly link this wallet to anything else sharing its seed."
+          },
+          "balanceSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Spark balance in satoshi. **Indicative only**: read from the SDK's cache without forcing a sync, it lags settlement by around 20 seconds and drifts by a few sats around the SDK's background leaf optimisation. Never reconcile against it and never derive an accounting figure from it."
+          },
+          "walletError": {
+            "type": "string",
+            "nullable": true,
+            "description": "Set when the wallet is running but could not be read."
+          },
+          "networkStatus": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SparkNetworkStatusData"
+              }
+            ]
+          },
+          "lightningWiring": {
+            "$ref": "#/components/schemas/SparkLightningWiringState"
+          },
+          "lightningEnabledForCheckout": {
+            "type": "boolean",
+            "description": "False when a Lightning payment method exists but is excluded from checkout."
+          },
+          "storageDirectory": {
+            "type": "string",
+            "nullable": true,
+            "description": "Absolute path of this store's SDK storage directory on the server. Null unless the caller is a server administrator: it describes the host's filesystem rather than the store, and every role that can view store settings can reach this endpoint."
+          }
+        }
+      },
+      "SparkNetworkStatusData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Spark's own published service status. Read without a wallet; null in a response means it could not be read.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`Operational`, `Degraded`, `Partial`, `Major` or `Unknown`.",
+            "example": "Operational"
+          },
+          "lastUpdated": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the Spark operators last published that status."
+          },
+          "isOperational": {
+            "type": "boolean",
+            "description": "True only for an explicitly operational network. `Unknown` is not treated as healthy."
+          }
+        }
+      },
+      "SparkProvisionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "seedSource": {
+            "type": "string",
+            "description": "Where the seed comes from. `generate` mints a new phrase and returns it once in the response. `import` uses the phrase in `mnemonic`. `hotWallet` reuses the store's on-chain BTCPay wallet seed, which requires that wallet to be a hot wallet with a stored recovery phrase.",
+            "enum": [
+              "generate",
+              "import",
+              "hotWallet"
+            ]
+          },
+          "mnemonic": {
+            "type": "string",
+            "nullable": true,
+            "description": "The BIP39 recovery phrase, for `import` only. Never echoed back — not in a success response, not in a validation error, not in a log line."
+          }
+        }
+      },
+      "SparkProvisionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mnemonic": {
+            "type": "string",
+            "nullable": true,
+            "description": "The generated recovery phrase — **returned exactly once, here, and never again**. Set only when the request asked for `generate`; null for `import` (you already hold it) and for `hotWallet` (it is the store's on-chain seed, which this API will not hand out). There is no endpoint that reads a seed back, so if this value is not persisted now the store's funds depend entirely on the server's data directory surviving. Do not log it."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SparkStatusData"
+          }
+        }
+      },
+      "SparkSweepSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A store's automatic-sweep configuration. Off until a merchant or an API caller opts in.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the periodic task may sweep this store. A manual sweep works either way."
+          },
+          "balanceThresholdSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Balance at which an automatic sweep is considered. Defaults to 200,000 sat, which makes a default-configured sweep cost roughly 1% in exit fees at regtest fee levels.",
+            "default": 200000
+          },
+          "reserveSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Amount left on Spark after a sweep, to keep receiving cheaply. With `drainWhenSweeping` false the exit fee is charged on top of the swept amount, so the reserve is also what pays it — a reserve smaller than the fee is refused rather than allowed to overdraw.",
+            "default": 0
+          },
+          "minimumSweepSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Smallest amount worth sweeping. A cooperative exit costs a flat fee independent of the amount, so this is the guard against paying 40% of a small balance to move it. Cannot be below the 294 sat on-chain minimum.",
+            "default": 100000
+          },
+          "confirmationSpeed": {
+            "$ref": "#/components/schemas/SparkSweepConfirmationSpeed"
+          },
+          "maxFeePercent": {
+            "type": "number",
+            "format": "double",
+            "description": "Ceiling on the exit fee as a percentage of the amount delivered, 0 to 100. Zero disables the percentage guard, in which case `maxFeeFlatSats` must be set — there is no configuration with no fee ceiling at all.",
+            "default": 3.0
+          },
+          "maxFeeFlatSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Optional absolute ceiling on the exit fee. When both guards are set the stricter one wins. Must not exceed `minimumSweepSats`, otherwise it would permit a sweep costing more than it delivers."
+          },
+          "drainWhenSweeping": {
+            "type": "boolean",
+            "description": "Take the exit fee out of the swept amount rather than charging it on top. **This is a cooperative exit either way** — it selects the SDK's `FeesIncluded` fee policy and has nothing to do with a unilateral exit, which this plugin does not implement.",
+            "default": true
+          },
+          "destinationMode": {
+            "$ref": "#/components/schemas/SparkSweepDestinationMode"
+          },
+          "staticAddress": {
+            "type": "string",
+            "nullable": true,
+            "description": "The fixed Bitcoin address used in `StaticAddress` mode, validated against this server's chain on save and again before every send. Cleared when the mode is `StoreWallet`."
+          },
+          "evmAddress": {
+            "type": "string",
+            "nullable": true,
+            "description": "The EVM address a cross-chain sweep delivers to. **An address carries no chain** — Spark's own parser returns no chain id for a bare one — so `evmChain` is a separate choice and getting it wrong sends funds somewhere unreachable."
+          },
+          "evmChain": {
+            "type": "string",
+            "nullable": true,
+            "description": "Destination chain, e.g. `arbitrum`. Checked against the live route table before every sweep."
+          },
+          "evmAsset": {
+            "type": "string",
+            "nullable": true,
+            "description": "Destination asset, e.g. `USDT`. Matched **exactly**: `USDT0` is a different asset and will not be substituted."
+          },
+          "crossChainSlippageBps": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Cross-chain slippage in basis points, 10–500. Null uses 50. A *different* setting from the Stable Balance conversion slippage; Spark's own fallback here is 100, which is ten times looser."
+          },
+          "crossChainMinimumStableUnits": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Smallest cross-chain sweep to make from a stablecoin balance, in **whole units** of that token — 20 means twenty dollars. Used only when Stable Balance is on, because only then is the amount not in satoshi."
+          },
+          "sweepWebhookUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional HTTP(S) URL that receives a POST after each successful sweep. The payload includes `storeId`, `idempotencyKey`, `txId`, `amountSats`, `feeSats`, `destination`, `destinationMode`, `trigger`, and `completedAt`. Delivery failures are logged and never retried."
+          }
+        }
+      },
+      "SparkSweepConfigurationData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "settings": {
+            "$ref": "#/components/schemas/SparkSweepSettings"
+          },
+          "walletRunning": {
+            "type": "boolean"
+          },
+          "balanceSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Indicative — see `SparkStatusData.balanceSats`."
+          },
+          "storeWalletStatus": {
+            "$ref": "#/components/schemas/SparkSweepAddressStatus"
+          },
+          "storeWalletReason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why the store's own wallet is not usable as a destination, when it is not."
+          },
+          "network": {
+            "type": "string",
+            "description": "The chain a static destination address is validated against.",
+            "example": "Mainnet"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total number of sweep records for this store."
+          },
+          "skip": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The offset actually used, after clamping."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The page size actually used, after clamping."
+          },
+          "history": {
+            "type": "array",
+            "description": "The requested page of sweep history, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/SparkSweepRecordData"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "description": "Advisory warnings about the current sweep configuration. On mainnet, entries appear when the balance threshold or minimum sweep amount are below the recommended defaults (which were measured on regtest).",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SparkSweepRecordData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One sweep attempt, including the ones that were refused.",
+        "properties": {
+          "idempotencyKey": {
+            "type": "string",
+            "description": "The UUID this sweep was sent under, which the SDK adopts as its own payment id. Written before the send, which is what makes a crashed sweep resolvable rather than a guess."
+          },
+          "destinationAddress": {
+            "type": "string",
+            "description": "Where it went. Empty for a refusal that never resolved a destination."
+          },
+          "destinationMode": {
+            "$ref": "#/components/schemas/SparkSweepDestinationMode"
+          },
+          "amountSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Amount asked of the SDK. Not necessarily what the destination receives."
+          },
+          "recipientAmountSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What the destination receives, after the fee when `feesIncluded` is true."
+          },
+          "feesIncluded": {
+            "type": "boolean"
+          },
+          "confirmationSpeed": {
+            "$ref": "#/components/schemas/SparkSweepConfirmationSpeed"
+          },
+          "quotedFeeSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Fee the quote promised when the row was written."
+          },
+          "feeSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Fee actually paid, or null until Spark reports the payment."
+          },
+          "feePercent": {
+            "type": "number",
+            "format": "double",
+            "description": "The fee as a percentage of what the destination receives."
+          },
+          "balanceAtDecisionSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The Spark balance this sweep was decided from, read after an explicit sync."
+          },
+          "txId": {
+            "type": "string",
+            "nullable": true,
+            "description": "On-chain txid of the cooperative exit, or null until Spark reports one."
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/SparkSweepTrigger"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SparkSweepRecordStatus"
+          },
+          "refusalCode": {
+            "$ref": "#/components/schemas/SparkSweepRefusalCode"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why this sweep was refused or failed, in words fit for a merchant. Never contains secrets. **Not an identity** — it embeds live figures, so use `refusalCode` to decide whether two refusals are the same refusal."
+          },
+          "attemptCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times this row's outcome has been reached. One for a sweep; more for a recurring refusal, which is folded onto a single row per cause per day."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When a recurring refusal was last reached. Null while it has only happened once."
+          },
+          "destinationKind": {
+            "$ref": "#/components/schemas/SparkSweepDestinationKind"
+          },
+          "amount": {
+            "type": "string",
+            "description": "The amount sent, rendered with its own unit. Read this rather than `amountSats`, which is **zero and meaningless** on a sweep funded from a stablecoin balance."
+          },
+          "destinationChain": {
+            "type": "string",
+            "nullable": true
+          },
+          "destinationAsset": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider": {
+            "type": "string",
+            "nullable": true,
+            "description": "Which bridge provider carried it. Recorded because provider availability is not stable."
+          },
+          "providerQuoteId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The provider's quote id, written before the send. On a token-funded sweep this is the **only** thing identifying the send: Spark rejects an idempotency key on any transfer with a token leg."
+          },
+          "idempotencyKeyAccepted": {
+            "type": "boolean",
+            "description": "Whether `idempotencyKey` is also a Spark payment id. False when the send had a token leg — looking a payment up by the key would then return nothing, which read as evidence would say the sweep never happened."
+          },
+          "sourceTokenIdentifier": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourceAmountBaseUnits": {
+            "type": "string",
+            "nullable": true,
+            "description": "The amount sent in the source token's base units, as a decimal string."
+          },
+          "estimatedOutBaseUnits": {
+            "type": "string",
+            "nullable": true
+          },
+          "deliveredAmountBaseUnits": {
+            "type": "string",
+            "nullable": true,
+            "description": "What actually arrived, in destination-asset base units. Null until the provider reports delivery — which arrives through **no event**."
+          },
+          "delivered": {
+            "type": "string",
+            "nullable": true,
+            "description": "What arrived, or is expected to, as a readable quantity with its asset."
+          },
+          "conversionStatus": {
+            "$ref": "#/components/schemas/SparkConversionStatus"
+          }
+        }
+      },
+      "SparkSweepRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Deliberately carries no amount or fee tier: the engine re-derives those from the store's stored configuration and a live quote, so a request cannot change what a merchant's sweep costs. Destination and force are opt-in overrides: omit them to use the store's configured destination and minimum sweep amount.",
+        "properties": {
+          "preview": {
+            "type": "boolean",
+            "description": "True to quote the sweep without sending it. A dry run reserves no address and writes no record.",
+            "default": false
+          },
+          "force": {
+            "default": false,
+            "description": "True to send the sweep even if the balance is below the configured minimum sweep amount. The absolute on-chain protocol minimum still applies.",
+            "type": "boolean"
+          },
+          "destinationAddress": {
+            "description": "A Bitcoin address to send this sweep to, overriding the store's configured sweep destination. Must be a valid address on the server's chain. Not supported for EVM cross-chain sweeps.",
+            "nullable": true,
+            "type": "string"
+          }
+        }
+      },
+      "SparkSweepResultData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/SparkSweepOutcomeKind"
+          },
+          "succeeded": {
+            "type": "boolean",
+            "description": "True exactly when `outcome` is `Swept`."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Always set, always fit for a merchant to read."
+          },
+          "refusalCode": {
+            "$ref": "#/components/schemas/SparkSweepRefusalCode"
+          },
+          "record": {
+            "nullable": true,
+            "description": "The record this pass created or resolved. Null for a `Skipped` outcome, where nothing happened and nothing is written.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SparkSweepRecordData"
+              }
+            ]
+          }
+        }
+      },
+      "SparkSweepPreviewData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "canSweep": {
+            "type": "boolean",
+            "description": "True when the engine would proceed. False means `refusalReason` is set."
+          },
+          "refusalReason": {
+            "type": "string",
+            "nullable": true
+          },
+          "balanceSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Spark balance the plan was made from, after an explicit sync."
+          },
+          "sweepableSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Balance minus the configured reserve, whether or not it is worth sweeping."
+          },
+          "amountSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Amount that would be asked of the SDK. Null when there would be no sweep."
+          },
+          "recipientAmountSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "What the destination would receive at the store's chosen tier."
+          },
+          "destination": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SparkSweepDestinationData"
+              }
+            ]
+          },
+          "quote": {
+            "nullable": true,
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SparkSweepQuoteData"
+              }
+            ]
+          },
+          "settings": {
+            "$ref": "#/components/schemas/SparkSweepSettings"
+          },
+          "crossChainQuote": {
+            "$ref": "#/components/schemas/SparkCrossChainQuoteData"
+          },
+          "amount": {
+            "type": "string",
+            "nullable": true,
+            "description": "What would be sent, rendered with its own unit. Read this rather than `amountSats` when Stable Balance may be on."
+          }
+        }
+      },
+      "SparkSweepDestinationData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/SparkSweepDestinationMode"
+          },
+          "rotates": {
+            "type": "boolean",
+            "description": "True when a real sweep would reserve a fresh address rather than reuse this one."
+          }
+        }
+      },
+      "SparkSweepQuoteData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A live cooperative-exit quote. **An estimate**: it expires in about a minute, and a real sweep re-quotes and re-checks the fee ceiling against the number it commits to.",
+        "properties": {
+          "feeSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The fee at the tier the store's configuration selects."
+          },
+          "feesIncluded": {
+            "type": "boolean"
+          },
+          "totalDebitedSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What would leave the Spark balance in total."
+          },
+          "feePercentOfRecipientAmount": {
+            "type": "number",
+            "format": "double",
+            "description": "The fee as a percentage of what the destination receives — the number that makes a flat exit fee honest."
+          },
+          "slowFeeSats": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mediumFeeSats": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "fastFeeSats": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SparkSeedSource": {
+        "type": "string",
+        "description": "Where a store's Spark seed came from. Reusing the on-chain hot-wallet seed means one compromise reaches both balances, and the Spark identity pubkey publicly links them.",
+        "enum": [
+          "Generated",
+          "Imported",
+          "HotWallet"
+        ]
+      },
+      "SparkLightningWiringState": {
+        "type": "string",
+        "description": "What a store's Lightning payment method points at. `StaleSpark` is this store's Spark wallet under a superseded payment key — still ours, and dead. `OtherStoreSpark` is another store's Spark wallet - refused at save time, and cleared at startup with the victim's payment key rotated.",
+        "enum": [
+          "StoreNotFound",
+          "NotConfigured",
+          "InternalNode",
+          "OtherNode",
+          "Spark",
+          "StaleSpark",
+          "OtherStoreSpark"
+        ]
+      },
+      "SparkSweepDestinationMode": {
+        "type": "string",
+        "description": "`StoreWallet` takes a fresh, labelled address from the store's BTC derivation scheme and rotates it every sweep. `StaticAddress` uses one fixed address, for stores with no on-chain BTCPay wallet. `EvmAddress` delivers a stablecoin to an address on an EVM chain through a bridge provider; mainnet only, because Spark refuses to start a wallet configured for cross-chain sending on any other network.",
+        "enum": [
+          "StoreWallet",
+          "StaticAddress",
+          "EvmAddress"
+        ]
+      },
+      "SparkSweepConfirmationSpeed": {
+        "type": "string",
+        "description": "Which of the SDK's three cooperative-exit fee tiers to use.",
+        "enum": [
+          "Slow",
+          "Medium",
+          "Fast"
+        ]
+      },
+      "SparkSweepAddressStatus": {
+        "type": "string",
+        "description": "Whether the store has an on-chain BTCPay wallet to sweep into.",
+        "enum": [
+          "Available",
+          "NoOnchainWallet",
+          "Unavailable"
+        ]
+      },
+      "SparkSweepTrigger": {
+        "type": "string",
+        "description": "What set a sweep in motion. Both run the identical engine path.",
+        "enum": [
+          "Automatic",
+          "Manual"
+        ]
+      },
+      "SparkSweepRecordStatus": {
+        "type": "string",
+        "description": "`Pending` means the outcome is not yet known and is resolved against the SDK rather than by retrying blind. `Refused` means the plugin declined and nothing was sent.",
+        "enum": [
+          "Pending",
+          "Sent",
+          "Confirmed",
+          "Failed",
+          "Refused"
+        ]
+      },
+      "SparkSweepOutcomeKind": {
+        "type": "string",
+        "description": "What one pass of the sweep engine did. Only `Swept` means a cooperative exit was accepted. `Unresolved` means the send's fate is unknown and nothing further will be sent until the SDK answers.",
+        "enum": [
+          "Swept",
+          "InFlight",
+          "Skipped",
+          "Refused",
+          "Failed",
+          "Unresolved"
+        ]
+      },
+      "SparkSweepRefusalCode": {
+        "type": "string",
+        "description": "The stable identity of a reason the plugin declined to sweep. Use this rather than the message, which embeds live figures.",
+        "enum": [
+          "None",
+          "WalletNotRunning",
+          "BalanceUnreadable",
+          "NothingAboveReserve",
+          "BelowMinimumSweep",
+          "NoDestination",
+          "QuoteFailed",
+          "InsufficientFunds",
+          "BelowDustFloor",
+          "ReserveBelowFee",
+          "FeeAboveLimit",
+          "CrossChainUnavailable",
+          "NoCrossChainRoute",
+          "CrossChainOverpayExceedsBalance",
+          "StableBalanceHoldsTheFunds",
+          "CrossChainQuoteUnusable",
+          "CrossChainValueUnverifiable"
+        ]
+      },
+      "SparkDepositData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The store's on-chain deposit address and everything sent to it that has not been credited.",
+        "properties": {
+          "address": {
+            "type": "string",
+            "nullable": true,
+            "description": "The static Bitcoin deposit address, or null when it could not be read. Stable across calls and safe to save."
+          },
+          "addressError": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why the address could not be read."
+          },
+          "walletRunning": {
+            "type": "boolean"
+          },
+          "deposits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SparkDepositEntryData"
+            },
+            "description": "Unclaimed deposits. Entries with `needsAttention` true are stuck and will never arrive without a claim."
+          },
+          "recommendedFees": {
+            "$ref": "#/components/schemas/SparkRecommendedFeesData"
+          },
+          "claimFeeLeewaySatPerVbyte": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Headroom over the network-recommended rate that automatic claims are allowed, after clamping to the plugin's maximum of 100. The plugin configures Spark's ceiling as 'network-recommended plus this', never as a fixed rate — Spark's own default is a fixed 1 sat/vB, below the mainnet floor essentially always. Read-only: there is no endpoint that sets it, and a rate is the only bound on an automatic claim, since Spark offers no cap relative to the size of the deposit."
+          },
+          "maxManualClaimFeeSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ceiling on a manual claim, in satoshi. Read-only: there is no endpoint that sets it."
+          },
+          "claimPolicyLooksTooLow": {
+            "type": "boolean",
+            "description": "True when the configured ceiling already looks too low for the current fee market, so a deposit arriving now may not be claimed automatically."
+          }
+        }
+      },
+      "SparkDepositEntryData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One on-chain deposit Spark knows about and has not credited.",
+        "properties": {
+          "txId": {
+            "type": "string"
+          },
+          "vout": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "amountSats": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isMature": {
+            "type": "boolean",
+            "description": "False while the deposit is still waiting for its third confirmation. Nothing needs doing."
+          },
+          "needsAttention": {
+            "type": "boolean",
+            "description": "True when the deposit has matured and its claim failed. Spark will not retry it."
+          },
+          "claimError": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why the claim failed."
+          },
+          "requiredFeeSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "What the claim would actually cost. The value the claim endpoint uses when none is supplied."
+          },
+          "requiredFeeRateSatPerVbyte": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "SparkRecommendedFeesData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Mempool fee rates in sat/vB.",
+        "properties": {
+          "fastestFee": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "halfHourFee": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "hourFee": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "economyFee": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "minimumFee": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SparkClaimDepositRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Which deposit to claim, and at what ceiling.",
+        "properties": {
+          "txId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Transaction id of the deposit, as reported by the deposit endpoint."
+          },
+          "vout": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Output index of the deposit."
+          },
+          "maxFeeSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Ceiling for this claim, in satoshi. Omit to use the fee Spark said the claim needs — the right answer almost always. No value lifts the backstop that refuses to spend more than half a deposit on claiming it."
+          }
+        }
+      },
+      "SparkClaimDepositResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The plugin's decision about a manual claim. Only `Claimed` broadcast anything.",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/SparkClaimStatus"
+          },
+          "succeeded": {
+            "type": "boolean",
+            "description": "True exactly when `status` is `Claimed`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Always set, always fit for a merchant to read."
+          },
+          "feeSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "The ceiling the claim was issued at."
+          }
+        }
+      },
+      "SparkStableBalanceData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The store's Stable Balance configuration and what its wallet is actually doing.",
+        "properties": {
+          "desiredActive": {
+            "type": "boolean",
+            "description": "What the store asked for."
+          },
+          "activeLabel": {
+            "type": "string",
+            "nullable": true,
+            "description": "The label the wallet reports as active, or null when stable balance is off there. **This, not `desiredActive`, is what the wallet is doing.**"
+          },
+          "needsReapply": {
+            "type": "boolean",
+            "description": "True when the setting and the wallet disagree. Reported rather than reconciled, because converging them converts the balance."
+          },
+          "available": {
+            "type": "boolean",
+            "description": "False on any network but mainnet, where the feature cannot work at all."
+          },
+          "walletRunning": {
+            "type": "boolean"
+          },
+          "walletError": {
+            "type": "string",
+            "nullable": true
+          },
+          "balance": {
+            "$ref": "#/components/schemas/SparkTokenBalanceData"
+          },
+          "conversionMinimumSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Spark's own floor on a Bitcoin-to-token conversion. A configured `autoConvertThresholdSats` below this is clamped *up* to it rather than honoured."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/StableBalanceInput"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "What the last write did, when this is a write's response."
+          }
+        }
+      },
+      "SparkTokenBalanceData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A token balance the wallet holds.",
+        "properties": {
+          "identifier": {
+            "type": "string"
+          },
+          "ticker": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "baseUnits": {
+            "type": "string",
+            "description": "**Base units as a decimal string, not satoshi and not a quantity.** $35.60 of a 6-decimal token is `\"35600000\"`. A string because the value is a u128 and an 18-decimal token overflows every JSON number a client is likely to parse it into."
+          },
+          "amount": {
+            "type": "string",
+            "description": "The same figure as a human-readable quantity, e.g. `35.6`."
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isFreezable": {
+            "type": "boolean",
+            "description": "Whether the issuer can freeze this balance. **True for USDB.** The counterparty risk a merchant accepts by holding one."
+          }
+        }
+      },
+      "StableBalanceInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A store's Stable Balance configuration. A `PUT` replaces the whole thing.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the store wants its balance held in a stablecoin. Changing this converts the balance, in the background, with nothing to report when it finishes."
+          },
+          "disclosureAcknowledged": {
+            "type": "boolean",
+            "description": "Confirmation that the freezable-issuer warning has been read. **Required to enable.**"
+          },
+          "tokenIdentifier": {
+            "type": "string",
+            "nullable": true,
+            "description": "The token identifier. Defaults to mainnet USDB, which the plugin supplies because Spark ships no default for it. Checked against Spark before it is stored."
+          },
+          "label": {
+            "type": "string",
+            "nullable": true,
+            "description": "The label the wallet activates by. An arbitrary display string with no protocol meaning — not a ticker and not the identifier."
+          },
+          "maxSlippageBps": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Conversion slippage tolerance in basis points; Spark's own default is 10. A *different* setting from the cross-chain slippage on the sweep configuration, which defaults to 100 if unset."
+          },
+          "autoConvertThresholdSats": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Balance at which Spark auto-converts. Null leaves Spark's own minimum in force; a value below that minimum is raised to it rather than honoured."
+          }
+        }
+      },
+      "SparkCrossChainQuoteData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A live cross-chain quote. **An estimate**: it expires in about a minute, and a real sweep re-quotes and re-checks the fee ceiling against the number it commits to. There is **no arrival estimate** — Spark exposes none, so nothing here can offer one.",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "Which bridge provider would carry it, e.g. `Orchestra`."
+          },
+          "chain": {
+            "type": "string"
+          },
+          "chainId": {
+            "type": "string",
+            "nullable": true
+          },
+          "asset": {
+            "type": "string"
+          },
+          "assetDecimals": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Read from the route rather than assumed: 6 on every Orchestra USDT route except BSC, which is 18."
+          },
+          "amountInSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "**Larger than the amount being sent.** The provider overpays the source leg to absorb its fee and slippage, so a sweep sized to exactly the sweepable balance cannot be funded. The pad is not derivable from a slippage setting; read it here."
+          },
+          "assetAmountIn": {
+            "type": "string",
+            "description": "Gross destination-asset base units, as a decimal string."
+          },
+          "estimatedOut": {
+            "type": "string",
+            "description": "Destination-asset base units expected to arrive, as a decimal string."
+          },
+          "estimatedOutAmount": {
+            "type": "string",
+            "description": "The same figure as a readable quantity with its asset."
+          },
+          "feeAmount": {
+            "type": "string",
+            "description": "In **destination-asset base units**, not satoshi."
+          },
+          "serviceFeeAmount": {
+            "type": "string",
+            "description": "In `serviceFeeAsset`'s base units — which may be a *third* asset again; USDC was observed on a USDT route. Do not add this to `feeAmount`."
+          },
+          "serviceFeeAsset": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourceTransferFeeSats": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "providerQuoteId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The provider's own quote id, persisted before the send. On a sweep funded from a stablecoin balance this is the only thing that identifies the send afterwards."
+          }
+        }
+      },
+      "SparkClaimStatus": {
+        "type": "string",
+        "description": "`Claimed` broadcast a claim. `Refused` means the plugin declined and spent nothing. `Failed` means Spark attempted it and reported an error. `Unavailable` means the store has no running wallet.",
+        "enum": [
+          "Claimed",
+          "Unavailable",
+          "Refused",
+          "Failed"
+        ]
+      },
+      "SparkConversionStatus": {
+        "type": "string",
+        "description": "How far a bridge provider or conversion has got. **No SDK event reports any transition here** — every value is discovered by polling. `RefundNeeded` is the one that needs a human: Spark is holding funds it could not convert, and the plugin requests a refund on the next sweep pass.",
+        "enum": [
+          "Pending",
+          "Completed",
+          "Failed",
+          "RefundNeeded",
+          "Refunded",
+          "Unknown"
+        ]
+      },
+      "SparkSweepDestinationKind": {
+        "type": "string",
+        "description": "Which rail a sweep used. `BitcoinAddress` is a cooperative exit; `EvmAddress` is a cross-chain send through a bridge provider — still an ordinary Spark transfer at the point money leaves the wallet, so there is no unilateral exit either way.",
+        "enum": [
+          "BitcoinAddress",
+          "EvmAddress"
+        ]
+      },
+      "SparkBalanceSyncData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The Spark balance after a forced wallet sync.",
+        "properties": {
+          "walletRunning": {
+            "type": "boolean",
+            "description": "Whether a Spark wallet is live for this store."
+          },
+          "balanceSats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Spark balance in satoshi after forcing a wallet sync. Zero when the wallet is not running."
+          },
+          "syncedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the sync was performed, UTC."
+          }
+        }
+      },
+      "SparkServerSettingsData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Flint server-level settings, shared across all stores on this BTCPay instance.",
+        "properties": {
+          "updateWebhookUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "When set, Flint POSTs a plugin.update-available event here whenever a newer version is detected on the plugin registry. The check runs once per day."
+          }
+        }
+      },
+      "SparkServerSettingsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Request body for PUT /api/v1/server/spark.",
+        "properties": {
+          "updateWebhookUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "The URL to call when a plugin update is available, or null/empty to disable the notification. Must be a valid http or https URL when non-empty."
+          }
+        }
+      }
+    }
+  }
 }

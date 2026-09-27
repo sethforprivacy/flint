@@ -88,7 +88,8 @@
   At the shipped `info` level it is not fast-growing, but it is unbounded and it grows for as long as the
   server runs. **Treat it as a file your host is responsible for**: point `logrotate` (or your container's
   log policy) at it, with the caveat that the SDK holds the handle open, so a rotation scheme that renames
-  the file needs `copytruncate` rather than `create`. It is safe to delete while the server is stopped.
+  the file needs `copytruncate` rather than `create`. A ready-to-install `logrotate` configuration using
+  `copytruncate` is at `scripts/flint-logrotate.conf`. It is safe to delete while the server is stopped.
   Nothing in the plugin reads it back; it exists for you and for a bug report.
 - **Everything the plugin writes under the data directory is owner-only, and that is the only protection
   it has.** Each store's SDK state lives in `<DataDir>/Plugins/Flint/<storeId>/`, beside the log directory,
