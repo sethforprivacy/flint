@@ -221,26 +221,6 @@ public sealed class FlintSweepsReportProvider : ReportProvider
     private static string TokenLabel(string identifier) =>
         identifier == StableBalanceSettings.DefaultTokenIdentifier ? StableBalanceSettings.DefaultLabel : identifier;
 
-    private static object? Amount(long baseUnits, int decimals) => Amount(new BigInteger(baseUnits), decimals);
-
-    /// <summary>
-    /// A base-units integer as BTCPay's report amount: the value and how many decimals to show it with.
-    /// </summary>
-    /// <remarks>Null for a figure <see cref="decimal"/> cannot hold, rather than an exception out of the report.</remarks>
-    internal static object? Amount(BigInteger baseUnits, int decimals)
-    {
-        if (decimals is < 0 or > 28)
-            return null;
-        try
-        {
-            var value = (decimal)baseUnits;
-            for (var i = 0; i < decimals; i++)
-                value /= 10m;
-            return new FormattedAmount(value, decimals).ToJObject();
-        }
-        catch (OverflowException)
-        {
-            return null;
-        }
-    }
+    private static object? Amount(BigInteger baseUnits, int decimals) =>
+        ReportAmounts.FromBaseUnits(baseUnits, decimals);
 }

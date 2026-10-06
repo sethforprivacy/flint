@@ -66,6 +66,11 @@ another network rather than shown the provider's error.
 - **A payment that arrives after the invoice expired is still credited to it**, the way BTCPay records any late
   payment.
 
+BTCPay's **Reporting** page has a **Flint Stablecoin Payments** report on mainnet. It lists every USDC and USDT
+payment with the payer's network and transaction, what reached the wallet, and the invoice-currency value, which
+BTCPay's own Payments report does not show. It reads BTCPay's invoices, so it covers every payment ever made. On
+BTCPay 2.4.5 and later it is also available over Greenfield with `view:Flint Stablecoin Payments`.
+
 ## How a payment finds its invoice
 
 The provider pays every conversion into the same Spark wallet, and nothing in what arrives names an invoice. So the
