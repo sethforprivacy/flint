@@ -145,7 +145,7 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
 
     /// <summary>
     /// BTCPay persists <c>client.ToString()</c> as the store's Lightning connection string
-    /// (<c>LightningPaymentMethodConfig</c>) and runs its <c>IsSafe</c> check against it, so this must
+    /// (<c>LightningPaymentMethodConfig</c>) and parses it back through the registered handlers, so this must
     /// round-trip through <see cref="SparkConnectionStringHandler"/>.
     /// </summary>
     public override string ToString() => SparkConnectionString.Format(_storeId, _paymentKey);
@@ -793,8 +793,9 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     #region Node-shaped members — permanently unsupported
 
     /// <summary>
-    /// Called by <c>LightningLikePaymentHandler</c> during checkout preparation (to show node connection
-    /// details) and by the Greenfield API. BTCPay catches the failure and continues, so throwing
+    /// Called by core's "Test connection" button, by the Greenfield API, and — up to BTCPay 2.4.4 only — by
+    /// <c>LightningLikePaymentHandler</c> on every invoice it created (to show node connection details; 2.4.5
+    /// dropped that lookup). BTCPay catches the failure and continues, so throwing
     /// <see cref="NotSupportedException"/> is the correct answer for a nodeless wallet: there is no node id,
     /// alias, block height or peer address to report, and inventing one would put a meaningless "connect to
     /// this node" string in front of the merchant.

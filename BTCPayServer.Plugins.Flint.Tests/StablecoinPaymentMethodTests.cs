@@ -42,7 +42,9 @@ public class StablecoinPaymentMethodTests
         var handler = Handler(StablecoinPayments.Usdt);
         var context = new PaymentMethodContext(
             new StoreData(), new StoreBlob(), new JObject(), handler,
-            new InvoiceEntity { Currency = "USD" }, new BTCPayServer.Logging.InvoiceLogs());
+            new InvoiceEntity { Currency = "USD" }, new BTCPayServer.Logging.InvoiceLogs(),
+            // Only CreatePaymentPrompt's destination-conflict check reads the repository; this test never gets there.
+            invoiceRepository: null!);
         var prompt = context.Prompt;
         prompt.PaymentMethodFee = 1m;
 

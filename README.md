@@ -47,7 +47,7 @@ exists — before you configure anything.
 What a server needs to *run* this plugin:
 
 - **BTCPay Server 2.4.1 or newer.** That is the declared support floor, and BTCPay refuses to load the
-  plugin on anything older. It is compiled against 2.4.4.
+  plugin on anything older. It is compiled against 2.4.5.
 - **A supported platform.** The plugin's payload carries the Breez Spark SDK's native libraries
   (around 190 MB) for `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` and `win-x64`. There is
   **no** `linux-musl` (Alpine) or `win-arm64` payload, so the plugin will not load on those platforms.

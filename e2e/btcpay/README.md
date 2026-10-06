@@ -1,6 +1,6 @@
 # Flint on a real BTCPay Server, against the local Spark stack
 
-This directory stands up **BTCPay Server 2.4.4 + NBXplorer + Postgres**, joined to the Spark fixture's own
+This directory stands up **BTCPay Server 2.4.5 + NBXplorer + Postgres**, joined to the Spark fixture's own
 docker network, with the Flint plugin installed the way an install installs it. It exists so the plugin can
 be observed from *outside*: the [`BtcpayE2E`](../../BTCPayServer.Plugins.Flint.Tests/BtcpayE2E) suite drives
 it entirely over Greenfield HTTP, and every assertion is checked against the fixture's own bitcoind or LND
@@ -111,7 +111,7 @@ storage, and a store's wallet is keyed by a seed that only ever existed there.
 
 | Image | Pin | Why that one |
 |---|---|---|
-| `btcpayserver/btcpayserver` | `2.4.4`, by index digest | The `btcpayserver` submodule tag, and therefore `Constants.BuiltAgainstBTCPayServerVersion`. Multi-arch index digest so one line works on amd64 and arm64. |
+| `btcpayserver/btcpayserver` | `2.4.5`, by index digest | The `btcpayserver` submodule tag, and therefore `Constants.BuiltAgainstBTCPayServerVersion`. Multi-arch index digest so one line works on amd64 and arm64. |
 | `nicolasdorier/nbxplorer` | `2.6.10`, by index digest | What BTCPay's own `BTCPayServer.Tests/docker-compose.yml` pairs with this tag. |
 | `postgres` | `17-alpine`, by digest | The same image and digest `ci.yml`'s store-test service uses, so the plugin's migrations run on a version CI already covers. |
 

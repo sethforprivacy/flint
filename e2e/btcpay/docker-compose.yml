@@ -63,11 +63,11 @@ services:
       - flint-e2e-nbxplorer:/datadir
 
   flint-e2e-btcpay:
-    # btcpayserver/btcpayserver:2.4.4 — the tag the `btcpayserver` submodule is pinned to, which is what
+    # btcpayserver/btcpayserver:2.4.5 — the tag the `btcpayserver` submodule is pinned to, which is what
     # Constants.BuiltAgainstBTCPayServerVersion says the plugin was compiled against. Pinned to the
     # multi-arch index digest so the same line works on an amd64 runner and on an arm64 Mac; the plugin
     # ships Breez's native library for both linux RIDs, so either resolves.
-    image: btcpayserver/btcpayserver:2.4.4@sha256:c264aa08cd32a469bd30d41978b73dc8bb2de1503ce67bdb0ab8fd5d934fb614
+    image: btcpayserver/btcpayserver:2.4.5@sha256:4ad0df2fd2e21864051d1bd611e6f08f593f464277251e77f4167d62082e980b
     restart: unless-stopped
     depends_on:
       flint-e2e-postgres:
