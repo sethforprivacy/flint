@@ -58,6 +58,12 @@ wording contains live figures including a balance that drifts by a few sats, so 
 refusal would otherwise accumulate a row every couple of minutes forever. Coalescing is bounded to a day,
 so a condition that stopped and came back reads as two episodes.
 
+For accounting, the same history is on BTCPay's **Reporting** page as **Flint Sweeps**, where it can be
+filtered, charted and exported as CSV. Each row is a sweep that moved money or may have, with what left the
+wallet, the fee, and what arrived. Refusals are left out. On BTCPay 2.4.5 and later it is also available over
+Greenfield: `POST /api/v1/stores/{storeId}/reports` with a body such as
+`{"search": "view:Flint Sweeps,daterange:last30d,timezone:UTC"}`.
+
 **Crash safety.** The SDK adopts the idempotency key given to `SendPayment` as its own `Payment.id`, verified
 on real cooperative exits. So the plugin writes a `SweepRecord` carrying a fresh UUID *before* it calls the
 SDK, and the next pass resolves anything unresolved with `GetPayment(key)` — a definitive answer about

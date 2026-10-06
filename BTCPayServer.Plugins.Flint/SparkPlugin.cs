@@ -8,10 +8,12 @@ using BTCPayServer.Lightning;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Payments;
+using BTCPayServer.Plugins.Flint.Reports;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
+using BTCPayServer.Services.Reporting;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -342,6 +344,9 @@ public class SparkPlugin : BaseBTCPayServerPlugin
 
         services.AddStartupTask<SparkMigrationStartupTask>();
 
+        // BTCPay's Reporting page (and, from 2.4.5, its Greenfield reports API): the store's sweeps.
+        services.AddReportProvider<FlintSweepsReportProvider>();
+
         // Settlement reconciliation. This is not a safety net, it is the settlement guarantee: the SDK drops
         // completion events, and BTCPay does not re-poll pending invoices (its one-minute timer only checks
         // connections). One minute matches the resolution merchants already expect from Lightning checkout.
@@ -472,5 +477,13 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // Crediting what the event stream dropped, and retrying credits that did not land. Same cadence as the
         // Lightning reconciliation; a store with no open quote costs one indexed query per pass.
         services.AddScheduledTask<StablecoinReconciliationTask>(Constants.ReconciliationInterval);
+
+        // BTCPay's Reporting page: these payments with their conversion details. Hidden off mainnet, where there are
+        // none. Availability is read when BTCPay lists reports, long after the container is built.
+        services.AddSingleton<IStablecoinPaymentHistory, BTCPayStablecoinPaymentHistory>();
+        services.AddSingleton<ReportProvider>(provider => new FlintStablecoinPaymentsReportProvider(
+            provider.GetRequiredService<IStablecoinPaymentHistory>(),
+            () => provider.GetRequiredService<Func<StablecoinPaymentService>>()().Available,
+            provider.GetRequiredService<ILogger<FlintStablecoinPaymentsReportProvider>>()));
     }
 }

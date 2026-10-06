@@ -81,6 +81,20 @@ public interface ISweepRecordStore
     Task<int> CountAsync(string storeId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Every sweep a store sent or tried to send that was created in [<paramref name="from"/>,
+    /// <paramref name="to"/>], oldest first, for BTCPay's reporting page.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SweepRecordStatus.Refused"/> rows are left out: they record a decision not to move money, and a
+    /// store sitting below its fee ceiling writes one every pass, so they would bury the sweeps a report is read for.
+    /// </remarks>
+    Task<IReadOnlyList<SweepRecord>> ListForReportAsync(
+        string storeId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Every record for a store that has not reached a settled outcome — every
     /// <see cref="SweepRecordStatus.Pending"/> row, and every <see cref="SweepRecordStatus.Sent"/> row created
     /// after <paramref name="sentCreatedAfter"/> — oldest first.
