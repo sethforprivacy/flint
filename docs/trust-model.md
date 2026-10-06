@@ -108,6 +108,19 @@ copy of the old string — so a leaked string is revoked by re-running setup, wi
 Between provisions it never expires. Treat it like a macaroon, and keep the sweep threshold low enough that
 the balance it could reach is a balance you can afford to lose.
 
+**On BTCPay Server 2.4.5 and later, core adds its own barrier in front of these.** Core now treats a
+Lightning connection string with no `server=` as unsafe. So saving a new or changed `type=flint` string
+through either path core offers (the Lightning setup page and Greenfield's payment-method `PUT`) needs
+`btcpay.server.canmodifyserversettings`. On such a host, a store owner who is not a server admin cannot put
+a new `type=flint` string on any store through core. The plugin never needed that path, because
+setup and repair write the configuration directly. The plugin's own layers stay in place:
+
+- On BTCPay 2.4.1–2.4.4, which this plugin still supports, they are the only enforcement.
+- Configurations saved before an upgrade survive it.
+- The sweep and key rotation also cover writes that never pass through HTTP.
+
+On 2.4.5 the save-time refusal still guards an administrator against pasting the wrong store's string.
+
 **The instance administrator is a counterparty on any server you do not operate.** Setup stores the
 store's Spark seed encrypted in the store's settings blob, and the data-protection keys that decrypt it
 live in the same data directory — so whoever operates the server holds both halves, can decrypt the

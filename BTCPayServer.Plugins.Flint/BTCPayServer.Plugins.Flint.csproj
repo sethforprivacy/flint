@@ -62,7 +62,7 @@
   <PropertyGroup>
     <Product>Flint</Product>
     <Description>Accept Lightning payments without running a node. Each store gets its own Spark wallet, wired into Lightning and LNURL automatically, with optional automatic sweeps to on-chain Bitcoin or to a stablecoin on an EVM address. Funds sit on Spark, a non-custodial Bitcoin layer two network, until they are swept.</Description>
-    <Version>1.2.1</Version>
+    <Version>1.3.0</Version>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
