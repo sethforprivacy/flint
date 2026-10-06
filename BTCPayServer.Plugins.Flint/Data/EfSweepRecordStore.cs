@@ -83,6 +83,29 @@ public class EfSweepRecordStore : ISweepRecordStore
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<SweepRecord>> ListForReportAsync(
+        string storeId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken = default)
+    {
+        // Npgsql writes only UTC offsets to timestamptz, and BTCPay hands a report the bounds of whatever timezone
+        // the merchant (or the Greenfield caller's timezone: filter) picked.
+        var fromUtc = from.ToUniversalTime();
+        var toUtc = to.ToUniversalTime();
+
+        await using var context = _contextFactory.CreateContext();
+        return await context.SweepRecords
+            .AsNoTracking()
+            .Where(r => r.StoreId == storeId
+                        && r.CreatedAt >= fromUtc
+                        && r.CreatedAt <= toUtc
+                        && r.Status != SweepRecordStatus.Refused)
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => EF.Functions.Collate(r.IdempotencyKey, ByteOrderCollation))
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task<int> CountAsync(string storeId, CancellationToken cancellationToken = default)
     {
         await using var context = _contextFactory.CreateContext();

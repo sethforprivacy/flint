@@ -36,6 +36,8 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
     /// <summary>Thrown by <see cref="TryResolveAsync"/> when set.</summary>
     public Exception? FailResolveWith { get; set; }
 
+    public Exception? FailReportWith { get; set; }
+
     /// <summary>
     /// Makes <see cref="TryRecordProviderQuoteAsync"/> report that it changed nothing.
     /// </summary>
@@ -96,6 +98,27 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
             .ThenByDescending(r => r.IdempotencyKey, StringComparer.Ordinal)
             .Skip(offset)
             .Take(limit)
+            .Select(Copy)
+            .ToList());
+    }
+
+    public Task<IReadOnlyList<SweepRecord>> ListForReportAsync(
+        string storeId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (FailReportWith is not null)
+            throw FailReportWith;
+
+        return Task.FromResult<IReadOnlyList<SweepRecord>>(_records.Values
+            .Where(r => r.StoreId == storeId
+                        && r.CreatedAt >= from
+                        && r.CreatedAt <= to
+                        && r.Status != SweepRecordStatus.Refused)
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => r.IdempotencyKey, StringComparer.Ordinal)
             .Select(Copy)
             .ToList());
     }

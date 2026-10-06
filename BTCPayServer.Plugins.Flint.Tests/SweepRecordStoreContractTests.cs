@@ -656,6 +656,67 @@ public abstract class SweepRecordStoreContractTests
     }
 
     #endregion
+
+    #region Report listing
+
+    [Fact]
+    public async Task The_report_lists_this_stores_sends_in_the_range_oldest_first()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord("newest", status: SweepRecordStatus.Confirmed, minutesOld: 10), Ct);
+        await store.AddAsync(NewRecord("oldest", status: SweepRecordStatus.Sent, minutesOld: 50), Ct);
+        await store.AddAsync(NewRecord("middle", status: SweepRecordStatus.Failed, minutesOld: 30), Ct);
+        await store.AddAsync(NewRecord("pending", minutesOld: 20), Ct);
+        await store.AddAsync(NewRecord("before-range", status: SweepRecordStatus.Confirmed, minutesOld: 120), Ct);
+        await store.AddAsync(NewRecord("other-store", OtherStoreId, SweepRecordStatus.Confirmed, minutesOld: 10), Ct);
+
+        var listed = await store.ListForReportAsync(StoreId, Origin.AddMinutes(-60), Origin, Ct);
+
+        Assert.Equal(["oldest", "middle", "pending", "newest"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task The_report_leaves_refusals_out()
+    {
+        // A store below its fee ceiling writes a refusal every pass; a report of what left the wallet is not the
+        // place for them.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRefusal("refused", SweepRefusalCode.FeeAboveLimit, minutesOld: 5), Ct);
+        await store.AddAsync(NewRecord("sent", status: SweepRecordStatus.Sent, minutesOld: 5), Ct);
+
+        var listed = await store.ListForReportAsync(StoreId, Origin.AddDays(-1), Origin, Ct);
+
+        Assert.Equal(["sent"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task The_report_range_includes_both_ends()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord("at-from", status: SweepRecordStatus.Sent, minutesOld: 60), Ct);
+        await store.AddAsync(NewRecord("at-to", status: SweepRecordStatus.Sent), Ct);
+
+        var listed = await store.ListForReportAsync(StoreId, Origin.AddMinutes(-60), Origin, Ct);
+
+        Assert.Equal(["at-from", "at-to"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task The_report_range_may_be_given_in_any_timezone()
+    {
+        // BTCPay passes the merchant's chosen timezone through; Npgsql refuses a non-UTC DateTimeOffset outright.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord("inside", status: SweepRecordStatus.Sent, minutesOld: 30), Ct);
+        await store.AddAsync(NewRecord("outside", status: SweepRecordStatus.Sent, minutesOld: 90), Ct);
+        var tokyo = TimeSpan.FromHours(9);
+
+        var listed = await store.ListForReportAsync(
+            StoreId, Origin.AddMinutes(-60).ToOffset(tokyo), Origin.ToOffset(tokyo), Ct);
+
+        Assert.Equal(["inside"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    #endregion
 }
 
 /// <summary>The contract against the in-memory implementation used by the engine tests.</summary>

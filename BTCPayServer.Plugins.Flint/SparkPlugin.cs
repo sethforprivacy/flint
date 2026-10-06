@@ -8,6 +8,7 @@ using BTCPayServer.Lightning;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Payments;
+using BTCPayServer.Plugins.Flint.Reports;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Services.Invoices;
@@ -341,6 +342,9 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         });
 
         services.AddStartupTask<SparkMigrationStartupTask>();
+
+        // BTCPay's Reporting page (and, from 2.4.5, its Greenfield reports API): the store's sweeps.
+        services.AddReportProvider<FlintSweepsReportProvider>();
 
         // Settlement reconciliation. This is not a safety net, it is the settlement guarantee: the SDK drops
         // completion events, and BTCPay does not re-poll pending invoices (its one-minute timer only checks
