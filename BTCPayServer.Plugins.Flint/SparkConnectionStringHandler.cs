@@ -67,8 +67,8 @@ namespace BTCPayServer.Plugins.Flint;
 /// restate the older claim that store binding closes cross-store hijack outright — it now closes the
 /// <em>save</em> paths and sweeps what predates them.
 /// </para>
-/// <para>There is deliberately no <c>server=</c> key, so
-/// BTCPay's <c>IsSafe</c> check passes and non-admin store owners can save the configuration.</para>
+/// <para>There is no <c>server=</c> key. What that means for core's <c>IsSafe</c> check changed in BTCPay 2.4.5
+/// (see <see cref="SparkConnectionString.GeneratePaymentKey"/>); the plugin's own provisioning never runs it.</para>
 /// <para><b>Why the resolver arrives as a factory rather than as a dependency.</b></para>
 /// <para>
 /// This class is the one part of the plugin that BTCPay constructs from <em>inside</em> its own

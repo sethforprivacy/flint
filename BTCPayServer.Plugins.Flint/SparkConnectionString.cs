@@ -46,8 +46,10 @@ public static class SparkConnectionString
     }
 
     /// <summary>
-    /// Generates a payment key. Note there is deliberately no <c>server=</c> component anywhere in this
-    /// connection string, so BTCPay's <c>IsSafe</c> check passes and a non-admin store owner can save it.
+    /// Generates a payment key. There is no <c>server=</c> component anywhere in this connection string. Up to
+    /// BTCPay 2.4.4 that made core's <c>IsSafe</c> check pass, so a non-admin could paste it into core's Lightning
+    /// form; from 2.4.5 core treats a string without <c>server=</c> as unsafe and only a server admin can paste it
+    /// there. Nothing depends on either: the plugin writes the store's configuration itself, without that check.
     /// </summary>
     public static string GeneratePaymentKey() =>
         Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(PaymentKeyBytes));

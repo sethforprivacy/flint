@@ -234,7 +234,7 @@ Two things about that provisioning are worth knowing before scripting anything s
   server-settings policy — and an API key is judged on its own permissions, not on its owner's role. Without
   it the provisioning `POST` answers `403 hot-wallet-not-allowed`. See
   [`greenfield-api.md`](greenfield-api.md).
-- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.4`, matching the `btcpayserver`
+- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.5`, matching the `btcpayserver`
   submodule tag and therefore `Constants.BuiltAgainstBTCPayServerVersion`. The official image is a Release
   build, so `DEBUG_PLUGINS` — the side-loading route [`development.md`](development.md) uses — does not
   exist in it; `up.sh` instead stages the Release build output as

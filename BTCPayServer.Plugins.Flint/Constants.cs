@@ -80,11 +80,12 @@ public static class Constants
     /// <remarks>
     /// Informational — nothing at runtime reads it. It exists so the update automation has a version to bump that
     /// is not the support floor, and so a reader can see at a glance which release the assembly was built against.
-    /// It is currently three patch releases ahead of <see cref="MinBTCPayServerVersion"/>: each submodule
-    /// bump (v2.4.2, then straight to v2.4.4) moved this constant and left the floor alone, which is exactly
-    /// what the two being separate constants is for — a bump here must never silently drop every host below it.
+    /// It is currently four patch releases ahead of <see cref="MinBTCPayServerVersion"/>: each submodule
+    /// bump (v2.4.2, then straight to v2.4.4, then v2.4.5) moved this constant and left the floor alone, which is
+    /// exactly what the two being separate constants is for — a bump here must never silently drop every host below
+    /// it.
     /// </remarks>
-    public const string BuiltAgainstBTCPayServerVersion = "2.4.4";
+    public const string BuiltAgainstBTCPayServerVersion = "2.4.5";
 
     /// <summary>
     /// The <c>type=</c> discriminator of our Lightning connection string.
