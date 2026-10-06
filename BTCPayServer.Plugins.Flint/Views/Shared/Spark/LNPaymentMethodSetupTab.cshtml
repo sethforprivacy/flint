@@ -18,12 +18,12 @@
 }
 @{
     // The store this pane resolves is the one authorised for this request, never the form-bound
-    // Model.StoreId: core's POST re-renders this view without ever reassigning it, so on any path it can
-    // name any store, and it is never trusted on any path. The only refusal here is a missing
-    // authorisation, which fails closed before any lookup; every lookup and link below keys off
-    // authorisedStoreId alone — nothing reads Model.StoreId after the guard. An earlier revision also
-    // refused when the two ids disagreed; that comparison was dropped as a silent-suppression hazard
-    // that added no security. See the longer note in LNPaymentMethodSetupTabhead.cshtml, which fills
+    // Model.StoreId: up to BTCPay 2.4.4 core's POST re-renders this view without ever reassigning it, so it
+    // can name any store (2.4.5 resets it, btcpayserver#7618), and it is never trusted on any path. The only
+    // refusal here is a missing authorisation, which fails closed before any lookup; every lookup and link
+    // below keys off authorisedStoreId alone — nothing reads Model.StoreId after the guard. An earlier
+    // revision also refused when the two ids disagreed; that comparison was dropped as a silent-suppression
+    // hazard that added no security. See the longer note in LNPaymentMethodSetupTabhead.cshtml, which fills
     // core's field in and carries the credential itself.
     var authorisedStoreId = Context.GetStoreDataOrNull()?.Id;
     if (authorisedStoreId is null)

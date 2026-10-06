@@ -45,6 +45,12 @@ public sealed record SparkLightningConfigSweepResult(int Cleared, int Rotated);
 /// configurations written outside HTTP — about every half hour; the save-time layer already blocks new
 /// mismatches from every HTTP path, so the periodic pass only has to be there, not be fast.
 /// </para>
+/// <para>
+/// BTCPay 2.4.5 restricts saving a <c>type=flint</c> string through core to server admins (see the remarks
+/// on <c>SparkLightningClient.Validate</c>). That narrows who could create a cross-store configuration, but
+/// none of this sweep's work goes away. Configurations saved before an upgrade survive it, writes outside
+/// HTTP are untouched by it, and the key rotation is still what retires leaked copies of a string.
+/// </para>
 /// </remarks>
 public sealed class SparkLightningConfigSweeper
 {

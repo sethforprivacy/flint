@@ -21,9 +21,11 @@
     HttpContext.Items, and core's global SetContextFilter (registered in Hosting/Startup.cs) promotes it
     with SetStoreData — which is what HttpContext.GetStoreDataOrNull() reads on both verbs. Model.StoreId,
     by contrast, is form-bound: LightningNodeViewModel.StoreId is an ordinary settable property, the GET
-    fills it from the route, and the POST never reassigns it before re-rendering this view — so on any
-    path it can name any store, and the form value is never trusted on any path. The partial resolves the
-    authorised id first, refuses only when it is missing (fail-closed), and every lookup and link below
+    fills it from the route, and up to BTCPay 2.4.4 the POST never reassigns it before re-rendering this
+    view — so it can name any store, and the form value is never trusted on any path. BTCPay 2.4.5 resets
+    it to the authorised store on both verbs (btcpayserver#7618); that does not make it trustworthy here
+    while the plugin supports older hosts, and the authorised id is no harder to read. The partial resolves
+    the authorised id first, refuses only when it is missing (fail-closed), and every lookup and link below
     keys off authorisedStoreId alone — nothing reads Model.StoreId after the guard. An earlier revision
     also refused when the two ids disagreed; that comparison was dropped because it turned benign
     mismatch re-renders into silent suppression and added no security, the form id feeding no lookup

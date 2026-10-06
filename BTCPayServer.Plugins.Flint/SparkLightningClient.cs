@@ -173,6 +173,16 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// check or that were written without one.
     /// </para>
     /// <para>
+    /// <b>What BTCPay 2.4.5 changed.</b> From 2.4.5, core treats a connection string with no <c>server=</c> as
+    /// unsafe, so saving a new or changed <c>type=flint</c> string through core's Lightning form or Greenfield's
+    /// payment-method <c>PUT</c> needs <c>btcpay.server.canmodifyserversettings</c>. Those are the only two core
+    /// paths that write a Lightning connection string. On a 2.4.5 host, then, a store owner who is not an admin
+    /// can no longer attempt the cross-store copy, and this check is left guarding an admin against pasting the
+    /// wrong store's string. On 2.4.1–2.4.4, inside the plugin's support range, it is still the only thing
+    /// refusing a non-admin. Keep it even once the floor reaches 2.4.5: it is a few lines, and upstream may well
+    /// relax that rule for nodeless plugin handlers, which would make it the boundary again.
+    /// </para>
+    /// <para>
     /// The live check uses the cached, non-syncing <c>GetInfo</c>: it returns in ~0 ms and proves the native
     /// handle is alive and this store's instance has not been torn down. It deliberately does not force a
     /// sync — a ~2.2 s SSP round trip on a settings save is not worth the extra certainty, and a wallet that
