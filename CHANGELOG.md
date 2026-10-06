@@ -5,6 +5,61 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.3.0] — 2026-10-06
+
+Two reports on BTCPay's **Reporting** page, and a build against BTCPay Server 2.4.5. Merchants get their
+sweeps and their USDC/USDT conversions in the place they already filter, chart and export CSV. On BTCPay 2.4.5
+the same reports are also readable over Greenfield. The supported range is unchanged: BTCPay 2.4.1 or newer.
+
+Validated before shipping:
+- The unit suite (1,971 tests) passes.
+- The released 1.2.1 build ran unchanged on a mainnet test host upgraded to BTCPay 2.4.5. It loaded, created
+  invoices with all six payment methods, minted LNURL invoices and rendered checkout.
+- This release's code ran on the same host. Both reports were listed on every store, and the stablecoin report
+  returned the host's real USDC payments.
+
+This release adds no database migration and keeps Breez Spark SDK 0.26, so it can be rolled back to 1.2.1.
+
+### Added
+
+- **Flint Sweeps report.** Lists every sweep that moved money or may have (unresolved, sent, confirmed or
+  failed, in the sweep history's own words), with:
+  - what left the wallet;
+  - the fee;
+  - what arrived: bitcoin for a sweep to an address, and for a sweep to a stablecoin on another chain, the
+    delivered (or still estimated) amount;
+  - the destination and its transaction, linked to the block explorer for a sweep to a bitcoin address.
+
+  Refusals are left out: a store under its fee ceiling records one every pass, and the sweep page already
+  shows them.
+- **Flint Stablecoin Payments report** (mainnet). Lists every USDC and USDT payment with:
+  - the payer's network and transaction;
+  - the coin paid;
+  - what reached the wallet (bitcoin or USDB);
+  - the invoice-currency value.
+
+  BTCPay's own Payments report shows none of the conversion. It reads BTCPay's invoices rather than the
+  plugin's quote records, which are deleted a month after crediting, so it covers every payment ever taken.
+- On BTCPay 2.4.5 and later, both reports are available over Greenfield through `POST
+  /api/v1/stores/{storeId}/reports`, for example with `{"search": "view:Flint Sweeps,daterange:last30d,timezone:UTC"}`.
+
+### Changed
+
+- **Built against BTCPay Server 2.4.5**, up from 2.4.4. The support floor stays at 2.4.1. On a 2.4.5 host:
+  - Invoices are created a little faster. Core no longer asks the Lightning client for node details on every
+    invoice, a question Flint, being nodeless, always declined.
+  - A store owner who is not a server admin can no longer paste a `type=flint` connection string into core's
+    own Lightning setup page or Greenfield's payment-method `PUT`. Core 2.4.5 now reserves strings without
+    `server=` for admins. Flint's setup and repair write the configuration themselves, so nothing a merchant
+    does through Flint changes.
+
+### Documentation
+
+- [Trust model](docs/trust-model.md) describes the barrier BTCPay 2.4.5 adds in front of the plugin's
+  cross-store protections, and why those protections stay.
+- [Sweeping](docs/sweeping.md) and [Accepting USDC and USDT](docs/stablecoin-payments.md) point at the new
+  reports.
+
 ## [1.2.1] — 2026-09-28
 
 The unilateral exit stops being an experiment behind a server switch and becomes a supported feature on every
