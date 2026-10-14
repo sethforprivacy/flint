@@ -15,10 +15,6 @@ It can also let customers **pay in USDC or USDT** from Ethereum, Solana, Tron, B
 **the store receives and keeps bitcoin**: the stablecoin is converted on the way in, so the merchant never
 holds it. One switch on the Flint page, off by default.
 
-> [!WARNING]
-> Flint is still in development and thinly proven in production. Use it with caution and amounts you
-> can afford to lose, and read [Known limitations](docs/limitations.md) before putting money through it.
-
 ## Trust model
 
 **What you are trusting, in one paragraph.** Spark is a 2-of-3 statechain operated by Lightspark, Breez

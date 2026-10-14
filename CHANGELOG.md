@@ -5,6 +5,39 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.3.1] — 2026-10-14
+
+Breez Spark SDK 0.26.1, and the README drops its "still in development" warning. Nothing a merchant sees
+changes.
+
+Validated before shipping:
+- The unit suite (1,971 tests) passes, and so do CI's store, live regtest, funded regtest and local Spark
+  stack suites on SDK 0.26.1.
+- The packaged release candidate, with its stripped native libraries, ran on both mainnet test hosts. Every
+  wallet started and synced with its balance unchanged, including a USDB Stable Balance, and the plugin logged
+  no warnings or errors. Invoices got Spark BOLT11 and LNURL prompts and rendered checkout. A $20 invoice also
+  listed the USDC and USDT networks.
+
+This release adds no database migration, and SDK 0.26.1 adds no storage migration over 0.26.0, so it can be
+rolled back to 1.3.0 or 1.2.x.
+
+### Changed
+
+- **Breez Spark SDK 0.26.1**, up from 0.26.0. Upstream, this release only makes the native library smaller: it
+  is now built with link-time optimisation and with a bundled SQLite that leaves out extensions the SDK never
+  used. The C# bindings are unchanged, and the release package is about 4.5 MB (10%) smaller. The SDK now
+  parses its log filter with its own parser instead of `tracing`'s `EnvFilter`. Flint passes a bare `info`,
+  which both read the same way.
+- **The README no longer opens with a warning** that Flint is still in development and thinly proven in
+  production. The [trust model](docs/trust-model.md), [known limitations](docs/limitations.md) and the advice
+  to start with amounts you can afford to lose are unchanged.
+
+### Maintenance
+
+- The weekly Breez SDK bump workflow now regenerates `packages.lock.json`. The 0.26.1 bump PR failed CI's
+  locked-mode restore without it.
+- Test and CI dependencies: xunit.v3 4.0.2 and actions/upload-artifact 7.0.2.
+
 ## [1.3.0] — 2026-10-06
 
 Two reports on BTCPay's **Reporting** page, and a build against BTCPay Server 2.4.5. Merchants get their
@@ -1086,3 +1119,7 @@ signet), the unrotated `sdk.log`, and the one SDK error classification with no a
 [1.0.3]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.3
 [1.0.4]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.4
 [1.1.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.1.0
+[1.2.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.2.0
+[1.2.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.2.1
+[1.3.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.3.0
+[1.3.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.3.1
