@@ -126,7 +126,8 @@
   patch versions to NuGet with no release entry, and a PR per push is churn.
   **`.github/workflows/breez-sdk-update.yml`** runs weekly (and on manual dispatch, with a dry-run
   option) and opens a bump PR only for a version upstream has published a GitHub Release for that
-  also exists on NuGet — see `scripts/check-breez-sdk-update.sh`. A tag-only fix worth shipping
+  also exists on NuGet — see `scripts/check-breez-sdk-update.sh`. The PR carries the regenerated
+  `packages.lock.json` files, so CI's locked-mode restore accepts it. A tag-only fix worth shipping
   early is bumped by hand, exactly as 0.22.2 and 0.22.3 were.
 - **`btcpayserver` submodule bumps** are *not* handled by Dependabot: its `gitsubmodule` ecosystem
   tracks the latest commit on a branch, not release tags, which is the wrong model for a submodule

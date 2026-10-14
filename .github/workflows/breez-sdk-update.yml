@@ -77,8 +77,21 @@ jobs:
       RELEASE_URL: ${{ needs.check.outputs.release_url }}
       DRY_RUN: ${{ github.event.inputs.dry_run }}
     steps:
+      # The submodule is needed here, unlike in the check job: restoring the plugin resolves its
+      # ProjectReference into btcpayserver, and the lock files below cannot be regenerated without it.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # Lock regeneration needs the .NET SDK. Without it the bump PR fails CI at "Restore (locked
+      # mode)" with NU1004, as seen on chore/breez-sdk-0.26.1 (2026-10-13) — the same gap
+      # btcpayserver-update.yml closed for submodule bumps.
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
 
       - name: Configure git identity
         run: |
@@ -100,7 +113,17 @@ jobs:
             echo "error: the PackageReference did not end up at [$LATEST]; refusing to open a PR" >&2
             exit 1
           fi
-          git add BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+
+          # Regenerate the committed lock files against the bumped pin, then prove they agree with
+          # it under locked mode, the property CI's "Restore (locked mode)" checks on the PR.
+          dotnet restore BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+          dotnet restore BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          dotnet restore --locked-mode BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+          dotnet restore --locked-mode BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+
+          git add BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj \
+            BTCPayServer.Plugins.Flint/packages.lock.json \
+            BTCPayServer.Plugins.Flint.Tests/packages.lock.json
           git status --short
 
       - name: Create branch and commit
