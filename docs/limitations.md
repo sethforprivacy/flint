@@ -87,10 +87,11 @@
   - **A custom rate script needs USDC and USDT rules**, or the two payment methods cannot be priced. The plugin's
     defaults are exact pairs (`USDC_USD = 1`, `USDT_USD = 1`, and 42 major fiat currencies through bitcoin) and
     apply only to stores on BTCPay's default rules; other fiat falls to the store's catch-all.
-  - **Replacing a store's recovery phrase strands its open quotes.** A quote names the wallet it pays into, and the
-    old wallet stops running when its phrase is replaced, so a payment to a quote made before the replacement does
-    not credit its invoice. Whatever the provider delivers for it is the old wallet's, reachable only with the old
-    phrase. Replace a phrase when no USDC or USDT invoice is open.
+  - **Replacing a store's recovery phrase strands its open quotes.** A quote's address pays the wallet that made
+    it. From 1.3.1 the checkout and the Greenfield payment link stop offering a quote the moment the store runs a
+    different wallet, and send the payer for a fresh one. But a payment already sent to an old quote does not credit
+    its invoice: whatever the provider delivers for it is the old wallet's, reachable only with the old phrase.
+    Replace a phrase when no USDC or USDT invoice is open.
   - **Quotes are bounded**: ten per invoice and 500 still on offer per store, since each is a provider order the SDK
     watches for a day. Only quotes a payer can still be shown count towards the store's 500.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
