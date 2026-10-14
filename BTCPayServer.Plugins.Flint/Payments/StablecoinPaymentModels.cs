@@ -77,6 +77,12 @@ public class StablecoinActiveQuote
 
     /// <summary>What this network adds to the due.</summary>
     public decimal Fee { get; set; }
+
+    /// <summary>
+    /// The tag of the wallet whose address this is (see <c>ISparkStoreRuntime.GetWalletTag</c>). Null on a quote shown
+    /// before 1.3.1, which is withdrawn like one from a replaced wallet: nothing says which wallet it pays.
+    /// </summary>
+    public string? WalletTag { get; set; }
 }
 
 /// <summary>What a credited USDC or USDT payment records on the BTCPay invoice.</summary>

@@ -23,7 +23,17 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 public class StablecoinPaymentMethodTests
 {
     private static StablecoinPaymentMethodHandler Handler(StablecoinAsset? asset = null, StablecoinHarness? harness = null) =>
-        new(asset ?? StablecoinPayments.Usdc, () => (harness ?? new StablecoinHarness(new FakeSparkStoreRuntime())).Service);
+        new(asset ?? StablecoinPayments.Usdc, () => (harness ?? new StablecoinHarness(RunningStore1())).Service);
+
+    /// <summary>A runtime where <c>store-1</c>, the store every invoice here belongs to, runs <c>wallet-of-store-1</c>.</summary>
+    private static FakeSparkStoreRuntime RunningStore1(string? walletTag = null)
+    {
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients["store-1"] = new FakeSparkSdkClient();
+        if (walletTag is not null)
+            runtime.WalletTags["store-1"] = walletTag;
+        return runtime;
+    }
 
     [Fact]
     public void The_payment_method_ids_are_the_coin_and_the_plugin()
@@ -144,9 +154,10 @@ public class StablecoinPaymentMethodTests
         StablecoinPromptDetails details,
         string? destination,
         decimal netDue = 10m,
-        IUrlHelper? url = null)
+        IUrlHelper? url = null,
+        FakeSparkStoreRuntime? runtime = null)
     {
-        var handler = Handler();
+        var handler = Handler(harness: new StablecoinHarness(runtime ?? RunningStore1()));
         var invoice = new InvoiceEntity { Id = "invoice-1", Currency = "USD", StoreId = "store-1" };
         invoice.AddRate(new CurrencyPair("USDC", "USD"), 1m);
         // Through BTCPay's own invoice storage, so checkout reads the details back in the shape BTCPay stores them
@@ -181,7 +192,8 @@ public class StablecoinPaymentMethodTests
         {
             QuoteId = "q1", Chain = "base", ChainName = "Base", DepositAddress = "0xdep", Amount = "10.08",
             PaymentRequest = "ethereum:0xabc@8453/transfer?address=0xdep&uint256=10080000",
-            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), Due = quoteDue, Fee = 0.08m
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), Due = quoteDue, Fee = 0.08m,
+            WalletTag = "wallet-of-store-1"
         }
     };
 
@@ -232,6 +244,36 @@ public class StablecoinPaymentMethodTests
         // local copy the model withdraws) and sends the payer for a fresh address for what is left.
         Assert.Equal("q1", (string?)data["withdrawn"]!["id"]);
         Assert.Equal("base", (string?)data["withdrawn"]!["chain"]);
+        Assert.Equal("paid", (string?)data["withdrawn"]!["reason"]);
+    }
+
+    public static TheoryData<string, string?, bool> QuotesNotFromTheRunningWallet => new()
+    {
+        // The store's recovery phrase was replaced: the address pays the old wallet.
+        { "replaced", "wallet-of-store-1", true },
+        // Shown before quotes carried a tag: nothing says which wallet the address pays.
+        { "untagged", null, true },
+        // The store runs no wallet at all.
+        { "stopped", "wallet-of-store-1", false }
+    };
+
+    [Theory]
+    [MemberData(nameof(QuotesNotFromTheRunningWallet))]
+    public void A_quote_that_does_not_pay_the_running_wallet_is_withdrawn(string why, string? quoteTag, bool running)
+    {
+        var details = Details();
+        details.Quote!.WalletTag = quoteTag;
+        var runtime = running ? RunningStore1(why == "replaced" ? "wallet-of-store-1-new" : null) : new FakeSparkStoreRuntime();
+
+        var (model, data) = Checkout(details, destination: "0xdep", runtime: runtime);
+
+        Assert.Equal(JTokenType.Null, data["quote"]!.Type);
+        Assert.Null(model.InvoiceBitcoinUrl);
+        Assert.Null(model.InvoiceBitcoinUrlQR);
+        // Named, so a page still holding it drops it and asks the running wallet for a fresh address — and not
+        // explained to the payer as a part payment, which it is not.
+        Assert.Equal("q1", (string?)data["withdrawn"]!["id"]);
+        Assert.Equal("wallet", (string?)data["withdrawn"]!["reason"]);
     }
 
     [Fact]
@@ -375,6 +417,9 @@ public class StablecoinPaymentMethodTests
         Assert.Equal(details.Quote!.PaymentRequest, link.GetPaymentLink(Prompt("0xdep", 10m), null));
         // Withdrawn by a part payment, as at checkout.
         Assert.Null(link.GetPaymentLink(Prompt("0xdep", 4m), null));
+        // And by a replaced wallet: the link would pay the old one.
+        details.Quote!.WalletTag = "wallet-of-store-1-old";
+        Assert.Null(link.GetPaymentLink(Prompt("0xdep", 10m), null));
 
         details.Quote = null;
         Assert.Null(link.GetPaymentLink(Prompt(null, 10m), null));

@@ -86,6 +86,14 @@ different amount is still credited, with what actually arrived, whenever its quo
 others. One that cannot — two identical quotes and an inexact payment, say — stays in the wallet and is reported
 once in BTCPay's log for a human to reconcile, rather than guessed at.
 
+"What actually arrived" is the deposit the provider measured, when it reports one. When it does not, what reached
+the wallet is the evidence. A delivery within the quote's 1% slippage of its estimate credits the invoice in full. A
+bitcoin delivery further short is valued at the store's own live mid-market BTC rate: worth the quote's due (within
+2%, the provider's spread), it was a late deposit the provider repriced and credits in full; worth less, it is
+credited in proportion. With no rate to be had, the credit waits for one, for up to a day, and is then credited in
+proportion to the quote's own estimate, so a payer the price moved against reads as part-paid for the merchant to
+settle, rather than a short payer reading as paid.
+
 The invoice's page then lists each USDC/USDT payment with its network, the payer's own transaction hash (what a
 merchant needs to chase a payment on the other chain), and what reached the wallet.
 

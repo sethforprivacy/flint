@@ -441,6 +441,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
                 provider.GetRequiredService<IStablecoinStoreConfig>(),
                 provider.GetRequiredService<ISparkStoreRuntime>(),
                 provider.GetRequiredService<StablecoinRouteCache>(),
+                provider.GetRequiredService<ICrossChainValueOracle>(),
                 provider.GetRequiredService<TimeProvider>(),
                 SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType) == Network.Main,
                 provider.GetRequiredService<ILogger<StablecoinPaymentService>>());

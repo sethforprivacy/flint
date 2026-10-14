@@ -24,6 +24,14 @@ public sealed class FakeSparkStoreRuntime : ISparkStoreRuntime
     public Task<ISparkSdkClient?> GetSdkClientAsync(string storeId) =>
         Task.FromResult(Clients.TryGetValue(storeId, out var client) ? client : null);
 
+    /// <summary>Each running store's wallet tag; a store without one here runs <c>wallet-of-{storeId}</c>.</summary>
+    public Dictionary<string, string> WalletTags { get; } = [];
+
+    public string? GetWalletTag(string storeId, ISparkSdkClient? sdk = null) =>
+        Clients.TryGetValue(storeId, out var client) && (sdk is null || ReferenceEquals(client, sdk))
+            ? WalletTags.GetValueOrDefault(storeId, $"wallet-of-{storeId}")
+            : null;
+
     /// <summary>What an import of the queue reports. Nothing queued, unless a test says otherwise.</summary>
     public ExitStateImportReport NextImportReport { get; set; } = ExitStateImportReport.NothingPending;
 
@@ -173,4 +181,11 @@ public sealed class FakeCrossChainValueOracle : ICrossChainValueOracle
         Calls.Add((storeId, currencyCode));
         return Task.FromResult<decimal?>(Unavailable ? null : BtcUsd / 100_000_000m);
     }
+
+    /// <summary>The same <see cref="BtcUsd"/>: the fake has no spread, so bid and mid are one price.</summary>
+    public Task<decimal?> TryGetSatoshiMidValueAsync(
+        string storeId,
+        string currencyCode,
+        CancellationToken cancellationToken = default) =>
+        TryGetSatoshiValueAsync(storeId, currencyCode, cancellationToken);
 }

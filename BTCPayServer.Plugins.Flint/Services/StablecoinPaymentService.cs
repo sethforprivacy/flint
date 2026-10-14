@@ -97,6 +97,18 @@ public sealed class StablecoinPaymentService
     private static readonly TimeSpan CreditRetryHorizon = TimeSpan.FromDays(7);
 
     /// <summary>
+    /// How long a credit that needs the live price waits for one before settling for the quote's own (see
+    /// <see cref="CreditedBaseUnits"/>).
+    /// </summary>
+    /// <remarks>
+    /// Waiting is retrying: the credit fails and the next reconciliation pass tries again. Recorded without a price,
+    /// a late payer the price moved against would read as part-paid for good, because a recorded payment is never
+    /// revalued — for want of a rate source that was down for a minute, or a fetch cancelled by a wallet restart.
+    /// A day bounds how long such an invoice reads as unpaid instead.
+    /// </remarks>
+    internal static readonly TimeSpan LivePriceWait = TimeSpan.FromDays(1);
+
+    /// <summary>
     /// How long a finished quote is kept: one credited this long ago, or one that expired unpaid this long ago.
     /// </summary>
     /// <remarks>
@@ -117,6 +129,7 @@ public sealed class StablecoinPaymentService
     private readonly IStablecoinStoreConfig _storeConfig;
     private readonly ISparkStoreRuntime _runtime;
     private readonly StablecoinRouteCache _routes;
+    private readonly ICrossChainValueOracle _valueOracle;
     private readonly TimeProvider _time;
     private readonly ILogger<StablecoinPaymentService> _logger;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _storeGates = new(StringComparer.Ordinal);
@@ -133,10 +146,12 @@ public sealed class StablecoinPaymentService
         IStablecoinStoreConfig storeConfig,
         ISparkStoreRuntime runtime,
         StablecoinRouteCache routes,
+        ICrossChainValueOracle valueOracle,
         TimeProvider time,
         bool available,
         ILogger<StablecoinPaymentService> logger)
     {
+        _valueOracle = valueOracle;
         _quotes = quotes;
         _invoices = invoices;
         _storeConfig = storeConfig;
@@ -415,7 +430,7 @@ public sealed class StablecoinPaymentService
         var now = _time.GetUtcNow();
         var existing = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
         if (Reusable(existing, invoice, asset, network, sdk, now) is { } reusable)
-            return await ShowAsync(invoice, asset, reusable, cancellationToken).ConfigureAwait(false);
+            return await ShowAsync(invoice, asset, reusable, sdk, cancellationToken).ConfigureAwait(false);
         if (existing.Count >= StablecoinPayments.MaxQuotesPerInvoice)
             return TooManyForInvoice();
 
@@ -509,7 +524,7 @@ public sealed class StablecoinPaymentService
             }
 
             if (raced is not null)
-                return await ShowAsync(invoice, asset, raced, cancellationToken).ConfigureAwait(false);
+                return await ShowAsync(invoice, asset, raced, sdk, cancellationToken).ConfigureAwait(false);
             if (refused is not null)
                 return refused;
             if (recorded is not null)
@@ -519,7 +534,7 @@ public sealed class StablecoinPaymentService
                     + "as {Destination})",
                     invoice.StoreId, StablecoinAmounts.Format(ask, decimals), asset.Symbol, route.Chain,
                     invoice.InvoiceId, invoice.Due, quote.DestinationAsset);
-                return await ShowAsync(invoice, asset, recorded, cancellationToken).ConfigureAwait(false);
+                return await ShowAsync(invoice, asset, recorded, sdk, cancellationToken).ConfigureAwait(false);
             }
 
             // Taken. Landing as sats, a millionth of a dollar is a hundredth of a sat and moves nothing, so from
@@ -702,13 +717,23 @@ public sealed class StablecoinPaymentService
         ExpiresAt = quote.ExpiresAt
     };
 
+    /// <remarks>
+    /// <b>Shown with the wallet it pays.</b> A quote's address pays the wallet that minted it, through
+    /// <paramref name="sdk"/>, so the prompt records that wallet's tag and the checkout and payment link stop offering
+    /// the quote once the store runs another (see <c>StablecoinCheckoutModelExtension.IsCurrent</c>). A handle that is
+    /// no longer the store's by now is a wallet replaced mid-request, and its quote is not shown at all.
+    /// </remarks>
     private async Task<StablecoinQuoteResult> ShowAsync(
         StablecoinInvoice invoice,
         StablecoinAsset asset,
         StablecoinQuote quote,
+        ISparkSdkClient sdk,
         CancellationToken cancellationToken)
     {
-        var shown = ToActiveQuote(quote);
+        if (_runtime.GetWalletTag(invoice.StoreId, sdk) is not { } walletTag)
+            return StablecoinQuoteResult.Refused($"{asset.Symbol} payments are unavailable right now. Please try again.");
+
+        var shown = ToActiveQuote(quote, walletTag);
         await _invoices.ShowQuoteAsync(invoice.InvoiceId, asset.PaymentMethodId, shown, cancellationToken)
             .ConfigureAwait(false);
         return new StablecoinQuoteResult(shown, null);
@@ -740,8 +765,9 @@ public sealed class StablecoinPaymentService
         return depositAddress;
     }
 
-    private static StablecoinActiveQuote ToActiveQuote(StablecoinQuote quote) => new()
+    private static StablecoinActiveQuote ToActiveQuote(StablecoinQuote quote, string walletTag) => new()
     {
+        WalletTag = walletTag,
         QuoteId = quote.Id,
         Chain = quote.Chain,
         ChainName = StablecoinPayments.ChainName(quote.Chain),
@@ -757,6 +783,9 @@ public sealed class StablecoinPaymentService
     #endregion
 
     #region Crediting
+
+    /// <summary>The tag of the wallet the store is running now, or null; see <see cref="ISparkStoreRuntime.GetWalletTag"/>.</summary>
+    public string? RunningWalletTag(string storeId) => _runtime.GetWalletTag(storeId);
 
     /// <summary>Whether a store has quotes a receive arriving now could belong to.</summary>
     public async Task<bool> HasOpenQuotesAsync(string storeId, CancellationToken cancellationToken = default)
@@ -878,20 +907,32 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
-    /// How far short of its quote's estimate a delivery landing as sats may fall and still read as the quote paid in
-    /// full, in basis points — when the provider has not said what was deposited (see <see cref="CreditedBaseUnits"/>).
+    /// How far short of its quote's due a sats delivery may be worth, at the live price, and still read as the quote
+    /// paid in full — when the provider has not said what was deposited (see <see cref="CreditedBaseUnits"/>).
     /// </summary>
     /// <remarks>
-    /// Wide, because a sats delivery moves with the bitcoin price: the provider reprices a deposit made after the
-    /// quote's two-minute price, and the SDK watches for one for a day. A token delivery is at dollar parity and gets
-    /// the quote's own slippage budget (<see cref="StablecoinPayments.MaxSlippageBps"/>) instead.
+    /// <para>
+    /// Covers the provider's spread over the store's own rate source and the minutes between the conversion and the
+    /// credit — Breez's own receive tests allow 200 bps on sats destinations — and nothing else. A price move is not
+    /// in it: the delivery is valued at today's price, so a deposit the provider repriced is judged by what it is
+    /// worth now, however far the price moved.
+    /// </para>
+    /// <para>
+    /// It was a flat 10% of the quote's sat estimate until 1.3.1, sized for a day of price drift, and so let a payer
+    /// whose deposit went unmeasured send up to a tenth less than asked and settle the invoice in full.
+    /// </para>
     /// </remarks>
-    internal const int SatsDeliveryToleranceBps = 1_000;
+    internal const int RepricedDeliveryToleranceBps = 200;
 
     /// <summary>
     /// What a settled quote's payer is taken to have deposited, in route base units — the amount its invoice is
     /// credited with.
     /// </summary>
+    /// <param name="quote">The settled quote.</param>
+    /// <param name="usdPerSat">
+    /// The live value of a sat, for valuing a sats delivery the quote's own price does not account for; null when no
+    /// rate could be had, or none was asked for (see <see cref="NeedsLivePrice"/>).
+    /// </param>
     /// <remarks>
     /// <para>
     /// <b>The deposit the SDK reports is not always the deposit.</b> <c>assetAmountIn</c> is the provider order's
@@ -904,38 +945,72 @@ public sealed class StablecoinPaymentService
     /// </para>
     /// <para>
     /// <b>The rules.</b> A reported amount that is not the quote-time deposit is the provider's word on what arrived,
-    /// and is credited as it is. Anything else means "the payer paid this quote", and is credited as the amount
-    /// they were asked for — unless what reached the wallet says otherwise: a delivery short of the quote's estimate
-    /// by more than a price move explains (<see cref="SatsDeliveryToleranceBps"/> for sats, the slippage budget for a
-    /// token at par) is credited in proportion to what was delivered, rounded down, because then the ask is the one
-    /// thing the payer certainly did not send.
+    /// and is credited as it is. Otherwise the delivery is the only evidence of what was sent:
     /// </para>
+    /// <list type="bullet">
+    /// <item>within the quote's slippage budget of its estimate, the quote was paid as asked;</item>
+    /// <item>a token lands at par, so short of that it is credited in proportion to what was delivered;</item>
+    /// <item>
+    /// sats short of the estimate may be a short deposit or a late one the provider repriced, and only the price can
+    /// tell them apart: worth the quote's due at the live price (less <see cref="RepricedDeliveryToleranceBps"/>),
+    /// it was paid as asked; worth less, it is credited in proportion to that worth. With no live price, in
+    /// proportion to the estimate, as a token is — a payer the price moved against reads as part-paid, which the
+    /// merchant can see and settle, rather than a short payer reading as paid, which they cannot.
+    /// </item>
+    /// </list>
+    /// <para>Credits are rounded down and never exceed the ask.</para>
     /// </remarks>
-    internal static BigInteger CreditedBaseUnits(StablecoinQuote quote)
+    internal static BigInteger CreditedBaseUnits(StablecoinQuote quote, decimal? usdPerSat = null)
     {
         ArgumentNullException.ThrowIfNull(quote);
 
         var asked = quote.Asked;
-        if (quote.PaidBaseUnits is { } reported
-            && StablecoinQuote.ParseBaseUnits(reported) is var paid
-            && paid != StablecoinQuote.ParseBaseUnits(quote.DepositBaseUnits))
-        {
+        if (Measured(quote) is { } paid)
             return paid;
-        }
 
         var expected = quote.ExpectedReceived;
         if (quote.DeliveredBaseUnits is null || expected <= BigInteger.Zero)
             return asked;
 
         var delivered = StablecoinQuote.ParseBaseUnits(quote.DeliveredBaseUnits);
-        var toleranceBps = string.Equals(quote.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase)
-            ? SatsDeliveryToleranceBps
-            : (int)StablecoinPayments.MaxSlippageBps;
-        if (delivered * 10_000 >= expected * (10_000 - toleranceBps))
+        if (delivered * 10_000 >= expected * (10_000 - StablecoinPayments.MaxSlippageBps))
             return asked;
+
+        if (LandsAsSats(quote) && usdPerSat is > 0m && quote.DueAmount > 0m)
+        {
+            var worth = (decimal)delivered * usdPerSat.Value;
+            if (worth * 10_000m >= quote.DueAmount * (10_000m - RepricedDeliveryToleranceBps))
+                return asked;
+
+            var ppm = new BigInteger(Math.Floor(worth / quote.DueAmount * 1_000_000m));
+            return BigInteger.Min(asked, asked * ppm / 1_000_000);
+        }
 
         return BigInteger.Min(asked, asked * delivered / expected);
     }
+
+    /// <summary>
+    /// Whether crediting <paramref name="quote"/> turns on the live price of a sat: an unmeasured sats delivery short
+    /// of its estimate by more than the quote's own slippage.
+    /// </summary>
+    internal static bool NeedsLivePrice(StablecoinQuote quote) =>
+        LandsAsSats(quote)
+        && Measured(quote) is null
+        && quote.DeliveredBaseUnits is not null
+        && quote.ExpectedReceived > BigInteger.Zero
+        && StablecoinQuote.ParseBaseUnits(quote.DeliveredBaseUnits) * 10_000
+           < quote.ExpectedReceived * (10_000 - StablecoinPayments.MaxSlippageBps);
+
+    /// <summary>The deposit the provider measured, or null when what it reported is only the quote-time deposit.</summary>
+    private static BigInteger? Measured(StablecoinQuote quote) =>
+        quote.PaidBaseUnits is { } reported
+        && StablecoinQuote.ParseBaseUnits(reported) is var paid
+        && paid != StablecoinQuote.ParseBaseUnits(quote.DepositBaseUnits)
+            ? paid
+            : null;
+
+    private static bool LandsAsSats(StablecoinQuote quote) =>
+        string.Equals(quote.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Records a settled quote's payment on its BTCPay invoice, and marks it recorded.</summary>
     private async Task<StablecoinReceiveOutcome> CreditAsync(StablecoinQuote quote, CancellationToken cancellationToken)
@@ -943,7 +1018,33 @@ public sealed class StablecoinPaymentService
         if (quote.SdkPaymentId is not { } paymentId)
             return StablecoinReceiveOutcome.CreditFailed;
 
-        var paid = CreditedBaseUnits(quote);
+        decimal? usdPerSat = null;
+        if (NeedsLivePrice(quote))
+        {
+            // USD for the coin: the plugin prices USDC and USDT at par with it (see StablecoinRateRules).
+            usdPerSat = await _valueOracle
+                .TryGetSatoshiMidValueAsync(quote.StoreId, "USD", cancellationToken)
+                .ConfigureAwait(false);
+            if (usdPerSat is null && _time.GetUtcNow() - (quote.SettledAt ?? _time.GetUtcNow()) < LivePriceWait)
+            {
+                _logger.Log(CreditFailureLevel(quote.Id),
+                    "Store {StoreId}: the {Asset} payment {SdkPaymentId} for invoice {InvoiceId} delivered less "
+                    + "bitcoin than its quote estimated and needs the live BTC rate to be valued, which could not be "
+                    + "read; it will be recorded once a rate is available, or by the quote's own price after {Hours} "
+                    + "hours",
+                    quote.StoreId, quote.Asset, paymentId, quote.InvoiceId, LivePriceWait.TotalHours);
+                return StablecoinReceiveOutcome.CreditFailed;
+            }
+
+            _logger.LogInformation(
+                "Store {StoreId}: {Asset} payment {SdkPaymentId} for invoice {InvoiceId} delivered {Delivered} sat "
+                + "against an estimate of {Expected} and no measured deposit; valuing it at {Price}",
+                quote.StoreId, quote.Asset, paymentId, quote.InvoiceId, quote.DeliveredBaseUnits,
+                quote.ExpectedReceivedBaseUnits,
+                usdPerSat is { } price ? $"{price * 100_000_000m:0.##} USD/BTC" : "the quote's own price (no live rate)");
+        }
+
+        var paid = CreditedBaseUnits(quote, usdPerSat);
         var value = StablecoinAmounts.FromBaseUnits(paid, quote.Decimals, StablecoinPayments.Divisibility);
         // The quote's own network cost, so a payer who sent exactly what was asked settles exactly the due. Capped
         // at what arrived: a deposit below the cost is still a payment, of nothing net.

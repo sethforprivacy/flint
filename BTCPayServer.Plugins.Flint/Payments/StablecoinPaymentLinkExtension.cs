@@ -32,9 +32,11 @@ public sealed class StablecoinPaymentLinkExtension : IPaymentLinkExtension
             return null;
         try
         {
-            // The checkout's own rule: a quote withdrawn because the invoice was part-paid is not a link to pay.
+            // The checkout's own rule: a quote withdrawn — the invoice part-paid since, or the store's wallet
+            // replaced — is not a link to pay.
             return (_handler.ParsePaymentPromptDetails(raw) as StablecoinPromptDetails)?.Quote is { } quote
-                   && StablecoinCheckoutModelExtension.IsCurrent(prompt.ParentEntity, prompt, quote)
+                   && StablecoinCheckoutModelExtension.IsCurrent(
+                       prompt.ParentEntity, prompt, quote, _handler.RunningWalletTag(prompt.ParentEntity?.StoreId))
                 ? quote.PaymentRequest
                 : null;
         }

@@ -41,6 +41,20 @@ public interface ICrossChainValueOracle
         string storeId,
         string currencyCode,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The mid-market value of one satoshi in <paramref name="currencyCode"/> through the store's rules, or null when
+    /// no rate could be obtained — for valuing what arrived rather than guarding what leaves.
+    /// </summary>
+    /// <remarks>
+    /// The midpoint, because the store's own spread widens its bid and ask around it (BTCPay's <c>Spread</c> setting)
+    /// and has nothing to do with what a delivery is worth: valued at the bid, a store with a 2% spread would read
+    /// every repriced payment as 2% short.
+    /// </remarks>
+    Task<decimal?> TryGetSatoshiMidValueAsync(
+        string storeId,
+        string currencyCode,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -75,7 +89,7 @@ public sealed class BTCPayCrossChainValueOracle : ICrossChainValueOracle
     private readonly ILogger<BTCPayCrossChainValueOracle> _logger;
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<
-        (string StoreId, string Currency), (decimal Value, DateTimeOffset FetchedAt)> _cache = new();
+        (string StoreId, string Currency, bool Mid), (decimal Value, DateTimeOffset FetchedAt)> _cache = new();
 
     public BTCPayCrossChainValueOracle(
         Func<RateFetcher> rateFetcher,
@@ -91,15 +105,28 @@ public sealed class BTCPayCrossChainValueOracle : ICrossChainValueOracle
         _logger = logger;
     }
 
-    public async Task<decimal?> TryGetSatoshiValueAsync(
+    public Task<decimal?> TryGetSatoshiValueAsync(
         string storeId,
         string currencyCode,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        FetchAsync(storeId, currencyCode, mid: false, cancellationToken);
+
+    public Task<decimal?> TryGetSatoshiMidValueAsync(
+        string storeId,
+        string currencyCode,
+        CancellationToken cancellationToken = default) =>
+        FetchAsync(storeId, currencyCode, mid: true, cancellationToken);
+
+    private async Task<decimal?> FetchAsync(
+        string storeId,
+        string currencyCode,
+        bool mid,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
         ArgumentException.ThrowIfNullOrEmpty(currencyCode);
 
-        var key = (storeId, currencyCode.ToUpperInvariant());
+        var key = (storeId, currencyCode.ToUpperInvariant(), mid);
         var now = _timeProvider.GetUtcNow();
 
         if (_cache.TryGetValue(key, out var cached) && now - cached.FetchedAt < CacheFor)
@@ -116,9 +143,9 @@ public sealed class BTCPayCrossChainValueOracle : ICrossChainValueOracle
                 .FetchRate(new CurrencyPair("BTC", key.Item2), rules, null, cancellationToken)
                 .ConfigureAwait(false);
 
-            // Bid, not ask, and not the mid: this is the conservative side for someone selling bitcoin, so a
-            // wide spread makes the guard slightly stricter rather than slightly laxer.
-            if (result?.BidAsk is not { } bidAsk || bidAsk.Bid <= 0)
+            // For the guard, bid, not ask, and not the mid: this is the conservative side for someone selling
+            // bitcoin, so a wide spread makes the guard slightly stricter rather than slightly laxer.
+            if (result?.BidAsk is not { } bidAsk || bidAsk.Bid <= 0 || (mid && bidAsk.Ask <= 0))
             {
                 _logger.LogWarning(
                     "Store {StoreId}: no BTC/{Currency} rate available to sanity-check a cross-chain quote",
@@ -126,7 +153,7 @@ public sealed class BTCPayCrossChainValueOracle : ICrossChainValueOracle
                 return null;
             }
 
-            var perSatoshi = bidAsk.Bid / 100_000_000m;
+            var perSatoshi = (mid ? (bidAsk.Bid + bidAsk.Ask) / 2m : bidAsk.Bid) / 100_000_000m;
             _cache[key] = (perSatoshi, now);
             return perSatoshi;
         }

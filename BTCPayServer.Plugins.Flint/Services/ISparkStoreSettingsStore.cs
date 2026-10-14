@@ -99,6 +99,17 @@ public interface ISparkStoreRuntime
     Task<ISparkSdkClient?> GetSdkClientAsync(string storeId);
 
     /// <summary>
+    /// A publishable name for the wallet the store is running, or null when it runs none — or, given
+    /// <paramref name="sdk"/>, when that handle is no longer the one it runs. Never starts anything: it is read on
+    /// the checkout's synchronous path.
+    /// </summary>
+    /// <remarks>
+    /// The same recovery phrase gives the same tag across restarts, and a different phrase a different one, so a
+    /// tag recorded beside a deposit address says whether that address still pays the store's wallet.
+    /// </remarks>
+    string? GetWalletTag(string storeId, ISparkSdkClient? sdk = null);
+
+    /// <summary>
     /// Imports every backup queued for this store (see <see cref="IExitStateBackupStore.AddPendingAsync"/>)
     /// into its running wallet now, and reports what happened.
     /// </summary>

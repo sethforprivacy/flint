@@ -87,7 +87,8 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
         details ??= new StablecoinPromptDetails();
 
         var quote = details.Quote;
-        var current = IsCurrent(context.InvoiceEntity, context.Prompt, quote);
+        var runningWalletTag = handler.RunningWalletTag(context.InvoiceEntity?.StoreId);
+        var current = IsCurrent(context.InvoiceEntity, context.Prompt, quote, runningWalletTag);
 
         if (current && quote is not null)
         {
@@ -118,13 +119,22 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
             quote = current && quote is not null ? Controllers.UIStablecoinCheckoutController.ToResponse(quote) : null,
             // The quote the prompt last showed, once it is no longer offered. The payer's page may still hold it from
             // its own quote request, and must stop showing it and send the payer for a fresh one — see IsCurrent.
-            withdrawn = !current && quote is not null ? new { id = quote.QuoteId, chain = quote.Chain } : null
+            withdrawn = !current && quote is not null
+                ? new
+                {
+                    id = quote.QuoteId,
+                    chain = quote.Chain,
+                    // Which sentence the payer reads: a part payment's, or one for an address that may not pay the
+                    // store's wallet any more.
+                    reason = PaysWallet(quote, runningWalletTag) ? "paid" : "wallet"
+                }
+                : null
         });
     }
 
     /// <summary>
-    /// Whether the quote a prompt shows is still one to pay: its address is the prompt's destination, and it was made
-    /// for the invoice's due as it stands.
+    /// Whether the quote a prompt shows is still one to pay: its address is the prompt's destination, it pays the
+    /// wallet the store runs now, and it was made for the invoice's due as it stands.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -135,14 +145,27 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
     /// The payer must get a fresh quote for the remainder, and the checkout says so.
     /// </para>
     /// <para>
+    /// <b>A quote from another wallet is withdrawn.</b> Its address pays the wallet that minted it, and after a store's
+    /// recovery phrase is replaced that is the old one — perhaps replaced because someone else holds it. The quote
+    /// path already refuses to reuse such a quote; without this check the checkout, its status poll and the Greenfield
+    /// payment link went on handing it out for the hour it is offered. A quote with no tag predates the check and is
+    /// withdrawn too, as is every quote while the store runs no wallet: neither can be shown to pay the store.
+    /// </para>
+    /// <para>
     /// Never throws: a due that cannot be computed (no rate) is a quote that cannot be confirmed current.
     /// </para>
     /// </remarks>
-    internal static bool IsCurrent(InvoiceEntity? invoice, PaymentPrompt prompt, StablecoinActiveQuote? quote) =>
+    internal static bool IsCurrent(
+        InvoiceEntity? invoice, PaymentPrompt prompt, StablecoinActiveQuote? quote, string? runningWalletTag) =>
         quote is not null
+        && PaysWallet(quote, runningWalletTag)
         && prompt.Destination == quote.DepositAddress
         && invoice is not null
         && quote.Due == CurrentDue(invoice, prompt);
+
+    /// <summary>Whether <paramref name="quote"/> is known to pay the wallet tagged <paramref name="runningWalletTag"/>.</summary>
+    private static bool PaysWallet(StablecoinActiveQuote quote, string? runningWalletTag) =>
+        quote.WalletTag is not null && string.Equals(quote.WalletTag, runningWalletTag, StringComparison.Ordinal);
 
     /// <summary>The invoice's net due in the prompt's currency, as the quote path computes it.</summary>
     private static decimal? CurrentDue(InvoiceEntity invoice, PaymentPrompt prompt)
