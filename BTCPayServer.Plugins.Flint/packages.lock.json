@@ -4,9 +4,9 @@
     "net10.0": {
       "Breez.Sdk.Spark": {
         "type": "Direct",
-        "requested": "[0.26.0, 0.26.0]",
-        "resolved": "0.26.0",
-        "contentHash": "uq45j6gHCXuTROT3npe/OXHwQIpmCWUzL37gGDu2AgHh5v3h6/xFOaNSdV8D266A0HGhHM6gjG7nafsEX62xMQ=="
+        "requested": "[0.26.1, 0.26.1]",
+        "resolved": "0.26.1",
+        "contentHash": "dq7hpjZrNznEV8YPC9JDMBUjsarbDnMT6c0u/HIyods4JwpmCR5F/RoVn4D3AWIcVR+10VlpMmoffYWlTynF1g=="
       },
       "SSH.NET": {
         "type": "Direct",
