@@ -13,7 +13,12 @@ Two fixes to USDC/USDT payments from the 1.3.1 security review, Breez Spark SDK 
 Validated before shipping:
 - The unit suite (1,982 tests) passes, and so do CI's store, live regtest, funded regtest and local Spark stack
   suites on SDK 0.26.1.
-__VALIDATION__
+- The packaged release candidate ran on both mainnet test hosts. Every wallet started and synced with its balance
+  unchanged, including a USDB Stable Balance, with no errors logged and no warnings beyond the SDK's usual one at
+  shutdown. Invoices got Spark
+  BOLT11 and LNURL prompts and rendered checkout, and a $20 invoice listed the USDC and USDT networks. A live USDC
+  quote on Base recorded the running wallet's tag, rendered at checkout, and stayed payable through checkout and
+  the Greenfield payment link, including across a server restart.
 
 This release adds no database migration, and SDK 0.26.1 adds no storage migration over 0.26.0, so it can be rolled
 back to 1.3.0 or 1.2.x. A rollback brings both defects below back.
