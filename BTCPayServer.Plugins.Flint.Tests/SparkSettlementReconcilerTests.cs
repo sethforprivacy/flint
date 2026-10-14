@@ -85,13 +85,12 @@ public class SparkSettlementReconcilerTests
     public async Task A_settlement_for_less_than_the_invoiced_amount_is_logged_loudly()
     {
         // Audit finding PaymentFlow F3. Nothing compares what arrived to what was invoiced, and the record
-        // settles once and never revises upward — so a sub-amount arrival marks the invoice paid for less than
-        // it asked, and the completing payment that follows is swallowed as AlreadySettled.
+        // settles once and never revises upward. Spark's operators refuse a swap worth less than a fixed-amount
+        // BOLT11, so a short receive means that invariant broke.
         //
-        // Deliberately still a settlement, not a refusal: on the Lightning rail this cannot happen (the preimage
-        // is only released for a full payment), and refusing on an amount the SDK reported a hair low would stop
-        // legitimate invoices settling — a worse failure than the unproven Spark-rail case it would defend
-        // against. So the invariant pinned here is that the operator is told, not that the money is rejected.
+        // Deliberately still a settlement, not a refusal: refusing on an amount the SDK reported a hair low would
+        // stop legitimate invoices settling. So the invariant pinned here is that the operator is told, not that
+        // the money is rejected.
         var (reconciler, store, _, log) = CreateWithLog();
         Seed(store); // invoiced 100_000 msat = 100 sat
 
@@ -112,6 +111,31 @@ public class SparkSettlementReconcilerTests
         await reconciler.ApplyAsync(StoreId, Receive(amountSats: 100), Ct);
 
         Assert.DoesNotContain("asked for", log.AllText);
+    }
+
+    [Fact]
+    public async Task A_second_completed_receive_for_a_settled_invoice_is_reported_not_swallowed()
+    {
+        // 1.3.1 security quorum, finding 4. A second completed receive for the same payment hash cannot reach the
+        // BTCPay invoice — its payment row is keyed on the hash, which the first receive already holds — so
+        // unless it is reported, its sats sit in the wallet on no invoice and nobody is told. Spark's operators
+        // allow one completed receive per hash, so this pins the tripwire, not a flow. A replay of the receive
+        // that settled the invoice is the everyday case and must stay quiet.
+        var (reconciler, store, _, log) = CreateWithLog();
+        Seed(store);
+        await reconciler.ApplyAsync(StoreId, Receive(sdkPaymentId: "sdk-1", amountSats: 100), Ct);
+
+        var replay = await reconciler.ApplyAsync(StoreId, Receive(sdkPaymentId: "sdk-1", amountSats: 100), Ct);
+
+        Assert.Equal(InvoiceSettlementOutcome.AlreadySettled, replay.Outcome);
+        Assert.DoesNotContain(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal));
+
+        var second = await reconciler.ApplyAsync(StoreId, Receive(sdkPaymentId: "sdk-2", amountSats: 60), Ct);
+
+        Assert.Equal(InvoiceSettlementOutcome.AlreadySettled, second.Outcome);
+        var warning = Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal));
+        Assert.Contains("sdk-2", warning);
+        Assert.Contains("60 sat", warning);
     }
 
     private static InvoiceRecord Seed(

@@ -167,21 +167,23 @@ public class SparkSettlementReconciler
         switch (result.Outcome)
         {
             case InvoiceSettlementOutcome.Settled when result.Record is not null:
-                // Audit finding PaymentFlow F3. Nothing here compares what arrived to what was invoiced, and the
-                // record settles once and never revises upward — so a sub-amount arrival linked to this hash
-                // marks the invoice Paid for less than it asked, and the completing payment that follows is
-                // swallowed as AlreadySettled. On the classic Lightning rail this cannot happen, because the
-                // preimage is only released for a full payment; the Spark rail's amount semantics are undefined,
-                // which is why this is a loud warning rather than a refusal. Refusing would be worse: if the SDK
-                // ever reported an amount a hair low, legitimate invoices would stop settling and the merchant
-                // would lose sales to a defence against an unproven attack.
+                // Audit finding PaymentFlow F3: nothing here compares what arrived to what was invoiced, and the
+                // record settles once and never revises upward. That is safe because the Spark operators enforce
+                // the floor, not this plugin. For a fixed-amount BOLT11 they take the amount from the invoice the
+                // receiver stored with its preimage shares — not from the service provider's claim — and refuse
+                // to complete the swap when the leaves transferred are worth less (spark
+                // so/handler/lightning_handler.go, "invalid amount, expected: %d or more"). Every invoice this
+                // plugin mints carries an amount. So a receive below the invoiced amount means that invariant
+                // broke, and the operator has to hear about it. It is still a warning and not a refusal, because
+                // refusing would stop legitimate invoices settling if the SDK ever reported an amount a hair low.
+                // Core accounts the received millisatoshis, so the BTCPay invoice reads PaidPartial, not Paid.
                 if (result.Record.AmountMsat is { } invoiced && payment.AmountMsat < invoiced)
                 {
                     _logger.LogWarning(
                         "Store {StoreId}: Lightning invoice {PaymentHash} settled with {ReceivedSats} sat but "
-                        + "asked for {InvoicedSats} sat. It is now marked paid and a later, larger payment for "
-                        + "the same hash will be recorded as already settled. Check the Spark balance against "
-                        + "this invoice before fulfilling it",
+                        + "asked for {InvoicedSats} sat. Spark should have refused a short payment; the BTCPay "
+                        + "invoice will show it as partially paid. Check the Spark balance against this invoice "
+                        + "before fulfilling it",
                         storeId, paymentHash, payment.AmountSats, invoiced / 1000);
                 }
                 else
@@ -205,9 +207,29 @@ public class SparkSettlementReconciler
                 break;
 
             case InvoiceSettlementOutcome.AlreadySettled:
-                _logger.LogDebug(
-                    "Store {StoreId}: Lightning invoice {PaymentHash} was already settled",
-                    storeId, paymentHash);
+                // Ordinarily a replay of the receive that settled it. A *different* completed receive for the
+                // same hash is the money this path would otherwise swallow: it cannot be credited, because the
+                // BTCPay payment row is keyed on the payment hash and the first receive holds that key. Spark's
+                // operators allow one completed receive per (payment hash, receiver) — a unique index on their
+                // preimage requests — so this is a tripwire for that invariant, not a flow: loud, so the sats
+                // that reached the wallet are found and placed by hand.
+                if (result.Record is { SdkPaymentId: { } settledBy }
+                    && !string.Equals(settledBy, payment.SdkPaymentId, StringComparison.Ordinal))
+                {
+                    _logger.LogWarning(
+                        "Store {StoreId}: Lightning invoice {PaymentHash} received a second completed payment "
+                        + "{SdkPaymentId} of {AmountSats} sat after {SettledBy} settled it with {SettledSats} sat. "
+                        + "Spark should not complete two receives for one invoice. That payment is in the Spark "
+                        + "wallet and on no BTCPay invoice; place it by hand",
+                        storeId, paymentHash, payment.SdkPaymentId, payment.AmountSats, settledBy,
+                        (result.Record.AmountReceivedMsat ?? 0) / 1000);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "Store {StoreId}: Lightning invoice {PaymentHash} was already settled",
+                        storeId, paymentHash);
+                }
 
                 // A duplicate event is the cheapest retry there is: if the credit for this settlement has not
                 // landed yet, attempt it again here rather than waiting for the next pass.
