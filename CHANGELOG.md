@@ -11,7 +11,7 @@ Two fixes to USDC/USDT payments from the 1.3.1 security review, Breez Spark SDK 
 "still in development" warning.
 
 Validated before shipping:
-- The unit suite (1,980 tests) passes, and so do CI's store, live regtest, funded regtest and local Spark stack
+- The unit suite (1,982 tests) passes, and so do CI's store, live regtest, funded regtest and local Spark stack
   suites on SDK 0.26.1.
 __VALIDATION__
 
@@ -24,18 +24,20 @@ back to 1.3.0 or 1.2.x. A rollback brings both defects below back.
   was deposited, the plugin judges the payment by what reached the wallet. A bitcoin delivery up to 10% short of the
   quote's estimate was read as a price move and credited as the full ask, so a payer could send up to a tenth less
   and settle the invoice. A delivery more than the quote's 1% slippage short is now valued at the store's own live
-  BTC rate. If it is worth the quote's due (within 2%), it was a late deposit the provider repriced and is credited
-  in full; if it is worth less, it is credited in proportion. With no live rate it is credited in proportion to the
-  quote's estimate. A late payer the price moved against then reads as part-paid for the merchant to settle, never a
-  short payer as paid. A repriced deposit now credits in full however far the price moved, where before a move of
+  BTC rate (the mid-market rate, so the store's spread setting doesn't count against the payer). If it is worth the
+  quote's due (within 2%), it was a late deposit the provider repriced and is credited in full; if it is worth less,
+  it is credited in proportion. With no live rate, the credit waits for one and is retried each reconciliation pass
+  for up to a day. After that it is credited in proportion to the quote's estimate, so a late payer the price moved
+  against reads as part-paid for the merchant to settle, never a short payer as paid. A repriced deposit now credits in full however far the price moved, where before a move of
   more than 10% left it part-paid. Deposits the provider measures are credited as measured, as before.
 - **A quote from a replaced wallet stayed payable at checkout.** Replacing a store's recovery phrase stopped the
   plugin reusing the old wallet's quotes, but the checkout, its status poll and the Greenfield payment link went on
   offering a quote already on show, for up to an hour. A payer could then send money to the old wallet, whose
   phrase may have been replaced because someone else holds it. A shown quote now records which wallet it pays, and
-  any quote that does not pay the wallet the store runs now is withdrawn: the payer is sent for a fresh one. That
-  includes quotes shown before this release, once, at the upgrade, and every quote while the store's wallet is
-  stopped. A payment already sent to an old quote still goes to the old wallet (see
+  any quote that does not pay the wallet the store runs now is withdrawn: the checkout says the address is no
+  longer offered and sends the payer for a fresh one. That includes quotes shown before this release, once, at the
+  upgrade, and every quote while the store's wallet is stopped or restarting. The same wallet's quotes come back
+  once it is running again. A payment already sent to an old quote still goes to the old wallet (see
   [Known limitations](docs/limitations.md)).
 
 ### Changed
