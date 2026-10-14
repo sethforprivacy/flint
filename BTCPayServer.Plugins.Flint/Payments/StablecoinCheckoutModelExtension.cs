@@ -87,8 +87,8 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
         details ??= new StablecoinPromptDetails();
 
         var quote = details.Quote;
-        var current = IsCurrent(
-            context.InvoiceEntity, context.Prompt, quote, handler.RunningWalletTag(context.InvoiceEntity?.StoreId));
+        var runningWalletTag = handler.RunningWalletTag(context.InvoiceEntity?.StoreId);
+        var current = IsCurrent(context.InvoiceEntity, context.Prompt, quote, runningWalletTag);
 
         if (current && quote is not null)
         {
@@ -119,7 +119,16 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
             quote = current && quote is not null ? Controllers.UIStablecoinCheckoutController.ToResponse(quote) : null,
             // The quote the prompt last showed, once it is no longer offered. The payer's page may still hold it from
             // its own quote request, and must stop showing it and send the payer for a fresh one — see IsCurrent.
-            withdrawn = !current && quote is not null ? new { id = quote.QuoteId, chain = quote.Chain } : null
+            withdrawn = !current && quote is not null
+                ? new
+                {
+                    id = quote.QuoteId,
+                    chain = quote.Chain,
+                    // Which sentence the payer reads: a part payment's, or one for an address that may not pay the
+                    // store's wallet any more.
+                    reason = PaysWallet(quote, runningWalletTag) ? "paid" : "wallet"
+                }
+                : null
         });
     }
 
@@ -149,11 +158,14 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
     internal static bool IsCurrent(
         InvoiceEntity? invoice, PaymentPrompt prompt, StablecoinActiveQuote? quote, string? runningWalletTag) =>
         quote is not null
-        && quote.WalletTag is not null
-        && string.Equals(quote.WalletTag, runningWalletTag, StringComparison.Ordinal)
+        && PaysWallet(quote, runningWalletTag)
         && prompt.Destination == quote.DepositAddress
         && invoice is not null
         && quote.Due == CurrentDue(invoice, prompt);
+
+    /// <summary>Whether <paramref name="quote"/> is known to pay the wallet tagged <paramref name="runningWalletTag"/>.</summary>
+    private static bool PaysWallet(StablecoinActiveQuote quote, string? runningWalletTag) =>
+        quote.WalletTag is not null && string.Equals(quote.WalletTag, runningWalletTag, StringComparison.Ordinal);
 
     /// <summary>The invoice's net due in the prompt's currency, as the quote path computes it.</summary>
     private static decimal? CurrentDue(InvoiceEntity invoice, PaymentPrompt prompt)

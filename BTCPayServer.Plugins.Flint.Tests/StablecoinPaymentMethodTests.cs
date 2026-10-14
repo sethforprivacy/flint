@@ -244,6 +244,7 @@ public class StablecoinPaymentMethodTests
         // local copy the model withdraws) and sends the payer for a fresh address for what is left.
         Assert.Equal("q1", (string?)data["withdrawn"]!["id"]);
         Assert.Equal("base", (string?)data["withdrawn"]!["chain"]);
+        Assert.Equal("paid", (string?)data["withdrawn"]!["reason"]);
     }
 
     public static TheoryData<string, string?, bool> QuotesNotFromTheRunningWallet => new()
@@ -269,8 +270,10 @@ public class StablecoinPaymentMethodTests
         Assert.Equal(JTokenType.Null, data["quote"]!.Type);
         Assert.Null(model.InvoiceBitcoinUrl);
         Assert.Null(model.InvoiceBitcoinUrlQR);
-        // Named, so a page still holding it drops it and asks the running wallet for a fresh address.
+        // Named, so a page still holding it drops it and asks the running wallet for a fresh address — and not
+        // explained to the payer as a part payment, which it is not.
         Assert.Equal("q1", (string?)data["withdrawn"]!["id"]);
+        Assert.Equal("wallet", (string?)data["withdrawn"]!["reason"]);
     }
 
     [Fact]

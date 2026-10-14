@@ -181,4 +181,11 @@ public sealed class FakeCrossChainValueOracle : ICrossChainValueOracle
         Calls.Add((storeId, currencyCode));
         return Task.FromResult<decimal?>(Unavailable ? null : BtcUsd / 100_000_000m);
     }
+
+    /// <summary>The same <see cref="BtcUsd"/>: the fake has no spread, so bid and mid are one price.</summary>
+    public Task<decimal?> TryGetSatoshiMidValueAsync(
+        string storeId,
+        string currencyCode,
+        CancellationToken cancellationToken = default) =>
+        TryGetSatoshiValueAsync(storeId, currencyCode, cancellationToken);
 }

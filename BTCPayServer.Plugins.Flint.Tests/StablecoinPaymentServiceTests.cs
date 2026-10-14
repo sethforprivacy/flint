@@ -715,25 +715,71 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(8.064m, Assert.Single(invoice.Payments).Value);
     }
 
+    /// <summary>A quote shown and an arrival for it delivering 85% of its sat estimate, with no measured deposit.</summary>
+    private static async Task<(FakeStablecoinInvoiceGateway.Invoice Invoice, StablecoinActiveQuote Shown, SparkPayment Arrival, decimal QuoteBtcUsd)>
+        ShortSatsArrival(Setup setup)
+    {
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
+            sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount, delivered: sdkQuote.ExpectedReceivedAmount * 85 / 100,
+            at: setup.Harness.Time.GetUtcNow());
+        return (invoice, shown, arrival, shown.Due / (decimal)sdkQuote.ExpectedReceivedAmount * 100_000_000m);
+    }
+
     [Fact]
     public async Task An_unmeasured_sats_delivery_a_price_rise_explains_is_credited_in_full_at_the_live_price()
     {
         // A late deposit the provider repriced after bitcoin rose 18%: 15% fewer sat than the quote's estimate, worth
         // the whole due today. Judged by the sat estimate alone it reads as a payer who sent 15% less.
         var setup = Create();
-        var invoice = Invoice(setup);
-        var shown = await QuoteOk(setup, "base");
-        var sdkQuote = SdkQuoteFor(setup, shown);
-        var quoteBtcUsd = shown.Due / (decimal)sdkQuote.ExpectedReceivedAmount * 100_000_000m;
+        var (invoice, shown, arrival, quoteBtcUsd) = await ShortSatsArrival(setup);
         setup.Harness.Oracle.BtcUsd = quoteBtcUsd * 1.18m;
 
-        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
-            sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount, delivered: sdkQuote.ExpectedReceivedAmount * 85 / 100);
         Assert.Equal(StablecoinReceiveOutcome.Credited, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
 
         Assert.Equal(decimal.Parse(shown.Amount, System.Globalization.CultureInfo.InvariantCulture),
             Assert.Single(invoice.Payments).Value);
         Assert.Equal((StoreId, "USD"), Assert.Single(setup.Harness.Oracle.Calls));
+    }
+
+    [Fact]
+    public async Task A_delivery_that_needs_the_live_price_waits_for_one_rather_than_being_recorded_short()
+    {
+        // A recorded payment is never revalued, so recording this without a price would leave a payer the price moved
+        // against reading as part-paid for good — over a rate source that was down for one pass.
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        var (invoice, shown, arrival, quoteBtcUsd) = await ShortSatsArrival(setup);
+        setup.Harness.Oracle.Unavailable = true;
+
+        Assert.Equal(StablecoinReceiveOutcome.CreditFailed, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+        Assert.Empty(invoice.Payments);
+
+        setup.Harness.Oracle.Unavailable = false;
+        setup.Harness.Oracle.BtcUsd = quoteBtcUsd * 1.18m;
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        Assert.Equal(decimal.Parse(shown.Amount, System.Globalization.CultureInfo.InvariantCulture),
+            Assert.Single(invoice.Payments).Value);
+    }
+
+    [Fact]
+    public async Task A_delivery_still_without_a_live_price_after_a_day_is_credited_by_the_quotes_own()
+    {
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        var (invoice, shown, arrival, _) = await ShortSatsArrival(setup);
+        setup.Harness.Oracle.Unavailable = true;
+        await setup.Service.TryCreditAsync(StoreId, arrival, Ct);
+
+        time.Advance(StablecoinPaymentService.LivePriceWait + TimeSpan.FromMinutes(1));
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        // 85% of the sat estimate, so 85% of the ask, rounded down.
+        var asked = StablecoinAmounts.ToBaseUnits(decimal.Parse(shown.Amount, System.Globalization.CultureInfo.InvariantCulture), 6);
+        Assert.Equal(StablecoinAmounts.FromBaseUnits(asked * 85 / 100, 6, 6), Assert.Single(invoice.Payments).Value);
     }
 
     [Theory]

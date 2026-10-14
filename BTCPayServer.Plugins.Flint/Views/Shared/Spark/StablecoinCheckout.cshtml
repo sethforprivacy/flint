@@ -161,13 +161,20 @@
                 <a v-if="isWalletLink && model.showPayInWalletButton" class="btn btn-primary rounded-pill w-100 mt-4" id="FlintStablecoinPayInWallet" target="_blank" rel="noreferrer noopener" :href="quote.paymentRequest">Pay in wallet</a>
             </template>
 
-            @* The quote this page showed is no longer offered: the invoice was part-paid since, most often by a payment
-               to that very address. Its amount is wrong now, and a second deposit to it would not be matched to this
-               invoice, so the payer is sent for a fresh address for what is left. *@
+            @* The quote this page showed is no longer offered. Either the invoice was part-paid since, most often by a
+               payment to that very address — its amount is wrong now, and a second deposit to it would not be matched to
+               this invoice — or the address may not pay the store's wallet any more ("wallet": the store replaced its
+               recovery phrase, or its wallet is restarting). Either way the payer is sent for a fresh address. *@
             <div v-else-if="withdrawn && !picking" class="alert alert-warning" role="alert" id="FlintStablecoinWithdrawn">
-                Part of this invoice has been paid since its {{ asset }} address was shown, so that address is no longer
-                offered. <strong>Do not send anything more to it.</strong>
-                <button type="button" class="btn btn-link p-0 align-baseline" id="FlintStablecoinRequote" v-on:click="requestQuote">Get a new address for what is left</button>
+                <template v-if="data.withdrawn.reason === 'wallet'">
+                    The {{ asset }} address shown before is no longer offered. <strong>Do not send anything to it.</strong>
+                    <button type="button" class="btn btn-link p-0 align-baseline" id="FlintStablecoinRequote" v-on:click="requestQuote">Get a new address</button>
+                </template>
+                <template v-else>
+                    Part of this invoice has been paid since its {{ asset }} address was shown, so that address is no longer
+                    offered. <strong>Do not send anything more to it.</strong>
+                    <button type="button" class="btn btn-link p-0 align-baseline" id="FlintStablecoinRequote" v-on:click="requestQuote">Get a new address for what is left</button>
+                </template>
             </div>
         </div>
     </template>

@@ -97,6 +97,18 @@ public sealed class StablecoinPaymentService
     private static readonly TimeSpan CreditRetryHorizon = TimeSpan.FromDays(7);
 
     /// <summary>
+    /// How long a credit that needs the live price waits for one before settling for the quote's own (see
+    /// <see cref="CreditedBaseUnits"/>).
+    /// </summary>
+    /// <remarks>
+    /// Waiting is retrying: the credit fails and the next reconciliation pass tries again. Recorded without a price,
+    /// a late payer the price moved against would read as part-paid for good, because a recorded payment is never
+    /// revalued — for want of a rate source that was down for a minute, or a fetch cancelled by a wallet restart.
+    /// A day bounds how long such an invoice reads as unpaid instead.
+    /// </remarks>
+    internal static readonly TimeSpan LivePriceWait = TimeSpan.FromDays(1);
+
+    /// <summary>
     /// How long a finished quote is kept: one credited this long ago, or one that expired unpaid this long ago.
     /// </summary>
     /// <remarks>
@@ -1011,8 +1023,19 @@ public sealed class StablecoinPaymentService
         {
             // USD for the coin: the plugin prices USDC and USDT at par with it (see StablecoinRateRules).
             usdPerSat = await _valueOracle
-                .TryGetSatoshiValueAsync(quote.StoreId, "USD", cancellationToken)
+                .TryGetSatoshiMidValueAsync(quote.StoreId, "USD", cancellationToken)
                 .ConfigureAwait(false);
+            if (usdPerSat is null && _time.GetUtcNow() - (quote.SettledAt ?? _time.GetUtcNow()) < LivePriceWait)
+            {
+                _logger.Log(CreditFailureLevel(quote.Id),
+                    "Store {StoreId}: the {Asset} payment {SdkPaymentId} for invoice {InvoiceId} delivered less "
+                    + "bitcoin than its quote estimated and needs the live BTC rate to be valued, which could not be "
+                    + "read; it will be recorded once a rate is available, or by the quote's own price after {Hours} "
+                    + "hours",
+                    quote.StoreId, quote.Asset, paymentId, quote.InvoiceId, LivePriceWait.TotalHours);
+                return StablecoinReceiveOutcome.CreditFailed;
+            }
+
             _logger.LogInformation(
                 "Store {StoreId}: {Asset} payment {SdkPaymentId} for invoice {InvoiceId} delivered {Delivered} sat "
                 + "against an estimate of {Expected} and no measured deposit; valuing it at {Price}",
