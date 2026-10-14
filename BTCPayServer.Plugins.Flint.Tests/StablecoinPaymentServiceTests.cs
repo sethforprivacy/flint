@@ -174,6 +174,8 @@ public class StablecoinPaymentServiceTests
 
         // Shown on the prompt with that cost, and recorded before anybody could have been shown the address.
         Assert.Equal((quote.DepositAddress, 0.08m), invoice.Shown[StablecoinPayments.Usdc.PaymentMethodId]);
+        // Tagged with the wallet that minted it: the checkout withdraws a quote whose tag is not the running wallet's.
+        Assert.Equal($"wallet-of-{StoreId}", quote.WalletTag);
         var record = Assert.Single(setup.Quotes.Quotes);
         Assert.Equal(quote.QuoteId, record.Id);
         Assert.Equal("10080000", record.AskedBaseUnits);
@@ -713,33 +715,66 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(8.064m, Assert.Single(invoice.Payments).Value);
     }
 
+    [Fact]
+    public async Task An_unmeasured_sats_delivery_a_price_rise_explains_is_credited_in_full_at_the_live_price()
+    {
+        // A late deposit the provider repriced after bitcoin rose 18%: 15% fewer sat than the quote's estimate, worth
+        // the whole due today. Judged by the sat estimate alone it reads as a payer who sent 15% less.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+        var quoteBtcUsd = shown.Due / (decimal)sdkQuote.ExpectedReceivedAmount * 100_000_000m;
+        setup.Harness.Oracle.BtcUsd = quoteBtcUsd * 1.18m;
+
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
+            sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount, delivered: sdkQuote.ExpectedReceivedAmount * 85 / 100);
+        Assert.Equal(StablecoinReceiveOutcome.Credited, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+
+        Assert.Equal(decimal.Parse(shown.Amount, System.Globalization.CultureInfo.InvariantCulture),
+            Assert.Single(invoice.Payments).Value);
+        Assert.Equal((StoreId, "USD"), Assert.Single(setup.Harness.Oracle.Calls));
+    }
+
     [Theory]
+    // The quote: 10.080001 asked for a due of 10, estimated at 10,000 sat — $100,000 a bitcoin. A live price of 0 is
+    // none to be had.
     // Reported, and not the quote-time deposit: the provider measured it, and it is credited as measured.
-    [InlineData("9000000", "10000", "BTC", 9_000_000)]
+    [InlineData("9000000", "10000", "BTC", 0, 9_000_000)]
     // The quote-time deposit, or nothing: read as the quote paid, credited as the ask…
-    [InlineData("10080000", "10000", "BTC", 10_080_001)]
-    [InlineData(null, "10000", "BTC", 10_080_001)]
-    [InlineData(null, null, "BTC", 10_080_001)]
-    // …which a sats delivery a price move short does not contradict…
-    [InlineData("10080000", "9100", "BTC", 10_080_001)]
-    // …but one far short of any price move does.
-    [InlineData("10080000", "5000", "BTC", 5_040_000)]
-    // A token at par has no price to move: past the slippage budget, the delivery is the evidence.
-    [InlineData("10080000", "9800000", "USDB", 9_878_400)]
-    [InlineData("10080000", "9950000", "USDB", 10_080_001)]
-    public void What_a_payer_is_credited_with(string? paid, string? delivered, string destination, long credited)
+    [InlineData("10080000", "10000", "BTC", 0, 10_080_001)]
+    [InlineData(null, "10000", "BTC", 0, 10_080_001)]
+    [InlineData(null, null, "BTC", 0, 10_080_001)]
+    // …which a sats delivery within the quote's slippage, or over its estimate, does not contradict…
+    [InlineData("10080000", "9950", "BTC", 0, 10_080_001)]
+    [InlineData("10080000", "12000", "BTC", 0, 10_080_001)]
+    // …nor one a price rise explains: 9,100 sat at $110,000 is worth the due.
+    [InlineData("10080000", "9100", "BTC", 110_000, 10_080_001)]
+    // But 9,100 sat at an unchanged price is a payer who sent 9% less, credited by its worth — not the ask the flat
+    // 10% band used to give it…
+    [InlineData("10080000", "9100", "BTC", 100_000, 9_172_800)]
+    // …and with no live price to tell, by the quote's own.
+    [InlineData("10080000", "9100", "BTC", 0, 9_172_800)]
+    [InlineData("10080000", "5000", "BTC", 0, 5_040_000)]
+    // A token at par has no price to move: past the slippage budget, the delivery is the evidence, live price or not.
+    [InlineData("10080000", "9800000", "USDB", 0, 9_878_400)]
+    [InlineData("10080000", "9800000", "USDB", 110_000, 9_878_400)]
+    [InlineData("10080000", "9950000", "USDB", 0, 10_080_001)]
+    public void What_a_payer_is_credited_with(string? paid, string? delivered, string destination, long btcUsd, long credited)
     {
         var quote = new StablecoinQuote
         {
             DepositBaseUnits = "10080000",
             AskedBaseUnits = "10080001",
+            DueAmount = 10m,
             ExpectedReceivedBaseUnits = destination == "BTC" ? "10000" : "10000000",
             DestinationAsset = destination,
             PaidBaseUnits = paid,
             DeliveredBaseUnits = delivered
         };
 
-        Assert.Equal(new BigInteger(credited), StablecoinPaymentService.CreditedBaseUnits(quote));
+        decimal? usdPerSat = btcUsd > 0 ? btcUsd / 100_000_000m : null;
+        Assert.Equal(new BigInteger(credited), StablecoinPaymentService.CreditedBaseUnits(quote, usdPerSat));
     }
 
     [Fact]

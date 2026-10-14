@@ -368,7 +368,7 @@ public sealed class StablecoinHarness
         Log = new CapturingLogger<StablecoinPaymentService>();
         Routes = new StablecoinRouteCache(Time, NullLogger<StablecoinRouteCache>.Instance);
         Service = new StablecoinPaymentService(
-            Quotes, Invoices, StoreConfig, runtime, Routes, Time, available, Log);
+            Quotes, Invoices, StoreConfig, runtime, Routes, Oracle, Time, available, Log);
     }
 
     public TimeProvider Time { get; }
@@ -376,6 +376,9 @@ public sealed class StablecoinHarness
     public FakeStablecoinInvoiceGateway Invoices { get; }
     public FakeStablecoinStoreConfig StoreConfig { get; }
     public StablecoinRouteCache Routes { get; }
+
+    /// <summary>The live price crediting values an unmeasured sats delivery at; $100,000 a bitcoin unless set.</summary>
+    public FakeCrossChainValueOracle Oracle { get; } = new() { BtcUsd = 100_000m };
     public CapturingLogger<StablecoinPaymentService> Log { get; }
     public StablecoinPaymentService Service { get; }
 }

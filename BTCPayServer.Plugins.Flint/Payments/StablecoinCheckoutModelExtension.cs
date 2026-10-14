@@ -87,7 +87,8 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
         details ??= new StablecoinPromptDetails();
 
         var quote = details.Quote;
-        var current = IsCurrent(context.InvoiceEntity, context.Prompt, quote);
+        var current = IsCurrent(
+            context.InvoiceEntity, context.Prompt, quote, handler.RunningWalletTag(context.InvoiceEntity?.StoreId));
 
         if (current && quote is not null)
         {
@@ -123,8 +124,8 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
     }
 
     /// <summary>
-    /// Whether the quote a prompt shows is still one to pay: its address is the prompt's destination, and it was made
-    /// for the invoice's due as it stands.
+    /// Whether the quote a prompt shows is still one to pay: its address is the prompt's destination, it pays the
+    /// wallet the store runs now, and it was made for the invoice's due as it stands.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -135,11 +136,21 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
     /// The payer must get a fresh quote for the remainder, and the checkout says so.
     /// </para>
     /// <para>
+    /// <b>A quote from another wallet is withdrawn.</b> Its address pays the wallet that minted it, and after a store's
+    /// recovery phrase is replaced that is the old one — perhaps replaced because someone else holds it. The quote
+    /// path already refuses to reuse such a quote; without this check the checkout, its status poll and the Greenfield
+    /// payment link went on handing it out for the hour it is offered. A quote with no tag predates the check and is
+    /// withdrawn too, as is every quote while the store runs no wallet: neither can be shown to pay the store.
+    /// </para>
+    /// <para>
     /// Never throws: a due that cannot be computed (no rate) is a quote that cannot be confirmed current.
     /// </para>
     /// </remarks>
-    internal static bool IsCurrent(InvoiceEntity? invoice, PaymentPrompt prompt, StablecoinActiveQuote? quote) =>
+    internal static bool IsCurrent(
+        InvoiceEntity? invoice, PaymentPrompt prompt, StablecoinActiveQuote? quote, string? runningWalletTag) =>
         quote is not null
+        && quote.WalletTag is not null
+        && string.Equals(quote.WalletTag, runningWalletTag, StringComparison.Ordinal)
         && prompt.Destination == quote.DepositAddress
         && invoice is not null
         && quote.Due == CurrentDue(invoice, prompt);

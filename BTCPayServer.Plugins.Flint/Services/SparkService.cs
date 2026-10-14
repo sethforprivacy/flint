@@ -612,7 +612,8 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 _bolt11Parser,
                 _loggerFactory.CreateLogger<SparkLightningClient>());
 
-            var instance = new SparkStoreInstance(storeId, sdk, client, events, storageLock, storageWasEmpty);
+            var instance = new SparkStoreInstance(
+                storeId, sdk, client, events, storageLock, storageWasEmpty, DeriveWalletTag(walletKey));
             _instances[storeId] = instance;
             // Owned from the registration, not from the constructor call: a SparkStoreInstance ctor throw
             // means the instance never accepted the lock.
@@ -1709,6 +1710,21 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     }
 
     /// <summary>
+    /// A short name for the wallet behind <paramref name="walletKey"/> that can be written where others read it.
+    /// </summary>
+    /// <remarks>
+    /// The wallet key is a bare hash of the recovery phrase, which has no business in an invoice's payment details:
+    /// those are served over Greenfield. This is a domain-separated hash of it, cut to 128 bits — enough to tell a
+    /// store's wallets apart, and nothing to start a search for the phrase from.
+    /// </remarks>
+    internal static string DeriveWalletTag(string walletKey)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(walletKey);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes("flint/wallet-tag/v1:" + walletKey));
+        return Convert.ToHexStringLower(hash.AsSpan(0, 16));
+    }
+
+    /// <summary>
     /// The spelling of a mnemonic that <see cref="DeriveWalletKey"/> hashes.
     /// </summary>
     /// <remarks>
@@ -2672,6 +2688,12 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     Task<ISparkSdkClient?> ISparkStoreRuntime.GetSdkClientAsync(string storeId) => GetSdkClient(storeId);
 
     /// <inheritdoc />
+    string? ISparkStoreRuntime.GetWalletTag(string storeId, ISparkSdkClient? sdk) =>
+        _instances.TryGetValue(storeId, out var instance) && (sdk is null || ReferenceEquals(instance.Sdk, sdk))
+            ? instance.WalletTag
+            : null;
+
+    /// <inheritdoc />
     Task<ExitStateImportReport> ISparkStoreRuntime.ImportPendingExitStateAsync(
         string storeId, CancellationToken cancellationToken) =>
         ImportPendingExitStateAsync(storeId, cancellationToken);
@@ -2712,11 +2734,13 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             SparkLightningClient client,
             Channel<SparkEventEnvelope> events,
             SparkStorageLock storageLock,
-            bool storageWasEmpty)
+            bool storageWasEmpty,
+            string walletTag)
         {
             StoreId = storeId;
             Sdk = sdk;
             Client = client;
+            WalletTag = walletTag;
             _events = events;
             _storageLock = storageLock;
             ExitState = new ExitStateRuntime(storageWasEmpty);
@@ -2728,6 +2752,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         public string StoreId { get; }
         public ISparkSdkClient Sdk { get; }
         public SparkLightningClient Client { get; }
+
+        /// <summary>Which wallet this is, publishably; see <see cref="DeriveWalletTag"/>.</summary>
+        public string WalletTag { get; }
+
         public CancellationToken ConsumerToken => _consumerCts.Token;
 
         public void StartConsumer(Func<SparkEventEnvelope, Task> handler, ILogger logger)

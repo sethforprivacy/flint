@@ -67,6 +67,25 @@ public sealed class StablecoinPaymentMethodHandler : IPaymentMethodHandler
 
     public JsonSerializer Serializer { get; }
 
+    /// <summary>
+    /// The tag of the wallet <paramref name="storeId"/> runs now, or null when it runs none or that cannot be read.
+    /// Never throws, like everything else here BTCPay's requests reach.
+    /// </summary>
+    internal string? RunningWalletTag(string? storeId)
+    {
+        if (string.IsNullOrEmpty(storeId))
+            return null;
+        try
+        {
+            return _service().RunningWalletTag(storeId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not tell which Spark wallet it runs", storeId);
+            return null;
+        }
+    }
+
     public Task BeforeFetchingRates(PaymentMethodContext context)
     {
         context.Prompt.Currency = Asset.Symbol;
