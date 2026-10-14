@@ -80,8 +80,8 @@
       },
       "Breez.Sdk.Spark": {
         "type": "Transitive",
-        "resolved": "0.26.0",
-        "contentHash": "uq45j6gHCXuTROT3npe/OXHwQIpmCWUzL37gGDu2AgHh5v3h6/xFOaNSdV8D266A0HGhHM6gjG7nafsEX62xMQ=="
+        "resolved": "0.26.1",
+        "contentHash": "dq7hpjZrNznEV8YPC9JDMBUjsarbDnMT6c0u/HIyods4JwpmCR5F/RoVn4D3AWIcVR+10VlpMmoffYWlTynF1g=="
       },
       "BTCPayServer.Hwi": {
         "type": "Transitive",
@@ -1301,7 +1301,7 @@
         "type": "Project",
         "dependencies": {
           "BTCPayServer": "[2.4.5, )",
-          "Breez.Sdk.Spark": "[0.26.0, 0.26.0]",
+          "Breez.Sdk.Spark": "[0.26.1, 0.26.1]",
           "SSH.NET": "[2026.0.0, )"
         }
       },
