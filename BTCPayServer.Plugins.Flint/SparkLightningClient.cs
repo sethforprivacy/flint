@@ -697,10 +697,13 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// every ten minutes for each payout left <c>InProgress</c>.
     /// </para>
     /// <para>
-    /// <b>Returning null here cancels a payout.</b> The pending listener maps a null payment through
-    /// <c>_ =&gt; PayoutState.Cancelled</c>, so failing to find a payment that really was made marks the payout
-    /// cancelled while the recipient keeps the sats. That is why the scan is paged rather than a single
-    /// newest-first page: the payout being resolved may be ten minutes and any number of payments old.
+    /// <b>Up to BTCPay 2.4.5, returning null here cancels a payout.</b> The pending listener maps a null payment
+    /// through <c>_ =&gt; PayoutState.Cancelled</c>, so failing to find a payment that really was made marks the
+    /// payout cancelled while the recipient keeps the sats. That is why the scan is paged rather than a single
+    /// newest-first page: the payout being resolved may be ten minutes and any number of payments old. BTCPay 2.4.6
+    /// (btcpayserver#7679) leaves a payout with a proof <c>InProgress</c> on a null lookup and asks again next time,
+    /// and its Greenfield pay endpoint no longer dereferences a null here. The floor is still 2.4.1, so a missed
+    /// payment remains a cancelled payout on older hosts, and on 2.4.6 a payout stuck <c>InProgress</c>.
     /// </para>
     /// <para>
     /// A hash lookup rather than an id lookup because the SDK's id for an outgoing payment is opaque

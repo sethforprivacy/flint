@@ -177,7 +177,8 @@ internal static class SetupTabViewRenderer
         SetInjectProperty(page, "Safe", new Safe(
             DispatchProxy.Create<IHtmlHelper, RawOnlyHtmlHelper>(),
             new PlainJsonHelper(),
-            new HtmlSanitizer()));
+            new HtmlSanitizer(),
+            new RichTextHtmlSanitizer(new HtmlSanitizer())));
 
         // RazorPageBase.HtmlEncoder is a [RazorInject] the view engine fills from DI (HtmlEncoder.Default
         // is what MVC registers); the tag-helper output pipeline encodes through it.
