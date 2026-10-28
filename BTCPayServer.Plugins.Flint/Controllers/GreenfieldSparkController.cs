@@ -47,7 +47,10 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// the hole survives into JSON, and the same two guards are applied here: the route value is pinned with
 /// <see cref="FromRouteAttribute"/>, and it is checked against the store BTCPay actually authorised, which is the
 /// only value in the request that a body cannot influence. No request model in this API carries a store id at all
-/// (see <see cref="SparkApiModels"/>), so there is nothing for a body to name.
+/// (see <see cref="SparkApiModels"/>), so there is nothing for a body to name. BTCPay 2.4.6 also fails
+/// authorisation when the route, query string, form or wallet id name different stores, which closes the
+/// form-against-route shape in core; it still never reads a JSON body, and hosts from 2.4.1 to 2.4.5 have no such
+/// check, so both guards stay.
 /// </para>
 /// <para>
 /// <b>Secrets.</b> A generated recovery phrase is returned exactly once, in the response to the

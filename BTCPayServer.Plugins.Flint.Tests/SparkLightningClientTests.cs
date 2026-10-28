@@ -1123,9 +1123,10 @@ public class SparkLightningClientTests
     [Fact]
     public async Task GetPayment_finds_a_send_pushed_off_the_first_page_of_history()
     {
-        // Returning null here cancels a payout: LightningPendingPayoutListener maps a null payment through
-        // `_ => PayoutState.Cancelled`, so failing to find a send that really happened marks the payout
-        // cancelled while the recipient keeps the sats. A single newest-first page would do exactly that.
+        // Up to BTCPay 2.4.5, returning null here cancels a payout: LightningPendingPayoutListener maps a null
+        // payment through `_ => PayoutState.Cancelled`, so failing to find a send that really happened marks the
+        // payout cancelled while the recipient keeps the sats (2.4.6 leaves it InProgress instead). A single
+        // newest-first page would do exactly that.
         var harness = Create();
         var target = new SparkPayment(
             "target", SparkPaymentDirection.Send, SparkPaymentStatus.Completed, SparkPaymentMethod.Lightning,

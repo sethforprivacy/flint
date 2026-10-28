@@ -668,7 +668,8 @@ internal static class ExitScreenRenderer
         services.AddSingleton(sp => new Safe(
             sp.GetRequiredService<IHtmlHelper>(),
             sp.GetRequiredService<IJsonHelper>(),
-            new HtmlSanitizer()));
+            new HtmlSanitizer(),
+            new RichTextHtmlSanitizer(new HtmlSanitizer())));
         services.AddSingleton<IAuthorizationService, GrantAllAuthorizationService>();
         services.AddSingleton<IHttpContextAccessor>(new FixedHttpContextAccessor(httpContext));
         services.AddSingleton<IWebHostEnvironment, ScreenHostEnvironment>();
