@@ -85,7 +85,7 @@ public static class Constants
     /// alone, which is exactly what the two being separate constants is for — a bump here must never silently drop
     /// every host below it.
     /// </remarks>
-    public const string BuiltAgainstBTCPayServerVersion = "2.4.6";
+    public const string BuiltAgainstBTCPayServerVersion = "2.4.7";
 
     /// <summary>
     /// The <c>type=</c> discriminator of our Lightning connection string.
