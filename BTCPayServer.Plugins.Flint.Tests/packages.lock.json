@@ -93,63 +93,63 @@
       },
       "BTCPayServer.Lightning.All": {
         "type": "Transitive",
-        "resolved": "1.7.13",
-        "contentHash": "R/epHKLqxW//AkGyFHre8/IEot8hvw4h3v7h1hRUHVkrA2Hto8EruwAKHmJDxCGnPXSkq7wjKTMpZrhtHxJM2g==",
+        "resolved": "1.7.14",
+        "contentHash": "IirPHiOt6ClJMFasLZbQaiLkCp4jhqgJwvh6rre1zCvUwXLUN7kSUB5QhzKoZRFezQtUEgf1N5OEqkXAc1HTaw==",
         "dependencies": {
-          "BTCPayServer.Lightning.CLightning": "1.7.9",
-          "BTCPayServer.Lightning.Eclair": "1.7.4",
-          "BTCPayServer.Lightning.LND": "1.7.5",
-          "BTCPayServer.Lightning.LNDhub": "1.7.6",
-          "BTCPayServer.Lightning.Phoenixd": "1.7.5"
+          "BTCPayServer.Lightning.CLightning": "1.7.10",
+          "BTCPayServer.Lightning.Eclair": "1.7.5",
+          "BTCPayServer.Lightning.LND": "1.7.6",
+          "BTCPayServer.Lightning.LNDhub": "1.7.7",
+          "BTCPayServer.Lightning.Phoenixd": "1.7.6"
         }
       },
       "BTCPayServer.Lightning.CLightning": {
         "type": "Transitive",
-        "resolved": "1.7.9",
-        "contentHash": "bKpEDthkDZ1XZWywXFg82IYEPBD10YAECWh7FV4zUHOvRw25G9ycHhTdvnsvy+kt5Z18+D7pkuxW+n8FV1jr/g==",
+        "resolved": "1.7.10",
+        "contentHash": "xVLJOyUnLP2SIp7T+q1lIMRbsMvxqv40wbWLRiI8bW9L3R7hfYiqcuNx9DYfYxasCCGmDjf8JpRQirxA11d8cQ==",
         "dependencies": {
-          "BTCPayServer.Lightning.Common": "1.7.4"
+          "BTCPayServer.Lightning.Common": "1.7.5"
         }
       },
       "BTCPayServer.Lightning.Common": {
         "type": "Transitive",
-        "resolved": "1.7.4",
-        "contentHash": "+KcocRe9kyL0H9iK5aOwOR3pEWqnihz74tbJmlj2nM2sTAsIH3Gl2Dhsbym4l1ScN0hqUXk2kXRgfFcSPzm6EQ==",
+        "resolved": "1.7.5",
+        "contentHash": "yGK1cNVDts44j2D2mx1q13bGzzwO9gtEa6t4slShHsuZd6QEUf4FAvQ0MG6J4r9Qk+itjQcUhT4mujJ86FrbpA==",
         "dependencies": {
-          "NBitcoin": "10.0.11",
+          "NBitcoin": "10.0.19",
           "Newtonsoft.Json": "13.0.4"
         }
       },
       "BTCPayServer.Lightning.Eclair": {
         "type": "Transitive",
-        "resolved": "1.7.4",
-        "contentHash": "g8l/3yJY1B2EM3kAktNDgYmRxM4dxOMJk61qvI3HOovMes0Y648UTyECu1xgS/W2o3V868dYVoS8d9Mo0XPcgQ==",
+        "resolved": "1.7.5",
+        "contentHash": "kkQlGkgW6hfwM6d05t4WsPfset7fJ9GVlJGkfOOtJiX3Hh+X5LeoiUemkU4J2Sj3hTTajYV2BjIu+KGxCly2AQ==",
         "dependencies": {
-          "BTCPayServer.Lightning.Common": "1.7.4"
+          "BTCPayServer.Lightning.Common": "1.7.5"
         }
       },
       "BTCPayServer.Lightning.LND": {
         "type": "Transitive",
-        "resolved": "1.7.5",
-        "contentHash": "pinp3HSSLD6ltUW7Cb2YA9w8hRoX/mdbwQOzKtyPojmpVfTOkJQutExHxsdS6wGPd+p3E9u3Ukvo7qgHTQKq+w==",
+        "resolved": "1.7.6",
+        "contentHash": "18KKcEkadDePt5X1ut2rb2odsiTVJ8la3DBIfdUU6+g+5ScoZXfE6DdsLNDrnT91NRfUxVRYo3NO/LVcIbU3WQ==",
         "dependencies": {
-          "BTCPayServer.Lightning.Common": "1.7.4"
+          "BTCPayServer.Lightning.Common": "1.7.5"
         }
       },
       "BTCPayServer.Lightning.LNDhub": {
         "type": "Transitive",
-        "resolved": "1.7.6",
-        "contentHash": "P53mE8p7ikcbJrY1K08QQ9MJ31LsKVLd/TXqPnTgN6viDLyWrvoQREch29w9JXS4CjgQYjibbaiLiSjxCyzZFw==",
+        "resolved": "1.7.7",
+        "contentHash": "QxGIxvbMESm/ojSVSsxX8r2JTdY/jofHzgyi0J8w+KcaCGtrC8WCf/rx1o0quTG2sD2/z3r/WE1oDHQBl9U4XQ==",
         "dependencies": {
-          "BTCPayServer.Lightning.Common": "1.7.4"
+          "BTCPayServer.Lightning.Common": "1.7.5"
         }
       },
       "BTCPayServer.Lightning.Phoenixd": {
         "type": "Transitive",
-        "resolved": "1.7.5",
-        "contentHash": "RAmvngPW6mYhZOn3mJDhNnWgJb2bArovkswRJXwlvrnqgVTKBtdfIaSwnoHTAl3wEz50zOjEFYhQPi8UFRg3Ag==",
+        "resolved": "1.7.6",
+        "contentHash": "drc/zshIftUKDXlMkfH+yzumTazxay7ydIk4VOq6yTtGQfi3YE83Z5urZUN95qH2CpI8V49qjFVY7RpxcEpivQ==",
         "dependencies": {
-          "BTCPayServer.Lightning.Common": "1.7.4"
+          "BTCPayServer.Lightning.Common": "1.7.5"
         }
       },
       "BTCPayServer.NTag424": {
@@ -782,8 +782,8 @@
       },
       "NBitcoin": {
         "type": "Transitive",
-        "resolved": "10.0.17",
-        "contentHash": "1RRnrIZGr5AXUewxEdKBl3gwFSTkVENxKU2TguQbgGAdaRY0D8MawuxI176wKc3su/S0qkdpcQL2M6M1aj7jtQ==",
+        "resolved": "10.0.19",
+        "contentHash": "rC917cTEGKg3MhVEqkLBFW0n4Q0FpgNTHsidiFkR60LUWeewRKjFXmgcDbq5CHsn4zGIZqazNTghXv62GzsQiA==",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "1.0.0",
           "Newtonsoft.Json": "13.0.4"
@@ -1228,14 +1228,14 @@
         "type": "Project",
         "dependencies": {
           "BIP78.Sender": "[0.2.5, )",
-          "BTCPayServer.Abstractions": "[2.4.6, )",
+          "BTCPayServer.Abstractions": "[2.4.7, )",
           "BTCPayServer.Client": "[2.4.4, )",
-          "BTCPayServer.Common": "[2.4.6, )",
-          "BTCPayServer.Data": "[2.4.6, )",
+          "BTCPayServer.Common": "[2.4.7, )",
+          "BTCPayServer.Data": "[2.4.7, )",
           "BTCPayServer.Hwi": "[2.0.6, )",
-          "BTCPayServer.Lightning.All": "[1.7.13, )",
+          "BTCPayServer.Lightning.All": "[1.7.14, )",
           "BTCPayServer.NTag424": "[1.0.25, )",
-          "BTCPayServer.Rating": "[2.4.6, )",
+          "BTCPayServer.Rating": "[2.4.7, )",
           "CsvHelper": "[33.1.0, )",
           "Fido2": "[4.3.1, )",
           "Fido2.AspNet": "[4.3.1, )",
@@ -1243,7 +1243,7 @@
           "MailKit": "[4.18.2, )",
           "Microsoft.AspNetCore.Mvc.NewtonsoftJson": "[10.0.14, )",
           "Microsoft.AspNetCore.SignalR.Protocols.NewtonsoftJson": "[10.0.14, )",
-          "NBitcoin": "[10.0.17, )",
+          "NBitcoin": "[10.0.19, )",
           "NBitpayClient": "[1.0.0.39, )",
           "Newtonsoft.Json": "[13.0.4, )",
           "NicolasDorier.CommandLine": "[2.0.0, )",
@@ -1274,8 +1274,8 @@
       "btcpayserver.client": {
         "type": "Project",
         "dependencies": {
-          "BTCPayServer.Lightning.Common": "[1.7.4, )",
-          "NBitcoin": "[10.0.17, )",
+          "BTCPayServer.Lightning.Common": "[1.7.5, )",
+          "NBitcoin": "[10.0.19, )",
           "Newtonsoft.Json": "[13.0.4, )"
         }
       },
@@ -1289,7 +1289,7 @@
       "btcpayserver.data": {
         "type": "Project",
         "dependencies": {
-          "BTCPayServer.Abstractions": "[2.4.6, )",
+          "BTCPayServer.Abstractions": "[2.4.7, )",
           "BTCPayServer.Client": "[2.4.4, )",
           "Dapper": "[2.1.89, )",
           "Microsoft.AspNetCore.Identity.EntityFrameworkCore": "[10.0.14, )",
@@ -1301,7 +1301,7 @@
       "btcpayserver.plugins.flint": {
         "type": "Project",
         "dependencies": {
-          "BTCPayServer": "[2.4.6, )",
+          "BTCPayServer": "[2.4.7, )",
           "Breez.Sdk.Spark": "[0.26.1, 0.26.1]",
           "SSH.NET": "[2026.0.0, )"
         }
@@ -1312,7 +1312,7 @@
           "DigitalRuby.ExchangeSharp": "[1.2.1, )",
           "Microsoft.AspNet.WebApi.Client": "[6.0.0, )",
           "Microsoft.CodeAnalysis.CSharp": "[5.9.0, )",
-          "NBitcoin": "[10.0.17, )",
+          "NBitcoin": "[10.0.19, )",
           "Newtonsoft.Json": "[13.0.4, )"
         }
       }
