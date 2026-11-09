@@ -293,7 +293,7 @@ public sealed class SparkSurfaceHarness
         var mvc = new SparkController(
             settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
             depositService, stableBalanceService, exit, runtime, exitStateBackups,
-            crossChainCatalog, stablecoins.Service,
+            crossChainCatalog, stablecoins.Service, null!,
             new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
         var api = new GreenfieldSparkController(

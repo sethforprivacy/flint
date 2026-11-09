@@ -91,6 +91,18 @@
                 <span>Sweeps</span>
             </a>
         </li>
+        <li class="nav-item nav-item-sub" permission="@Policies.CanModifyStoreSettings">
+            <a layout-menu-item="@SparkNavPages.Send" asp-area="" asp-controller="Spark"
+               asp-action="Send" asp-route-storeId="@storeId">
+                <span>Send</span>
+            </a>
+        </li>
+        <li class="nav-item nav-item-sub" permission="@Policies.CanModifyStoreSettings">
+            <a layout-menu-item="@SparkNavPages.Receive" asp-area="" asp-controller="Spark"
+               asp-action="Receive" asp-route-storeId="@storeId">
+                <span>Receive</span>
+            </a>
+        </li>
         @* Mainnet-only, and the same answer the status page's summary gives — USDB has no deployment on any
            other network, so off-mainnet this entry would lead to a page that can only explain itself. *@
         @if (StableBalanceService.Available)

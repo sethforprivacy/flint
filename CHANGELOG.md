@@ -5,6 +5,20 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Added
+
+- **Send payment**: send a Lightning payment from the store wallet directly from the BTCPay plugin UI.
+- **Receive payment**: generate a BOLT11 invoice with optional amount and description; QR code shown inline.
+- **Wallet history**: paginated payment history with direction filter (All / Received / Sent), period filter
+  (All time / 7 days / 30 days), and one-click BOLT11 copy.
+
+### Fixed
+
+- Sweep engine: `GetInfo(ensureSynced: false)` after an explicit `SyncWallet`. `ensureSynced: true`
+  applies only to the SDK's first sync in a session and was leaving the balance stale.
+
 ## [1.3.1] — 2026-10-14
 
 Two fixes to USDC/USDT payments from the 1.3.1 security review, Breez Spark SDK 0.26.1, and a README without its

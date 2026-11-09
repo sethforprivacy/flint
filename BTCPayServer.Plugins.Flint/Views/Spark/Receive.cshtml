@@ -1,0 +1,89 @@
+@model SparkReceiveViewModel
+@using System.Globalization
+@{
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Receive, "Receive payment").SetCategory(SparkNavCategory.Id));
+
+    BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-6 col-xxl-constrain">
+
+        @if (Model.Result is { } result)
+        {
+            <div class="alert alert-success" role="alert">
+                <strong>Invoice created.</strong>
+                @if (Model.AmountSats is { } amt)
+                {
+                    <span>@amt.ToString("N0", CultureInfo.InvariantCulture) sat</span>
+                }
+                else
+                {
+                    <span>Amountless invoice.</span>
+                }
+                Fee: @result.FeeSats.ToString("N0", CultureInfo.InvariantCulture) sat.
+                Expires in 24 hours.
+            </div>
+
+            <div class="d-flex justify-content-center mb-3">
+                <vc:qr-code data="@result.PaymentRequest" />
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label">BOLT11 invoice</label>
+                <div class="input-group">
+                    <input id="SparkReceiveBolt11" type="text" class="form-control font-monospace"
+                           readonly="readonly" value="@result.PaymentRequest" />
+                    <button type="button" class="btn btn-outline-secondary"
+                            data-clipboard-target="#SparkReceiveBolt11">
+                        Copy
+                    </button>
+                </div>
+                <div class="form-text">
+                    Share this invoice with the sender. It is valid for 24 hours.
+                </div>
+            </div>
+
+            <a asp-action="Receive" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+                New invoice
+            </a>
+            <a asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+               class="btn btn-outline-secondary">
+                View payment history
+            </a>
+        }
+        else
+        {
+            <form method="post" asp-action="Receive" asp-route-storeId="@Model.StoreId">
+                <div asp-validation-summary="All" class="alert alert-danger" role="alert"></div>
+
+                <div class="mb-3">
+                    <label asp-for="AmountSats" class="form-label">Amount (sat)</label>
+                    <input asp-for="AmountSats" type="number" min="1" class="form-control"
+                           placeholder="Leave blank for an amountless invoice" />
+                    <span asp-validation-for="AmountSats" class="text-danger"></span>
+                </div>
+
+                <div class="mb-3">
+                    <label asp-for="Description" class="form-label">Description</label>
+                    <input asp-for="Description" type="text" class="form-control"
+                           placeholder="Optional memo shown to the sender" />
+                    <span asp-validation-for="Description" class="text-danger"></span>
+                </div>
+
+                <button type="submit" class="btn btn-primary">
+                    Generate invoice
+                </button>
+            </form>
+        }
+
+    </div>
+</div>

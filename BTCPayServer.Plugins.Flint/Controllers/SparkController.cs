@@ -15,6 +15,8 @@ using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
+using SparkPaymentDirection = BTCPayServer.Plugins.Flint.Sdk.SparkPaymentDirection;
+using SparkSendResult = BTCPayServer.Plugins.Flint.Models.SparkSendResult;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -94,6 +96,7 @@ public class SparkController : Controller
     private readonly IExitStateBackupStore _exitStateBackupStore;
     private readonly CrossChainCatalog _crossChainCatalog;
     private readonly StablecoinPaymentService _stablecoins;
+    private readonly SparkSendPaymentService _sendPayment;
     private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<SparkController> _logger;
 
@@ -112,6 +115,7 @@ public class SparkController : Controller
         IExitStateBackupStore exitStateBackupStore,
         CrossChainCatalog crossChainCatalog,
         StablecoinPaymentService stablecoins,
+        SparkSendPaymentService sendPayment,
         IAuthorizationService authorizationService,
         ILogger<SparkController> logger)
     {
@@ -129,6 +133,7 @@ public class SparkController : Controller
         _exitStateBackupStore = exitStateBackupStore;
         _crossChainCatalog = crossChainCatalog;
         _stablecoins = stablecoins;
+        _sendPayment = sendPayment;
         _authorizationService = authorizationService;
         _logger = logger;
     }
@@ -612,7 +617,7 @@ public class SparkController : Controller
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
         var result = await _sweepEngine
-            .RunAsync(storeId, SweepTrigger.Manual, cancellationToken)
+            .RunAsync(storeId, SweepTrigger.Manual, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         TempData[result.Succeeded ? WellKnownTempData.SuccessMessage : WellKnownTempData.ErrorMessage] =
@@ -1934,6 +1939,166 @@ public class SparkController : Controller
             result.Message;
 
         return RedirectToAction(nameof(StableBalance), new { storeId });
+    }
+
+    #endregion
+
+    #region Send Payment
+
+    [HttpGet("send")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Send([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        return View(new SparkSendViewModel { StoreId = storeId });
+    }
+
+    [HttpPost("send")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Send(
+        [FromRoute] string storeId,
+        SparkSendViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+        vm.StoreId = storeId;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(vm.Destination))
+        {
+            ModelState.AddModelError(nameof(vm.Destination), "Destination is required.");
+            return View(vm);
+        }
+
+        var outcome = await _sendPayment.SendAsync(
+            storeId, vm.Destination.Trim(), vm.AmountSats, vm.MaxFeeSats, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!outcome.Succeeded)
+        {
+            ModelState.AddModelError(string.Empty, outcome.ErrorMessage ?? outcome.ErrorCode ?? "Payment failed.");
+            return View(vm);
+        }
+
+        var p = outcome.Payment!;
+        vm.Result = new SparkSendResult
+        {
+            PaymentId  = p.PaymentId,
+            PaymentHash = p.PaymentHash,
+            AmountSats = p.AmountSats,
+            FeeSats    = p.FeeSats,
+            PaidAt     = p.PaidAt
+        };
+        vm.Destination = null;
+        vm.AmountSats  = null;
+        vm.MaxFeeSats  = null;
+        return View(vm);
+    }
+
+    [HttpGet("receive")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Receive([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        return View(new SparkReceiveViewModel { StoreId = storeId });
+    }
+
+    [HttpPost("receive")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Receive(
+        [FromRoute] string storeId,
+        SparkReceiveViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+        vm.StoreId = storeId;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var result = await _sendPayment.ReceiveBolt11Async(
+            storeId, vm.Description, vm.AmountSats, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result is null)
+        {
+            ModelState.AddModelError(string.Empty, "The wallet is not running. Start it and try again.");
+            return View(vm);
+        }
+
+        vm.Result = result;
+        return View(vm);
+    }
+
+    [HttpGet("history")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
+    public async Task<IActionResult> WalletHistory(
+        [FromRoute] string storeId,
+        [FromQuery] string? direction,
+        [FromQuery] int period = 0,
+        [FromQuery] int skip = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        const int pageSize = 25;
+        skip = Math.Max(0, skip);
+
+        SparkPaymentDirection? dir = direction switch
+        {
+            "send"    => SparkPaymentDirection.Send,
+            "receive" => SparkPaymentDirection.Receive,
+            _         => null
+        };
+
+        DateTimeOffset? from = period > 0
+            ? DateTimeOffset.UtcNow.AddDays(-period)
+            : null;
+
+        var raw = await _sendPayment.ListAllAsync(
+            storeId, dir, from, skip, pageSize + 1, cancellationToken).ConfigureAwait(false);
+
+        var hasMore = raw.Count > pageSize;
+        var payments = hasMore ? raw.Take(pageSize).ToList() : raw;
+
+        return View(new SparkWalletHistoryViewModel
+        {
+            StoreId   = storeId,
+            Payments  = payments,
+            Direction = dir,
+            Period    = period,
+            Skip      = skip,
+            Count     = pageSize,
+            HasMore   = hasMore
+        });
     }
 
     #endregion
