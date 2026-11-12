@@ -6,6 +6,12 @@
     BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
         new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
             Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+
+    var pollPaymentHash = Model.Result?.PaymentHash;
+    var pollUrl = !string.IsNullOrEmpty(pollPaymentHash)
+                ? Url.Action("ReceivePoll",   "Spark", new { storeId = Model.StoreId, paymentHash = pollPaymentHash })
+                : null;
+    var historyUrl = Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId });
 }
 
 <div class="sticky-header">
@@ -56,6 +62,11 @@
                 <strong>Payment received!</strong> Redirecting to wallet history...
             </div>
 
+            @if (pollUrl != null)
+            {
+                <div id="poll-config" data-poll-url="@pollUrl" data-history-url="@historyUrl" hidden></div>
+            }
+
             <a asp-action="Receive" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
                 New invoice
             </a>
@@ -63,30 +74,6 @@
                class="btn btn-outline-secondary">
                 View payment history
             </a>
-        }
-
-        @if (Model.Result is { PaymentHash: { Length: > 0 } hash })
-        {
-            var pollUrl     = Url.Action("ReceivePoll",    "Spark", new { storeId = Model.StoreId, paymentHash = hash });
-            var historyUrl  = Url.Action("WalletHistory",  "Spark", new { storeId = Model.StoreId });
-            <script>
-            (function () {
-                var pollUrl    = '@pollUrl';
-                var historyUrl = '@historyUrl';
-                var timer = setInterval(function () {
-                    fetch(pollUrl, { credentials: 'same-origin' })
-                        .then(function (r) { return r.json(); })
-                        .then(function (data) {
-                            if (data.paid) {
-                                clearInterval(timer);
-                                document.getElementById('receive-paid-banner').hidden = false;
-                                setTimeout(function () { window.location.href = historyUrl; }, 1500);
-                            }
-                        })
-                        .catch(function () {});
-                }, 2000);
-            })();
-            </script>
         }
         else
         {
@@ -115,3 +102,26 @@
 
     </div>
 </div>
+
+@section PageFootContent {
+    <script>
+    (function () {
+        var config = document.getElementById('poll-config');
+        if (!config) return;
+        var pollUrl    = config.dataset.pollUrl;
+        var historyUrl = config.dataset.historyUrl;
+        var timer = setInterval(function () {
+            fetch(pollUrl, { credentials: 'same-origin' })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.paid) {
+                        clearInterval(timer);
+                        document.getElementById('receive-paid-banner').hidden = false;
+                        setTimeout(function () { window.location.href = historyUrl; }, 1500);
+                    }
+                })
+                .catch(function () {});
+        }, 2000);
+    })();
+    </script>
+}
