@@ -52,6 +52,10 @@
                 </div>
             </div>
 
+            <div id="receive-paid-banner" class="alert alert-success mt-3" hidden>
+                <strong>Payment received!</strong> Redirecting to wallet history...
+            </div>
+
             <a asp-action="Receive" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
                 New invoice
             </a>
@@ -59,6 +63,30 @@
                class="btn btn-outline-secondary">
                 View payment history
             </a>
+        }
+
+        @if (Model.Result is { PaymentHash: { Length: > 0 } hash })
+        {
+            var pollUrl     = Url.Action("ReceivePoll",    "Spark", new { storeId = Model.StoreId, paymentHash = hash });
+            var historyUrl  = Url.Action("WalletHistory",  "Spark", new { storeId = Model.StoreId });
+            <script>
+            (function () {
+                var pollUrl    = '@pollUrl';
+                var historyUrl = '@historyUrl';
+                var timer = setInterval(function () {
+                    fetch(pollUrl, { credentials: 'same-origin' })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            if (data.paid) {
+                                clearInterval(timer);
+                                document.getElementById('receive-paid-banner').hidden = false;
+                                setTimeout(function () { window.location.href = historyUrl; }, 1500);
+                            }
+                        })
+                        .catch(function () {});
+                }, 2000);
+            })();
+            </script>
         }
         else
         {

@@ -2052,6 +2052,33 @@ public class SparkController : Controller
         return View(vm);
     }
 
+    [HttpGet("receive/poll")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
+    public async Task<IActionResult> ReceivePoll(
+        [FromRoute] string storeId,
+        [FromQuery] string paymentHash,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (string.IsNullOrWhiteSpace(paymentHash))
+            return BadRequest();
+
+        var payments = await _sendPayment.ListAllAsync(
+            storeId,
+            SparkPaymentDirection.Receive,
+            DateTimeOffset.UtcNow.AddDays(-1),
+            0,
+            50,
+            cancellationToken).ConfigureAwait(false);
+
+        var paid = payments.Any(p => p.PaymentHash == paymentHash && p.Status == SparkPaymentStatus.Completed);
+        return Json(new { paid });
+    }
+
     [HttpGet("history")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
     public async Task<IActionResult> WalletHistory(
