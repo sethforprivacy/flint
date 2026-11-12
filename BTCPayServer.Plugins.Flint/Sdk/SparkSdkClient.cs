@@ -124,7 +124,8 @@ public sealed class SparkSdkClient : ISparkSdkClient
             null);
 
         var response = await _sdk.ReceivePayment(new ReceivePaymentRequest(method)).ConfigureAwait(false);
-        return new SparkReceiveResult(response.paymentRequest, SparkPaymentMapper.ToSats(response.fee));
+        var paymentHash = _bolt11Parser.Parse(response.paymentRequest)?.PaymentHash ?? "";
+        return new SparkReceiveResult(response.paymentRequest, SparkPaymentMapper.ToSats(response.fee), paymentHash);
     }
 
     public async Task<SparkPayment?> GetPaymentAsync(

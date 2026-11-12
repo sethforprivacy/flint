@@ -179,10 +179,11 @@
         </div>
     </template>
 
-    <script>
-        (function () {
-            const networkIcons = @Safe.Json(networkIcons);
-            const tokenIcons = @Safe.Json(tokenIcons);
+}
+<script>
+    (function () {
+        const networkIcons = @Safe.Json(networkIcons);
+        const tokenIcons = @Safe.Json(tokenIcons);
 
             Vue.component(@Safe.Json(StablecoinCheckoutModelExtension.CheckoutBodyComponentName), {
                 props: ['model', 'nfcSupported', 'nfcScanning', 'nfcErrorMessage', 'nfcWarningMessage'],
@@ -326,5 +327,4 @@
                 }
             });
         })();
-    </script>
-}
+</script>

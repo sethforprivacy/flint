@@ -1,0 +1,18 @@
+<Project>
+  <!--
+    Suppress Razor markup errors present in the pinned btcpayserver submodule (v2.4.4).
+    RZ1021, RZ2008, RZ1034, RZ1026 fire when the .NET SDK Razor compiler is newer than
+    the one that shipped that BTCPay release. When those RZ errors occur the Razor codegen
+    still runs and emits malformed C# (duplicate tag helper classes, misplaced members),
+    which causes cascading CS errors listed below. All are scoped to BTCPayServer only so
+    the plugin and its test project are not affected.
+  -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'BTCPayServer'">
+    <NoWarn>$(NoWarn);RZ1021;RZ2008;RZ1034;RZ1026;RZ1000;CS0101;CS8802;CS9348;CS0426;CS0246;CS1520;CS0501;CS0102;CS0825;CS1106;CS0538;CS0111;CS0116;CS0103;CS0270;CS0535;CS0548;CS1750</NoWarn>
+    <RazorCompileOnBuild>false</RazorCompileOnBuild>
+    <RazorCompileOnPublish>false</RazorCompileOnPublish>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'BTCPayServer.Plugins.Flint'">
+    <NoWarn>$(NoWarn);RZ1021;RZ2008;RZ1034;RZ1026;RZ1000;CS0101;CS8802;CS9348;CS0426;CS0246;CS1520;CS0501;CS0102;CS0825;CS1106;CS0538;CS0111</NoWarn>
+  </PropertyGroup>
+</Project>

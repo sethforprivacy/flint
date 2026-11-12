@@ -136,7 +136,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "10.0.400"
 
       # Deliberately no NuGet cache step here (there was one until the 2026-08 hardening pass):
       # a release build restores cold, downloads exactly what the committed locks name, and

@@ -1,0 +1,77 @@
+@model SparkSendViewModel
+@using System.Globalization
+@{
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Send, "Send payment").SetCategory(SparkNavCategory.Id));
+
+    BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-6 col-xxl-constrain">
+
+        @if (Model.Result is { } result)
+        {
+            <div class="alert alert-success" role="alert">
+                <strong>Payment sent.</strong>
+                @result.AmountSats.ToString("N0", CultureInfo.InvariantCulture) sat
+                + @result.FeeSats.ToString("N0", CultureInfo.InvariantCulture) sat fee
+                at @result.PaidAt.ToString("HH:mm:ss", CultureInfo.InvariantCulture) UTC.
+                @if (result.PaymentHash is { } hash)
+                {
+                    <div class="form-text font-monospace">@hash</div>
+                }
+            </div>
+        }
+
+        <form method="post" asp-action="Send" asp-route-storeId="@Model.StoreId">
+            <div asp-validation-summary="All" class="alert alert-danger" role="alert"></div>
+
+            <div class="mb-3">
+                <label asp-for="Destination" class="form-label">Destination</label>
+                <textarea asp-for="Destination" class="form-control font-monospace" rows="3"
+                          placeholder="BOLT11 invoice or user@domain.com"></textarea>
+                <span asp-validation-for="Destination" class="text-danger"></span>
+                <div class="form-text">
+                    Paste a BOLT11 invoice or a Lightning Address (<code>user@domain.com</code>).
+                    For a Lightning Address you must also set the amount below.
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <label asp-for="AmountSats" class="form-label">Amount (sat)</label>
+                <input asp-for="AmountSats" type="number" min="1" class="form-control"
+                       placeholder="Required for Lightning Address; leave blank for a BOLT11 with embedded amount" />
+                <span asp-validation-for="AmountSats" class="text-danger"></span>
+            </div>
+
+            <div class="mb-3">
+                <label asp-for="MaxFeeSats" class="form-label">Max routing fee (sat)</label>
+                <input asp-for="MaxFeeSats" type="number" min="0" max="100000" class="form-control"
+                       placeholder="Default: 3% of amount or 25 sat, whichever is larger" />
+                <span asp-validation-for="MaxFeeSats" class="text-danger"></span>
+                <div class="form-text">Leave blank to use the default cap. Hard ceiling: 100,000 sat.</div>
+            </div>
+
+            <button type="submit" class="btn btn-primary"
+                    permission="@Policies.CanModifyStoreSettings">
+                Send payment
+            </button>
+        </form>
+
+        <div class="mt-3">
+            <a asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+               class="text-secondary small">
+                View payment history
+            </a>
+        </div>
+
+    </div>
+</div>

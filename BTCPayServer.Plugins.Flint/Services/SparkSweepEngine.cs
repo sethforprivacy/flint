@@ -318,7 +318,7 @@ public sealed class SparkSweepEngine
             // Synced here too. A preview that showed a stale balance would offer a sweep of the wrong size, and
             // the merchant would have no way to know.
             await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-            info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+            info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
             balance = info.BalanceSats;
         }
         catch (Exception ex)
@@ -511,7 +511,7 @@ public sealed class SparkSweepEngine
         {
             // Step 3. The sync is what makes the number current; see the class remarks.
             await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-            info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+            info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
             balance = info.BalanceSats;
         }
         catch (Exception ex)
@@ -1718,7 +1718,7 @@ public sealed class SparkSweepEngine
                     try
                     {
                         await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-                        syncedInfo = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken)
+                        syncedInfo = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken)
                             .ConfigureAwait(false);
                     }
                     catch (Exception ex)

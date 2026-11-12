@@ -133,6 +133,11 @@
             }
         </div>
 
+        <a class="btn btn-secondary mt-2 mb-1" asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           id="SparkWalletHistoryLink" permission="@Policies.CanViewStoreSettings">
+            Wallet history
+        </a>
+
         <h3 class="mt-4 mb-3">Stable Balance</h3>
         <p id="SparkStableBalanceSummary">
             @if (!Model.StableBalanceAvailable)

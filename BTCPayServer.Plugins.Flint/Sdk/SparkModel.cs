@@ -121,7 +121,7 @@ public enum SparkPaymentStatus
 }
 
 /// <summary>Result of minting a receive request (BOLT11 invoice) on the SSP.</summary>
-public sealed record SparkReceiveResult(string PaymentRequest, long FeeSats);
+public sealed record SparkReceiveResult(string PaymentRequest, long FeeSats, string PaymentHash);
 
 /// <summary>
 /// Wallet-level information, from the SDK's <c>GetInfo</c>.

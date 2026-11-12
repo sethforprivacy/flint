@@ -45,7 +45,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "10.0.400"
 
       # What the locked-mode restore below actually guarantees is the *shape* of the graph: it
       # fails if the csproj PackageReferences and the committed packages.lock.json disagree. It
@@ -125,7 +125,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "10.0.400"
 
       - name: Cache NuGet packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -186,7 +186,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "10.0.400"
 
       - name: Cache NuGet packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -277,7 +277,7 @@ jobs:
         if: steps.gate.outputs.funded == 'true'
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "10.0.400"
 
       - name: Cache NuGet packages
         if: steps.gate.outputs.funded == 'true'

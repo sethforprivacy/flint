@@ -257,6 +257,22 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // page and the Greenfield endpoint so neither can decide on its own what a safe claim ceiling is.
         services.AddSingleton<SparkDepositService>();
 
+        // Outgoing Lightning payments: BOLT11 and Lightning Address (LUD-16). Named HttpClient so socket
+        // lifetime is managed by the factory and the User-Agent identifies the plugin to LNURL endpoints.
+        // AllowAutoRedirect=false: redirect targets are not validated by the SSRF checks that run on
+        // the initial URL; a malicious LNURL server could redirect to an internal address and bypass them.
+        services.AddHttpClient(SparkSendPaymentService.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.MaxResponseContentBufferSize = 65_536;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        }).ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.HttpClientHandler
+        {
+            AllowAutoRedirect = false
+        });
+        services.AddSingleton<SparkSendPaymentService>();
+
         // Stable Balance. The mainnet check is resolved once here, because the chain is fixed for the life of
         // the process and because the answer is a refusal rather than a behaviour change: the SDK accepts a
         // stable-balance configuration on regtest and then silently never converts.
@@ -400,6 +416,12 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("store-invoices-payments", "Spark/StablecoinInvoicePayments");
         // And, on the status page, the USDC/USDT money that is on no invoice — which otherwise only the server log knew.
         services.AddUIExtension("spark-status-post-body", "Spark/StablecoinAttention");
+
+        // Plugin update availability check. Fires daily, queries the BTCPay plugin builder for the
+        // latest published Flint version, and POSTs a JSON webhook to the operator-configured URL
+        // when a newer version is available. The webhook URL is set in BTCPay server settings.
+        services.AddHttpClient(SparkPluginUpdateChecker.HttpClientName);
+        services.AddScheduledTask<SparkPluginUpdateChecker>(TimeSpan.FromDays(1));
 
         base.Execute(services);
     }
