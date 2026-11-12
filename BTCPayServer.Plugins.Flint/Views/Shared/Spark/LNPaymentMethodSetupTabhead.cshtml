@@ -65,17 +65,20 @@ else
            data-bs-target="#SparkSetup" role="tab" aria-controls="SparkSetup" aria-selected="false"
            name="LightningNodeType">
     <label for="LightningNodeType-Spark">Use Flint</label>
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const sparkConnectionString = @Safe.Json(connectionString);
-            const connStringEl = document.getElementById('ConnectionString');
+}
+<script>
+    (function () {
+        var sparkConnectionString = @Safe.Json(connectionString);
+        if (!sparkConnectionString) return;
+        document.addEventListener('DOMContentLoaded', function () {
+            var connStringEl = document.getElementById('ConnectionString');
             if (!connStringEl) return;
-            delegate('change', 'input[name="LightningNodeType"]', () => {
-                const active = document.querySelector('input[name="LightningNodeType"]:checked');
+            delegate('change', 'input[name="LightningNodeType"]', function () {
+                var active = document.querySelector('input[name="LightningNodeType"]:checked');
                 if (active && active.id === 'LightningNodeType-Spark') {
                     connStringEl.value = sparkConnectionString;
                 }
             });
-        })
-    </script>
-}
+        });
+    })();
+</script>

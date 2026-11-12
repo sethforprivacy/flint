@@ -1,6 +1,7 @@
 @using System.Globalization
 @using BTCPayServer.Payments
 @using BTCPayServer.Plugins.Flint.Payments
+@using BTCPayServer.Plugins.Flint.Services
 @using BTCPayServer.Services
 @using BTCPayServer.Services.Invoices
 @inject DisplayFormatter DisplayFormatter
@@ -15,26 +16,19 @@
     tolerates any other model, as every extension partial here does.
 *@
 @{
-    var payments = (Model?.Payments ?? [])
-        .Select(payment =>
+    var payments = new List<(PaymentEntity Payment, StablecoinPaymentDetails Details, StablecoinAsset Asset)>();
+    foreach (var payment in Model?.Payments ?? [])
+    {
+        if (StablecoinPayments.For(payment.PaymentMethodId) is null) continue;
+        if (Handlers.TryGet(payment.PaymentMethodId) is not StablecoinPaymentMethodHandler handler) continue;
+        try
         {
-            if (StablecoinPayments.For(payment.PaymentMethodId) is null
-                || Handlers.TryGet(payment.PaymentMethodId) is not StablecoinPaymentMethodHandler handler)
-                return null;
-            try
-            {
-                // A payment whose details did not read comes back with an empty chain; it is still in BTCPay's own
-                // payments table above, and there is nothing of this plugin's to add about it.
-                var details = handler.ParsePaymentDetails(payment.Details) as StablecoinPaymentDetails;
-                return string.IsNullOrEmpty(details?.Chain) ? null : new { Payment = payment, Details = details, Asset = handler.Asset };
-            }
-            catch (Exception)
-            {
-                return null;
-            }
-        })
-        .Where(p => p is not null)
-        .ToList();
+            if (handler.ParsePaymentDetails(payment.Details) is StablecoinPaymentDetails details
+                && !string.IsNullOrEmpty(details.Chain))
+                payments.Add((payment, details, handler.Asset));
+        }
+        catch { }
+    }
 }
 @if (payments.Count > 0)
 {
@@ -55,7 +49,7 @@
                     {
                         // Sats for a bitcoin landing; a Spark token (USDB) is six-decimal, which the SDK asserts for
                         // every token it lands a receive as.
-                        var received = row!.Details.DestinationAsset;
+                        var received = row.Details.DestinationAsset;
                         if (System.Numerics.BigInteger.TryParse(row.Details.DeliveredAmount, NumberStyles.Integer, CultureInfo.InvariantCulture, out var delivered))
                         {
                             received = string.Equals(row.Details.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase)
