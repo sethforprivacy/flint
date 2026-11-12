@@ -417,6 +417,12 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // And, on the status page, the USDC/USDT money that is on no invoice — which otherwise only the server log knew.
         services.AddUIExtension("spark-status-post-body", "Spark/StablecoinAttention");
 
+        // Plugin update availability check. Fires daily, queries the BTCPay plugin builder for the
+        // latest published Flint version, and POSTs a JSON webhook to the operator-configured URL
+        // when a newer version is available. The webhook URL is set in BTCPay server settings.
+        services.AddHttpClient(SparkPluginUpdateChecker.HttpClientName);
+        services.AddScheduledTask<SparkPluginUpdateChecker>(TimeSpan.FromDays(1));
+
         base.Execute(services);
     }
 

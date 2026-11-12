@@ -1,0 +1,11 @@
+<Project>
+  <!--
+    Suppress Razor markup errors present in the pinned btcpayserver submodule (v2.4.4).
+    RZ1021, RZ2008, RZ1034, RZ1026 fire when the .NET SDK Razor compiler is newer than
+    the one that shipped that BTCPay release. Scoped to BTCPayServer only so the plugin
+    and its test project are not affected.
+  -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'BTCPayServer'">
+    <NoWarn>$(NoWarn);RZ1021;RZ2008;RZ1034;RZ1026</NoWarn>
+  </PropertyGroup>
+</Project>
