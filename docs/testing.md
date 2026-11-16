@@ -182,6 +182,17 @@ It has to be generated rather than committed, because the SSP's identity key and
 certificates are created fresh by every `start.sh` — so **re-run `write-network.sh` after every
 `up.sh`**. Absent the variable the suite skips itself, as the Postgres and integration suites do.
 
+**On SDK 0.27 and later this stack cannot start at all, and that is the fixture rather than the plugin.**
+The SDK now submits the four tree-node status values added in 0.27 (`Consolidated`, `WatchtowerExited`,
+`WatchtowerExitRecovered`, `Returned`) in its status filters, and the fixture's operators — pinned by
+`cashu-regtest` to `benthecarman/spark@83cca565`, from August — reject them with `invalid transfer status:
+unknown tree node status: 16`. The wallet sync fails, the fixture's wallet is never funded, and every test
+here fails in its shared setup after the ten-minute funding timeout. It is worth telling apart from a real
+break: on one and the same fixture, 0.26.1 passes these suites in seconds. CI's `local-regtest` job is
+advisory until the fixture ships current operators (see [CI, releases & upstream
+updates](ci-and-releases.md#ci-releases--upstream-updates)), so a red run there on 0.28+ is expected rather
+than evidence about the plugin.
+
 The cost is time: the fixture publishes no images, so a cold run builds six services from Rust and Go
 source and takes **tens of minutes** (a few minutes once the layers are cached). On Docker Desktop for macOS
 the fixture's Core Lightning nodes cannot write their SQLite database on a bind mount, so `up.sh` gives them
@@ -234,7 +245,7 @@ Two things about that provisioning are worth knowing before scripting anything s
   server-settings policy — and an API key is judged on its own permissions, not on its owner's role. Without
   it the provisioning `POST` answers `403 hot-wallet-not-allowed`. See
   [`greenfield-api.md`](greenfield-api.md).
-- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.6`, matching the `btcpayserver`
+- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.7`, matching the `btcpayserver`
   submodule tag and therefore `Constants.BuiltAgainstBTCPayServerVersion`. The official image is a Release
   build, so `DEBUG_PLUGINS` — the side-loading route [`development.md`](development.md) uses — does not
   exist in it; `up.sh` instead stages the Release build output as

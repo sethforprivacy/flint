@@ -465,17 +465,21 @@ public interface ISparkSdkClient : IDisposable
     /// the operator funded for, so the leaves and the funding requirement cannot drift apart underneath them.
     /// </param>
     /// <param name="fundingUtxos">
-    /// P2WPKH outputs that will pay every fee in the exit. Must be non-empty. The SDK accepts several and
-    /// judges their combined value <em>after following each one</em>: an outpoint an earlier attempt already
-    /// spent is walked to whatever it became (fan-out outputs, CPFP change) rather than rejected, and one spent
-    /// only by an unconfirmed transaction is kept, because the rebuild replaces that child. A first build passes
-    /// the single output <see cref="SparkExitQuote.SingleUtxoFundingSat"/> was sized for; a rebuild passes back
-    /// everything earlier builds were given, plus any fresh top-up — the SDK's documented second attempt. A
-    /// shortfall surfaces as <see cref="SparkExitFundingShortfallException"/>.
+    /// P2WPKH outputs that will pay every fee in the exit. Must be non-empty <b>when
+    /// <see cref="SparkExitQuote.RequiresFunding"/> is true</b>, and is ignored otherwise: a recovery of nothing
+    /// but cooperative leaves needs no Bitcoin of the operator's, and the SDK's contract for it is no funding
+    /// inputs at all. The SDK accepts several and judges their combined value <em>after following each one</em>:
+    /// an outpoint an earlier attempt already spent is walked to whatever it became (fan-out outputs, CPFP
+    /// change) rather than rejected, and one spent only by an unconfirmed transaction is kept, because the
+    /// rebuild replaces that child. A first build passes the single output
+    /// <see cref="SparkExitQuote.SingleUtxoFundingSat"/> was sized for; a rebuild passes back everything earlier
+    /// builds were given, plus any fresh top-up — the SDK's documented second attempt. A shortfall surfaces as
+    /// <see cref="SparkExitFundingShortfallException"/>.
     /// </param>
     /// <param name="fundingSecretKey">
-    /// The private key for those outputs, used to build a one-shot signer for the CPFP transactions. Held only
-    /// for the duration of this call and never logged. The array is the caller's to own and is not cleared here.
+    /// The private key for those outputs, used to build a one-shot signer for the CPFP transactions. Required
+    /// when the quote needs funding and may be null when it does not. Held only for the duration of this call
+    /// and never logged. The array is the caller's to own and is not cleared here.
     /// </param>
     /// <param name="approveQuote">
     /// Called with the quote this build is about to commit to, and before anything is built. Return null to
@@ -516,7 +520,7 @@ public interface ISparkSdkClient : IDisposable
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
         IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
-        byte[] fundingSecretKey,
+        byte[]? fundingSecretKey,
         Func<SparkExitQuote, string?> approveQuote,
         CancellationToken cancellationToken = default);
 

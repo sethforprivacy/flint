@@ -333,12 +333,17 @@ public class SparkSdkClientFactory : ISparkSdkClientFactory
         return config;
     }
 
-    private static MaxFee ToSdkMaxFee(SparkMaxFee maxFee) => maxFee switch
-    {
-        SparkMaxFee.Fixed fixedFee => new MaxFee.Fixed((ulong)Math.Max(0, fixedFee.Sats)),
-        SparkMaxFee.Rate rate => new MaxFee.Rate((ulong)Math.Max(0, rate.SatPerVbyte)),
-        SparkMaxFee.NetworkRecommended recommended =>
-            new MaxFee.NetworkRecommended((ulong)Math.Max(0, recommended.LeewaySatPerVbyte)),
-        _ => throw new ArgumentOutOfRangeException(nameof(maxFee), maxFee, "Unknown deposit claim fee policy.")
-    };
+    private static MaxFee ToSdkMaxFee(SparkMaxFee maxFee) => new(
+        maxFee switch
+        {
+            SparkMaxFee.Fixed fixedFee => new MaxOnchainFee.Fixed((ulong)Math.Max(0, fixedFee.Sats)),
+            SparkMaxFee.Rate rate => new MaxOnchainFee.Rate((ulong)Math.Max(0, rate.SatPerVbyte)),
+            SparkMaxFee.NetworkRecommended recommended =>
+                new MaxOnchainFee.NetworkRecommended((ulong)Math.Max(0, recommended.LeewaySatPerVbyte)),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(maxFee), maxFee, "Unknown deposit claim fee policy.")
+        },
+        // No proportional arm: the plugin's policy is a merchant-set ceiling, not a share of the deposit. See
+        // SparkSdkClient.ToSdkMaxFee for the longer note on SDK 0.28's split of this type.
+        proportionalPpm: null);
 }

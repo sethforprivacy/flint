@@ -17,8 +17,15 @@ namespace BTCPayServer.Plugins.Flint.Sdk;
 /// the end. Sending a tree node without its child leaves an unconfirmable transaction paying no fee.
 /// </para>
 /// <para>
-/// Mapped explicitly from the SDK's <c>UnilateralExitTxKind</c> rather than cast: the SDK spells the first two
+/// Mapped explicitly from the SDK's <c>RecoveryTxKind</c> rather than cast: the SDK spells two of them
 /// <c>FanOut</c> and <c>Node</c>, so name-based mapping is what survives an SDK bump that inserts a variant.
+/// </para>
+/// <para>
+/// <b>The member order is persisted state.</b> A built exit is stored as JSON with these values as integers
+/// (the exit service's serialiser has no enum-to-string converter, and adding one would silently reinterpret
+/// every row already written), so a new member is <em>appended</em> and never inserted. Inserting one renames
+/// every kind an operator's stored exit already holds — a tree node would come back as whatever was put in
+/// front of it, and the page would hand out broadcast instructions for the wrong shape.
 /// </para>
 /// </remarks>
 public enum SparkExitTxKind
@@ -42,7 +49,49 @@ public enum SparkExitTxKind
     /// The final transaction moving the recovered coins to the operator's destination address. Broadcast alone,
     /// after everything it depends on has confirmed.
     /// </summary>
-    Sweep
+    Sweep,
+
+    /// <summary>
+    /// A cooperative recovery: one transaction per leaf, for a leaf the Spark operators already moved on-chain.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Appended, not inserted — see the remark on this type's member order.</b> It is also the one kind that
+    /// is not an exit step: the operators co-sign it, it spends an on-chain output rather than the pre-signed
+    /// tree, it pays its own fee out of the funds it recovers, and it carries no CPFP child, no timelock and no
+    /// dependencies. Broadcast it alone, through any node, as soon as the build returns it.
+    /// </para>
+    /// <para>
+    /// It exists because SDK 0.28's recovery covers both ways a leaf can be got back: a unilateral exit, and
+    /// this, for leaves the operators took on-chain before the exit reached them. A set can hold both, because
+    /// the SDK picks per leaf from what it finds on-chain.
+    /// </para>
+    /// </remarks>
+    Cooperative
+}
+
+/// <summary>
+/// How one leaf's funds will be recovered, which decides whether that leaf needs a Bitcoin UTXO of the
+/// operator's to pay for its release.
+/// </summary>
+/// <remarks>
+/// The SDK's <c>RecoveryMethod</c>, mapped by name. This is shown to an operator rather than acted on: it
+/// explains why a quote asks for funding at all (a unilateral leaf pays no fee of its own, so its CPFP children
+/// have to be funded) and why it may not (a cooperative leaf pays its fee out of its own value).
+/// </remarks>
+public enum SparkExitRecoveryMethod
+{
+    /// <summary>
+    /// The Spark operators already moved this leaf's funds on-chain, so they co-sign one transaction sending
+    /// them to the destination. Needs the operators reachable and no funding UTXO.
+    /// </summary>
+    Cooperative,
+
+    /// <summary>
+    /// The leaf is taken on-chain through its own pre-signed transactions, needing nothing from the operators
+    /// and paying every fee from a funding UTXO the operator supplies.
+    /// </summary>
+    Unilateral
 }
 
 /// <summary>
@@ -128,17 +177,67 @@ public sealed record SparkExitTxStatus(
 /// <remarks>
 /// <para>
 /// <b>The leaf ids are the resumable identity of an exit and must be persisted.</b> A quote taken with
-/// <c>Auto</c> selection picks whichever leaves are worth exiting at that moment and at that fee rate; asking
+/// automatic selection picks whichever leaves are worth recovering at that moment and at that fee rate; asking
 /// again later can select a different set, which would build a different exit against a funding UTXO sized for
 /// the first one. Re-quoting with these exact ids (<c>Specific</c>) is what makes a resume mean the same exit.
 /// </para>
 /// <para>
-/// The binding's <c>UnilateralExitLeaf</c> carries only an id and a value — there is no per-leaf fee field, so
-/// there is none here. Fees are reported for the exit as a whole on <see cref="SparkExitQuote"/> and per branch
-/// on <see cref="SparkExitBranchFunding"/>.
+/// The binding's <c>RecoverFundsLeaf</c> carries an id, a value and <see cref="Method"/> — there is no per-leaf
+/// fee field, so there is none here. Fees are reported for the recovery as a whole on
+/// <see cref="SparkExitQuote"/> and per branch on <see cref="SparkExitBranchFunding"/>.
 /// </para>
 /// </remarks>
-public sealed record SparkExitLeaf(string LeafId, long ValueSat);
+/// <param name="Method">
+/// How the SDK will get this leaf back, or null where the caller only knows the leaf's identity. Read by the
+/// page to explain the quote — a cooperative leaf needs no funding from the operator — and never by the
+/// build's arithmetic, which uses the SDK's own figures. Null is what the check's reconstruction passes, since
+/// the record it works from stores leaf ids and nothing else; see
+/// <see cref="SparkSdkClient.ToSdkExit"/>.
+/// </param>
+public sealed record SparkExitLeaf(
+    string LeafId,
+    long ValueSat,
+    SparkExitRecoveryMethod? Method = null)
+{
+    /// <summary>
+    /// True when this leaf is recovered by an operator co-signature rather than by unrolling its tree.
+    /// </summary>
+    /// <remarks>
+    /// The one predicate the funding explanation and the page both read, so "needs no funding" cannot come to
+    /// mean two different things in two places. An unknown method reads as not cooperative, which is the safe
+    /// direction: it keeps a funding requirement in front of the operator rather than dropping one.
+    /// </remarks>
+    public bool IsCooperative => Method is SparkExitRecoveryMethod.Cooperative;
+}
+
+/// <summary>
+/// A leaf the quote's selection covered but did not recover, and why.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Reported because silence would be a lie.</b> Before SDK 0.28 a leaf was simply absent from a quote when it
+/// was not worth exiting, and "nothing worth exiting right now" covered it. The SDK now says which leaves it
+/// left out and for what reason, and several of those reasons are actionable — too small for the fee rate,
+/// funds not found on-chain, operators unreachable, or a recovery that cannot be built at all — so an operator
+/// looking at a shorter list than they expected is told why rather than left to guess.
+/// </para>
+/// <para>
+/// <see cref="Reason"/> is a sentence assembled from the SDK's own union, not a mirrored enum: the set of reasons
+/// is the SDK's to extend, and a plugin-side enum would turn its next addition into a deserialisation failure or
+/// a silently wrong label. Nothing branches on it.
+/// </para>
+/// </remarks>
+public sealed record SparkExitSkippedLeaf(string LeafId, long ValueSat, string Reason);
+
+/// <summary>
+/// A leaf the build left out because the operators would not co-sign its recovery.
+/// </summary>
+/// <remarks>
+/// A cooperative recovery is co-signed leaf by leaf, and one the operators refuse does not fail the build: the
+/// SDK lists it here and builds the rest. That leaf needs a recovery of its own, so the build reports it rather
+/// than presenting a complete-looking exit that quietly recovered less than the quote said.
+/// </remarks>
+public sealed record SparkExitFailedLeaf(string LeafId, string Reason);
 
 /// <summary>
 /// How much of the CPFP funding one branch of the tree needs.
@@ -156,9 +255,10 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>An empty <see cref="Leaves"/> list is a normal answer, not an error.</b> With <c>Auto</c> selection the
-/// SDK returns nothing at all when no leaf is worth exiting at the requested fee rate, and that has to be
-/// reported to a merchant as "nothing worth exiting right now" rather than as a fault.
+/// <b>An empty <see cref="Leaves"/> list is a normal answer, not an error.</b> With automatic selection the
+/// SDK returns nothing at all when no leaf is worth recovering at the requested fee rate, and that has to be
+/// reported to a merchant as "nothing worth recovering right now" rather than as a fault. The leaves it looked
+/// at and left out are then in <see cref="Skipped"/>, which is what turns that answer into a reason.
 /// </para>
 /// <para>
 /// Unlike the cooperative-exit quote this one has no expiry and no id: it is a local computation over the
@@ -183,7 +283,10 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// </param>
 /// <param name="SingleUtxoFundingSat">
 /// The amount that must sit on the funding address as <b>one</b> UTXO. This is the number an operator funds
-/// against: the plugin spends a single P2WPKH output, so two outputs each half this size do not qualify.
+/// against: the plugin spends a single P2WPKH output, so two outputs each half this size do not qualify. It is
+/// zero exactly when the recovery needs no funding at all — an all-cooperative quote, whose leaves pay their
+/// own fees out of their own value — and <see cref="RequiresFunding"/> says so explicitly rather than leaving
+/// a caller to infer it from a zero.
 /// </param>
 /// <param name="FanoutFeeSat">
 /// The fan-out transaction's own fee, part of <paramref name="TotalFeeSat"/>. Called out separately because it
@@ -206,6 +309,14 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// (spent by a payment, reshaped by leaf optimisation), and a caller resuming a pinned exit has to refuse that
 /// case rather than build a smaller exit than the one that was funded. Null reads as none.
 /// </param>
+/// <param name="RequiresFunding">
+/// Whether this recovery needs a Bitcoin UTXO of the operator's at all. False only when every selected leaf is
+/// cooperative, in which case the build takes no funding inputs and no signer and the page must not ask for
+/// sats — a recovery of nothing but already-on-chain leaves is free to build and needs nobody's coins.
+/// </param>
+/// <param name="Skipped">
+/// The leaves this selection covered and left out, with the reason. Null reads as none.
+/// </param>
 public sealed record SparkExitQuote(
     long RecoverableValueSat,
     long TotalFeeSat,
@@ -215,7 +326,9 @@ public sealed record SparkExitQuote(
     IReadOnlyList<SparkExitBranchFunding> PerBranchFunding,
     ulong FeeRateSatPerVbyte,
     string Destination,
-    IReadOnlyList<string>? FinishedLeafIds = null)
+    IReadOnlyList<string>? FinishedLeafIds = null,
+    bool RequiresFunding = true,
+    IReadOnlyList<SparkExitSkippedLeaf>? Skipped = null)
 {
     /// <summary>True when the quote selected nothing — see the remarks on this type.</summary>
     public bool IsEmpty => Leaves.Count == 0;
@@ -361,17 +474,33 @@ public sealed record SparkExitTransaction(
 /// came. Persisted and rendered in this order, so nothing above the seam sorts or re-derives it; each entry's
 /// <see cref="SparkExitTransaction.DependsOn"/> says which confirmations to wait for before pushing it out.
 /// </param>
+/// <param name="FeeRateSatPerVbyte">
+/// The rate the built transactions were signed at. Carried so the check's reconstruction is the same document
+/// the build returned: <c>CheckRecoverFunds</c> takes a whole response, and a zero here would be a different
+/// one. Nothing in the check branches on it.
+/// </param>
+/// <param name="Destination">
+/// The address those transactions pay. Carried for the same reason as <paramref name="FeeRateSatPerVbyte"/>,
+/// and it is also what a follow-up page shows when the record's own copy has moved on.
+/// </param>
+/// <param name="Failed">
+/// Leaves the operators refused to co-sign, with the SDK's reason. Not part of this recovery: each needs one of
+/// its own. Null reads as none, which is the ordinary case — only a cooperative leaf can land here.
+/// </param>
 public sealed record SparkExitResult(
     long RecoverableValueSat,
     long TotalFeeSat,
+    ulong FeeRateSatPerVbyte,
+    string Destination,
     IReadOnlyList<SparkExitTransaction> Transactions,
-    IReadOnlyList<SparkExitLeaf> Leaves);
+    IReadOnlyList<SparkExitLeaf> Leaves,
+    IReadOnlyList<SparkExitFailedLeaf>? Failed = null);
 
 /// <summary>
 /// What to do with a built exit, as the chain currently reports it.
 /// </summary>
 /// <remarks>
-/// The SDK's <c>UnilateralExitVerdict</c>. Three cases rather than a boolean because the three call for
+/// The SDK's <c>RecoveryVerdict</c>. Three cases rather than a boolean because the three call for
 /// genuinely different actions, and — the important part — "this cannot finish" is not an error: the money is
 /// still recoverable, it just needs a new exit built from the same leaves.
 /// </remarks>

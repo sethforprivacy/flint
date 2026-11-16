@@ -28,6 +28,12 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 public class SparkLogBridgeTests
 {
     /// <summary>
+    /// The SDK instance a log line names. 0.28 made it a required <c>LogEntry</c> parameter; the bridge never
+    /// reads it, so any stable value stands in.
+    /// </summary>
+    private const string InstanceId = "flint-test-instance";
+
+    /// <summary>
     /// The real leak, in the shape it was actually observed in.
     /// </summary>
     /// <remarks>
@@ -332,8 +338,8 @@ public class SparkLogBridgeTests
         var log = new CapturingLogger<SparkLogBridgeTests>();
         var bridge = new SparkLogBridge(log);
 
-        bridge.Log(new LogEntry(null!, "debug"));
-        bridge.Log(new LogEntry("", null!));
+        bridge.Log(new LogEntry(null!, "debug", InstanceId));
+        bridge.Log(new LogEntry("", null!, InstanceId));
 
         Assert.Equal(2, log.Lines.Count);
     }
@@ -474,7 +480,7 @@ public class SparkLogBridgeTests
     private static string Forward(string line, string level)
     {
         var log = new CapturingLogger<SparkLogBridgeTests>();
-        new SparkLogBridge(log).Log(new LogEntry(line, level));
+        new SparkLogBridge(log).Log(new LogEntry(line, level, InstanceId));
 
         var entry = Assert.Single(log.Lines);
         var marker = "spark: ";
@@ -493,15 +499,15 @@ public class SparkLogBridgeTests
         var bridge = new SparkLogBridge(log);
 
         // SDK "info" → Information, "debug" → Debug, "trace" → Trace: all below the threshold.
-        bridge.Log(new LogEntry("sync completed", "info"));
-        bridge.Log(new LogEntry("dumping payment row with preimage abc", "debug"));
-        bridge.Log(new LogEntry("graphql session_token: deadbeef", "trace"));
+        bridge.Log(new LogEntry("sync completed", "info", InstanceId));
+        bridge.Log(new LogEntry("dumping payment row with preimage abc", "debug", InstanceId));
+        bridge.Log(new LogEntry("graphql session_token: deadbeef", "trace", InstanceId));
         Assert.Empty(log.Lines);
 
         // "warn" stays Warning, and "error" maps DOWN to Warning — both at or above the threshold, so
         // both are forwarded, and the secret among them is scrubbed on the way.
-        bridge.Log(new LogEntry("retrying connect", "warn"));
-        bridge.Log(new LogEntry("session_token: deadbeef", "error"));
+        bridge.Log(new LogEntry("retrying connect", "warn", InstanceId));
+        bridge.Log(new LogEntry("session_token: deadbeef", "error", InstanceId));
         Assert.Equal(2, log.Lines.Count);
         Assert.Contains("retrying connect", log.AllText);
         Assert.DoesNotContain("deadbeef", log.AllText);

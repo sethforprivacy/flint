@@ -27,9 +27,12 @@ counting on it:
   collected while they still were. The exit-state backup on the Advanced page is that copy: a wallet whose
   own storage is lost and has no backup cannot rebuild its exit data from anywhere once the operators are
   gone, and a leaf is only exitable this way once its chain has been synced at least once.
-- **You have to fund it on-chain first.** The tree transactions cannot pay their own fees, so the exit is
-  bumped by CPFP from a native-SegWit UTXO you send to an address the plugin derives from the store's seed at
-  its own hardened account. Too little there and nothing gets built. Fan-out and fee-bumping fees come out
+- **You have to fund it on-chain first — unless nothing needs funding.** The tree transactions cannot pay
+  their own fees, so the exit is bumped by CPFP from a native-SegWit UTXO you send to an address the plugin
+  derives from the store's seed at its own hardened account. Too little there and nothing gets built. The
+  exception is a recovery made entirely of cooperative leaves: the operators already moved those on-chain, so
+  each recovery pays its own fee out of the value it recovers and the page asks for nothing. That case still
+  needs the operators, which is the same trade the rest of this page makes. Fan-out and fee-bumping fees come out
   of that funding and the final sweep's fee out of the recovered value; unspent funding is swept to the
   destination with the rest, and funding for an exit that is never broadcast is not spent.
 - **It settles in days, not seconds.** The outputs are behind CSV timelocks measured in blocks; the money is

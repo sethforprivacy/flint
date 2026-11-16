@@ -1818,6 +1818,7 @@ public class SparkController : Controller
             EsploraApiUrl = settings?.UnilateralExit?.EsploraApiUrl,
             LoadError = page.LoadError,
             StatusesReadUtc = page.StatusesReadUtc,
+            FailedLeaves = page.FailedLeaves,
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };

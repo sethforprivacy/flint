@@ -59,7 +59,7 @@ public static class SparkErrors
             SdkException.CrossChainRouteUnavailable unavailable => Strip(unavailable.reason),
             SdkException.DepositClaimInProgress =>
                 "A claim for this deposit is already in progress. Nothing more is needed; check the balance shortly.",
-            SdkException.InsufficientCpfpFunds shortfall => DescribeCpfpShortfall(ToSats(shortfall.requiredSat)),
+            SdkException.InsufficientCpfpFunds shortfall => DescribeCpfpShortfall(ToSats(shortfall.requiredSats)),
             // MissingUtxo and MaxDepositClaimFeeExceeded carry several named fields rather than a
             // single v1, so there is nothing better to do than strip the synthesised prefix.
             SdkException => Strip(exception.Message),
@@ -260,7 +260,7 @@ public static class SparkErrors
         return exception switch
         {
             SdkException.InsufficientCpfpFunds shortfall =>
-                new SparkExitFundingShortfallException(ToSats(shortfall.requiredSat), shortfall),
+                new SparkExitFundingShortfallException(ToSats(shortfall.requiredSats), shortfall),
             _ => null
         };
     }

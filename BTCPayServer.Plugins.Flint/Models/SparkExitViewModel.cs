@@ -183,6 +183,19 @@ public class SparkExitViewModel
     [ValidateNever]
     public DateTimeOffset? StatusesReadUtc { get; set; }
 
+    /// <summary>
+    /// Leaves the last build left out because the Spark operators would not co-sign their recovery, or null when
+    /// none were reported — see <c>UnilateralExitPageData.FailedLeaves</c>.
+    /// </summary>
+    /// <remarks>
+    /// Not a failure of the build, which is why it is not an error here: the set in
+    /// <see cref="Transactions"/> recovers everything else, and each of these leaves needs a recovery of its own.
+    /// Rendered beside that set, because an operator shown only the totals would believe the whole balance is on
+    /// its way.
+    /// </remarks>
+    [ValidateNever]
+    public IReadOnlyList<SparkExitFailedLeaf>? FailedLeaves { get; set; }
+
     /// <summary>The chain this server runs on, named in the copy that depends on it.</summary>
     public string NetworkName { get; set; } = string.Empty;
 

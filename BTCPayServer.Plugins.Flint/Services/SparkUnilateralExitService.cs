@@ -365,7 +365,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
         // Read back and checked here rather than anywhere above: the page renders these, and a malformed column
         // has to become an explanation on the page instead of an exception in a view.
-        var readable = TryReadTransactions(active, out var transactions, out var statusesReadUtc);
+        var readable = TryReadTransactions(
+            active, out var transactions, out var statusesReadUtc, out var failedLeaves);
 
         // Derived here rather than left to the view. A built exit runs to a dozen rows of which at most one or
         // two are actionable at any moment, so "send these now" is the one thing the page has to say about the
@@ -393,7 +394,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             transactions,
             !readable,
             pending,
-            StatusesReadUtc: readable ? statusesReadUtc : null);
+            StatusesReadUtc: readable ? statusesReadUtc : null,
+            FailedLeaves: readable && failedLeaves is { Count: > 0 } ? failedLeaves : null);
     }
 
     /// <inheritdoc />
@@ -557,7 +559,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // chain was being asked.
             var from = record.Status;
 
-            if (!TryReadTransactions(record, out var stored) || stored is null)
+            if (!TryReadTransactions(record, out var stored, out var refusedLeaves) || stored is null)
             {
                 // A built row whose set cannot be read has nothing to ask the chain about, and the SDK is handed
                 // the set — so this is a refusal rather than a call that would report on an exit that is not the
@@ -586,8 +588,14 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             var stored2 = new SparkExitResult(
                 record.RecoverableValueSat,
                 record.TotalFeeSat,
+                (ulong)record.FeeRateSatPerVbyte,
+                record.DestinationAddress,
                 stored,
-                DeserializeLeafIds(record).Select(id => new SparkExitLeaf(id, 0)).ToArray());
+                DeserializeLeafIds(record).Select(id => new SparkExitLeaf(id, 0)).ToArray(),
+                // Echoed back so the reconstruction is the document the build returned. A check reads the chain
+                // and does not revisit these, so carrying them is what keeps a reloaded page honest about the
+                // leaves the operators refused.
+                refusedLeaves);
 
             // The SDK's check reads only the chain, but it is a method on a connected SDK instance, and this plugin
             // has one only while the store's wallet runs — there is no chain-only handle to ask instead. So a
@@ -621,7 +629,11 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
             // The statuses it reports replace the ones stored, which is the whole point of the call: an operator
             // reading the page afterwards sees what the chain says, not what it said when the set was built.
-            record.TransactionsJson = SerializeTransactions(progress.Transactions, _timeProvider.GetUtcNow());
+            // The refused leaves are carried across rather than cleared: a check refreshes statuses, not the
+            // set's membership, and writes that dropped them would quietly turn a partial recovery into a
+            // complete-looking one on the next page load.
+            record.TransactionsJson = SerializeTransactions(
+                progress.Transactions, _timeProvider.GetUtcNow(), refusedLeaves);
             record.UpdatedUtc = _timeProvider.GetUtcNow();
 
             // The verdict is not written to the row — it is derived state the SDK recomputes on every call, and a
@@ -917,11 +929,23 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
             _logger.LogInformation(
                 "Store {StoreId}: quoted a unilateral exit of {Leaves} leaves worth {Recoverable} sat at "
-                + "{FeeRate} sat/vB; it needs {Funding} sat on {FundingAddress}",
+                + "{FeeRate} sat/vB; {Funding}{Skipped}",
                 storeId, quote.Leaves.Count, quote.RecoverableValueSat, feeRateSatPerVbyte,
-                quote.SingleUtxoFundingSat, fundingAddress);
+                quote.RequiresFunding
+                    ? $"it needs {quote.SingleUtxoFundingSat} sat on {fundingAddress}"
+                    : "every selected leaf is recovered cooperatively, so it needs no funding",
+                quote.Skipped is { Count: > 0 } skipped
+                    ? $"; Spark left out {skipped.Count} leaf(s): {DescribeSkipped(skipped)}"
+                    : string.Empty);
 
-            return new UnilateralExitOpResult(true, null, record);
+            // Said once, here, because a quote's skipped set describes that quote and not the exit: the record
+            // pins the leaf ids it did select, and re-quoting later can skip a different set. So it belongs in
+            // the answer to the press that produced it — an operator who expected more leaves is told why
+            // straight away — and not in a column that would go stale silently.
+            return new UnilateralExitOpResult(
+                true,
+                quote.Skipped is { Count: > 0 } ? DescribeSkipped(quote.Skipped) : null,
+                record);
         }
         finally
         {
@@ -1105,8 +1129,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // reason to refuse.
             var haveExplorer = SparkExitFundingExplorer.TryResolveBaseUrl(
                 exitSettings, Mainnet, out var baseUrl, out var urlError);
-            if (!haveExplorer && !following)
-                return await FailAsync(record, from, urlError!).ConfigureAwait(false);
 
             // Step one: re-quote the record's own leaves. This happens before funding is even looked at, because
             // its answer is what the funding has to satisfy — see the remarks on this method.
@@ -1171,7 +1193,20 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             long largest = 0;
             var explorerMissed = false;
 
-            if (following)
+            if (!fresh.RequiresFunding)
+            {
+                // Nothing to fund: every selected leaf is recovered cooperatively, so its fee comes out of its
+                // own value and no Bitcoin of the operator's is spent. The SDK's contract for that case is to be
+                // given no funding inputs — and, below, no signer — so the explorer is not consulted at all. Not
+                // consulting it is the point: a quote like this must be buildable on a store whose explorer is
+                // unreachable, or unconfigured, because nothing about it needs the chain the explorer serves.
+                //
+                // Any funding this exit committed earlier is dropped rather than passed back, because the SDK
+                // does not want it for this quote; the outputs stay on the funding address, recoverable from
+                // the record's key path, exactly as an unused top-up always has.
+                inputs = [];
+            }
+            else if (following)
             {
                 // Step three, for a rebuild: hand back what the last build committed, and let the SDK follow it.
                 // This is the SDK's own documented second attempt ("pass back the funding inputs the stored
@@ -1217,6 +1252,12 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             }
             else
             {
+                // Moved out of the shared prologue above: the only thing that needs an explorer is finding the
+                // output a first build spends, so the requirement is asserted where it is true rather than
+                // before the quote has said whether anything needs funding at all.
+                if (!haveExplorer)
+                    return await FailAsync(record, from, urlError!).ConfigureAwait(false);
+
                 var required = fresh.SingleUtxoFundingSat;
 
                 var lookup = await _explorer
@@ -1262,7 +1303,10 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                         record.DestinationAddress,
                         leafIds,
                         inputs,
-                        funding.Secret,
+                        // A recovery with no funding step has no CPFP child and nothing for a signer to sign,
+                        // and the SDK rejects a signer given alongside no funding. The key is only materialised
+                        // into this call when the quote says there is something to sign.
+                        fresh.RequiresFunding ? funding.Secret : null,
                         second =>
                         {
                             // The veto, against the quote the SDK took inside this call. A unilateral-exit quote
@@ -1371,7 +1415,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // confirm, or one its own re-plan dropped, and keeping a stale copy of it next to the new set invites
             // an operator to broadcast a transaction the SDK has already superseded.
             // Stamped with the build's own time, because a build reads every status from the chain too.
-            record.TransactionsJson = SerializeTransactions(result.Transactions, _timeProvider.GetUtcNow());
+            record.TransactionsJson = SerializeTransactions(
+                result.Transactions, _timeProvider.GetUtcNow(), result.Failed);
             // Cleared, not left in place: a build that got further must not show the failed attempt's complaint
             // next to its own transactions.
             record.LastError = null;
@@ -1770,6 +1815,25 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// </para>
     /// </remarks>
     /// <param name="expectedStatus">The status the caller read, guarding the update — see the store's contract.</param>
+    /// <summary>
+    /// The skipped leaves as one sentence, for the answer to the press that quoted them.
+    /// </summary>
+    /// <remarks>
+    /// The SDK's own reason is carried through untranslated beyond the mapping in
+    /// <see cref="SparkSdkClient.DescribeSkippedReason"/>, because several of them are actionable and a summary
+    /// would lose the part the operator acts on — "cheaper fees would include it" is a different instruction
+    /// from "the operators could not be reached".
+    /// </remarks>
+    private static string DescribeSkipped(IReadOnlyList<SparkExitSkippedLeaf> skipped) =>
+        "Spark left " + skipped.Count.ToString(CultureInfo.InvariantCulture)
+        + (skipped.Count == 1 ? " leaf out of this quote: " : " leaves out of this quote: ")
+        + string.Join("; ", skipped.Select(leaf =>
+            string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} ({1:N0} sat) — {2}",
+                leaf.LeafId, leaf.ValueSat, leaf.Reason)))
+        + ". Re-quoting later may include them.";
+
     private async Task<UnilateralExitOpResult> FailAsync(
         UnilateralExitRecord record,
         UnilateralExitStatus expectedStatus,
@@ -2060,10 +2124,25 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// renders as "not recorded" rather than inventing one.
     /// </para>
     /// </remarks>
-    private sealed record StoredTransactionSet(DateTimeOffset? StatusesReadUtc, SparkExitTransaction[]? Transactions);
+    /// <param name="Failed">
+    /// The leaves the operators refused to co-sign for this build, with the SDK's own reason. Stored in the same
+    /// envelope as the transactions because it describes the same build: the set is a complete recovery of
+    /// everything except these leaves, each of which needs an attempt of its own, and an operator who reloads
+    /// the page days later has to still be told that. A set written before this member existed reads back with
+    /// null, which means "nothing was reported refused", not "the column is broken".
+    /// </param>
+    private sealed record StoredTransactionSet(
+        DateTimeOffset? StatusesReadUtc,
+        SparkExitTransaction[]? Transactions,
+        SparkExitFailedLeaf[]? Failed = null);
 
-    private static string SerializeTransactions(IEnumerable<SparkExitTransaction> transactions, DateTimeOffset readAt) =>
-        JsonSerializer.Serialize(new StoredTransactionSet(readAt, transactions.ToArray()), JsonOptions);
+    private static string SerializeTransactions(
+        IEnumerable<SparkExitTransaction> transactions,
+        DateTimeOffset readAt,
+        IReadOnlyList<SparkExitFailedLeaf>? failed) =>
+        JsonSerializer.Serialize(
+            new StoredTransactionSet(readAt, transactions.ToArray(), failed?.ToArray() ?? []),
+            JsonOptions);
 
     /// <summary>
     /// The leaf ids this exit was pinned to, or an empty list when the column cannot be read.
@@ -2123,6 +2202,12 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         out IReadOnlyList<SparkExitTransaction>? transactions) =>
         TryReadTransactions(record, out transactions, out _);
 
+    private bool TryReadTransactions(
+        UnilateralExitRecord? record,
+        out IReadOnlyList<SparkExitTransaction>? transactions,
+        out IReadOnlyList<SparkExitFailedLeaf>? failed) =>
+        TryReadTransactions(record, out transactions, out _, out failed);
+
     /// <param name="statusesReadUtc">
     /// When the stored statuses were last read from the chain, or null for a set written before that was
     /// recorded. See <see cref="StoredTransactionSet"/>.
@@ -2130,10 +2215,12 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private bool TryReadTransactions(
         UnilateralExitRecord? record,
         out IReadOnlyList<SparkExitTransaction>? transactions,
-        out DateTimeOffset? statusesReadUtc)
+        out DateTimeOffset? statusesReadUtc,
+        out IReadOnlyList<SparkExitFailedLeaf>? failed)
     {
         transactions = null;
         statusesReadUtc = null;
+        failed = null;
 
         if (record?.TransactionsJson is not { } json || string.IsNullOrWhiteSpace(json))
             return true;
@@ -2149,6 +2236,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 var envelope = JsonSerializer.Deserialize<StoredTransactionSet>(json, JsonOptions);
                 parsed = envelope?.Transactions;
                 statusesReadUtc = envelope?.StatusesReadUtc;
+                failed = envelope?.Failed;
             }
             else
             {

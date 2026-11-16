@@ -1097,7 +1097,7 @@ public class SparkSettlementReconcilerTests
             string destinationAddress,
             IReadOnlyList<string>? leafIds,
             IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
-            byte[] fundingSecretKey,
+            byte[]? fundingSecretKey,
             Func<SparkExitQuote, string?> approveQuote,
             CancellationToken cancellationToken = default) =>
             _inner.UnilateralExitAsync(

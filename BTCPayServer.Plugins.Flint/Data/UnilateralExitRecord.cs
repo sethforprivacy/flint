@@ -125,8 +125,25 @@ public class UnilateralExitRecord
     /// different — it hands the SDK everything this exit committed plus anything else on the address, and the
     /// SDK sums what that has become (see <see cref="FundingUtxosJson"/>). Stored per row rather than recomputed
     /// because it is what the page tells the operator to send.
+    /// <para>
+    /// <b>Zero is a real answer and means "fund nothing".</b> Since SDK 0.28 a recovery can be entirely
+    /// cooperative: the operators already moved those leaves on-chain, so their recovery pays its own fee out of
+    /// their value and the operator supplies no Bitcoin at all. The SDK reports that as an absent funding
+    /// requirement, and this column stores it as zero — no unilateral step pays no fee, so a nonzero requirement
+    /// can never round to it. See <see cref="RequiresFunding"/>.
+    /// </para>
     /// </remarks>
     public long SingleUtxoFundingSat { get; set; }
+
+    /// <summary>
+    /// Whether this exit needs the operator to fund anything at all — see
+    /// <see cref="SingleUtxoFundingSat"/>.
+    /// </summary>
+    /// <remarks>
+    /// The one place the zero-means-none rule is spelled out, so the page and the build cannot disagree about
+    /// whether to ask for sats. Not mapped: derived from the column, which is persisted.
+    /// </remarks>
+    public bool RequiresFunding => SingleUtxoFundingSat > 0;
 
     /// <summary>
     /// P2WPKH address whose UTXOs pay the CPFP fees, derived from the store's Spark seed at the plugin's own

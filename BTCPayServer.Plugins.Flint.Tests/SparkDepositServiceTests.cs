@@ -139,7 +139,9 @@ public class SparkDepositServiceTests
                 new SparkDepositSettings { ClaimFeeLeewaySatPerVbyte = 100_000 }.ToMaxFee()),
             NullLogger.Instance);
 
-        var ceiling = Assert.IsType<MaxFee.NetworkRecommended>(applied.maxDepositClaimFee);
+        // SDK 0.28 moved the three fee variants from MaxFee to MaxOnchainFee and made MaxFee a wrapper
+        // pairing them with an optional proportional share, so the variant sits one level down at .onchain.
+        var ceiling = Assert.IsType<MaxOnchainFee.NetworkRecommended>(applied.maxDepositClaimFee.onchain);
         Assert.Equal(
             (ulong)SparkDepositSettings.MaxClaimFeeLeewaySatPerVbyte, ceiling.leewaySatPerVbyte);
     }
@@ -157,7 +159,7 @@ public class SparkDepositServiceTests
         var config = BreezSdkSparkMethods.DefaultConfig(Network.Mainnet);
 
         // The default this exists to replace.
-        var shipped = Assert.IsType<MaxFee.Rate>(config.maxDepositClaimFee);
+        var shipped = Assert.IsType<MaxOnchainFee.Rate>(config.maxDepositClaimFee.onchain);
         Assert.Equal(1UL, shipped.satPerVbyte);
 
         var applied = SparkSdkClientFactory.ApplyPostMvpConfig(
@@ -167,7 +169,7 @@ public class SparkDepositServiceTests
                 new SparkDepositSettings().ToMaxFee()),
             NullLogger.Instance);
 
-        var ceiling = Assert.IsType<MaxFee.NetworkRecommended>(applied.maxDepositClaimFee);
+        var ceiling = Assert.IsType<MaxOnchainFee.NetworkRecommended>(applied.maxDepositClaimFee.onchain);
         Assert.Equal(
             (ulong)SparkDepositSettings.DefaultClaimFeeLeewaySatPerVbyte, ceiling.leewaySatPerVbyte);
     }

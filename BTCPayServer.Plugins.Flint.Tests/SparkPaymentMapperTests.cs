@@ -249,7 +249,9 @@ public class SparkPaymentMapperTests
             fees: new BigInteger(2_190),
             timestamp: 1_785_848_062,
             method: PaymentMethod.Withdraw,
-            details: new PaymentDetails.Withdraw("8808985e"),
+            // SDK 0.28 added the vout and the destination address to this variant. The mapper reads neither —
+            // the L1 txid is the whole point of the arm — so a zero index and a placeholder address stand in.
+            details: new PaymentDetails.Withdraw("8808985e", 0, null!),
             conversionDetails: null!);
 
         var mapped = SparkPaymentMapper.Map(payment, new StubBolt11Parser());

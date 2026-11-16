@@ -54,7 +54,9 @@ public class SparkErrorsTests
     [Fact]
     public void Describe_gives_the_CPFP_shortfall_as_the_sats_the_funding_address_needs()
     {
-        var described = SparkErrors.Describe(new SdkException.InsufficientCpfpFunds(1_234));
+        // SDK 0.28 added a trailing docsUrl to this variant; the plugin's description reads only the shortfall,
+        // so null is the truthful value here.
+        var described = SparkErrors.Describe(new SdkException.InsufficientCpfpFunds(1_234, docsUrl: null));
 
         Assert.Contains("at least 1,234 sat", described);
         Assert.DoesNotContain("@v1=", described);
