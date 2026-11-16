@@ -14,12 +14,28 @@ name: Package
 #
 # `local-regtest` below calls .github/workflows/local-regtest.yml, which stands up the cashu-regtest
 # `--spark` fixture, runs the LocalRegtest suite against the Breez SDK and the BtcpayE2E suite against
-# a real BTCPay Server with this plugin side-loaded, and — because it is called with its `blocking`
-# input at the default of true — fails rather than reporting advisory-green. `package` needs it, so a
-# tag cannot produce a signed release over a plugin that cannot settle a payment. That gate is only
-# affordable because the fixture's images are prebuilt and pulled
-# (.github/workflows/local-regtest-images.yml): ~10-15 minutes, against ~40+ if a pull falls back to
-# building from source.
+# a real BTCPay Server with this plugin side-loaded. `package` needs it, so a tag cannot produce a
+# signed release over a plugin that cannot settle a payment. That gate is only affordable because the
+# fixture's images are prebuilt and pulled (.github/workflows/local-regtest-images.yml): ~10-15
+# minutes, against ~40+ if a pull falls back to building from source.
+#
+# **Since 1.4.0 that gate reports rather than blocks** — the `needs` and the result check below are
+# still the mechanism, but the called job carries `continue-on-error: true` unconditionally, so its
+# result is always 'success' and this tag-scoped gate cannot stop a release. That is not a relaxation
+# of the argument above; it is the honest state of a fixture that cannot run the shipped SDK. Breez
+# Spark SDK 0.27 added four tree-node status values (`Consolidated`, `WatchtowerExited`,
+# `WatchtowerExitRecovered`, `Returned`) which it now submits in its status filters, and the fixture's
+# operators — pinned by cashu-regtest to `benthecarman/spark@83cca565`, August — reject them with
+# "invalid transfer status: unknown tree node status: 16" during the first wallet sync. The fixture
+# therefore cannot fund its wallet on 0.27+, and every suite in the called workflow fails at
+# initialisation for a reason that is not in this repository. No reachable operator build fixes it: the
+# fork's last commit is 2026-08-25 and `breez/spark`'s public mirror stops in April.
+#
+# What still gates a release: ci.yml's build, store and funded-regtest jobs (the last moves real money
+# through the plugin on Lightspark's regtest), plus the mainnet host validation the CHANGELOG records.
+# What is lost until the fixture ships current operators: automatic proof that a payment settles and
+# that BTCPay can host the plugin, at tag time. Restoring it is one line — remove the unconditional
+# `continue-on-error` in local-regtest.yml — once the fixture's operators move.
 #
 # It is deliberately scoped to tags. workflow_dispatch exists to inspect a packaged artifact quickly,
 # and making every dispatch pay a quarter-hour of Docker would defeat the reason it exists — so the
@@ -124,7 +140,8 @@ jobs:
     # workflow_dispatch) would skip `package` too, since a skipped need is not a satisfied one. The
     # explicit result check is the actual gate — 'failure' and 'cancelled' both stop the release, and
     # listing the two acceptable results rather than negating the unacceptable ones means a result GitHub
-    # adds later fails closed.
+    # adds later fails closed. It is currently never 'failure': see the note at the top of this file for
+    # why the called job is advisory until the fixture's operators catch up.
     if: always() && (needs.local-regtest.result == 'success' || needs.local-regtest.result == 'skipped')
     steps:
       - name: Check out repository

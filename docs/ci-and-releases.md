@@ -31,9 +31,20 @@
 
   | trigger | gates? | why |
   |---|---|---|
-  | `workflow_call` from `package.yml` (a `v*` tag) | **yes** — blocking | cutting a signed release over a stack that cannot settle a payment is indefensible, and a release is a moment a human is present to re-run a transient failure |
-  | a `release/*` PR | **yes** — blocking | this repository releases by merging a `release/vX.Y.Z` branch through a PR, so that PR is where a maintainer would rather learn about a broken stack than at tag time |
+  | `workflow_call` from `package.yml` (a `v*` tag) | **no, since 1.4.0** | it blocked until the fixture could no longer run the shipped SDK — see "the fixture's protocol ceiling" below. `package.yml` still `needs` it and still refuses a failed or cancelled need, so the wiring is intact and the gate returns the day the fixture's operators catch up |
+  | a `release/*` PR | **no, since 1.4.0** | same reason; it blocked until then, because releasing by merging a `release/vX.Y.Z` PR makes that PR the moment to learn about a broken stack |
   | ordinary PRs, schedule, dispatch | no — `continue-on-error` | no measured flake rate yet, and the fixture is six services with keyshare generation and channel gossip to wait on (plus a BTCPay container now); a flaky fixture blocking every merge would cost more than the gap it closes. Unlike `integration-test` the dependency is not a third-party service, so red here is likelier to be our bug — the argument for eventually promoting this case too, once the daily schedule has accumulated a pass/fail record, exactly as `funded-regtest-test` earned its gate |
+
+  **The fixture's protocol ceiling, stated plainly.** Breez Spark SDK 0.27 added four values to the
+  tree-node status enum — `Consolidated`, `WatchtowerExited`, `WatchtowerExitRecovered`, `Returned` — and
+  submits them in the status filters it sends the operators. `cashu-regtest` pins its operators to
+  `benthecarman/spark@83cca565` (2026-08-25), which predates them and answers the first wallet sync with
+  `invalid transfer status: unknown tree node status: 16`; the SDK reports that as a failed sync, the
+  fixture's wallet is never funded, and every suite in this workflow fails at initialisation. Measured on
+  one fixture with full SSP liquidity: SDK 0.26.1 passes these suites in seconds, 0.27.2 and 0.28.4 cannot
+  start. Nothing this repository pins can fix it — the fork's last commit is 2026-08-25 and `breez/spark`'s
+  public mirror stops in April — so the job keeps running and reporting, and the gate comes back by
+  deleting one `continue-on-error` when the fixture ships operators that speak the current protocol.
 
   The gating is one job-level expression,
   `continue-on-error: ${{ !(inputs.blocking || startsWith(github.head_ref, 'release/')) }}`. The

@@ -18,8 +18,14 @@ the same multi-day timelocks. The supported range is unchanged: BTCPay Server 2.
 Validated before shipping:
 - The unit suite (1,990 tests, 1,841 executed) passes, as do CI's store suite (135 tests against real
   Postgres) and its live regtest suite, all on SDK 0.28.4 and BTCPay 2.4.7.
-- The local Spark stack — real operators, a real service provider, a funded Lightning topology, blocks mined
-  on demand — settles a payment and takes a unilateral exit through to `Confirmed` on SDK 0.28.4.
+- **The local Spark stack did not run, and cannot on this SDK.** SDK 0.27 added four tree-node status values
+  (`Consolidated`, `WatchtowerExited`, `WatchtowerExitRecovered`, `Returned`) and submits them in the status
+  filters it sends the operators; the fixture's operators are pinned to an August `spark` build that answers
+  `invalid transfer status: unknown tree node status: 16`, so the fixture's wallet is never funded and the
+  suite fails in its own setup. Measured on one fixture: 0.26.1 passes these suites in seconds, 0.28.4 cannot
+  start. The `local-regtest` job is therefore advisory from this release, with the reason in the workflow
+  and in [CI, releases & upstream updates](docs/ci-and-releases.md); it goes green by itself when the
+  fixture ships current operators.
 - The packaged release candidate ran on the mainnet `btcpay-dev` host, on BTCPay 2.4.6. All three stores'
   wallets started and synced with their balances unchanged (679 / 0 / 0 sat, identical before and after), a
   Spark BOLT11 invoice was minted afterwards, and nothing was logged above warning.
@@ -67,6 +73,12 @@ re-entering the store's recovery phrase into a fresh install rather than by swap
   optional share of the amount (the plugin sets the on-chain part and leaves the share unset, which is the
   shape its own ceiling has always had), and a deposit claim that exceeds the cap no longer reports the rate
   it would have needed — only the fee in sats, which is the figure the operator acts on.
+- **This release can only talk to Spark operators that speak the 0.27 protocol.** The four tree-node status
+  values that arrived in 0.27 are sent in the SDK's status filters, and an older operator rejects them
+  outright, so a wallet on such a network fails every sync rather than degrading. Lightspark's operators —
+  what a store uses unless it has been pointed at a private network — are current, and the mainnet test host
+  synced normally; a self-hosted Spark deployment on August-era operators would need to be upgraded before
+  this plugin version can serve it.
 - **Recovery selection is `All`, deliberately.** The SDK now offers "only the leaves that already left the
   balance" and "every leaf worth recovering". An emergency exit of a live balance is the second, so an
   automatic selection asks for it by name; picking the narrower one would quietly report "nothing worth

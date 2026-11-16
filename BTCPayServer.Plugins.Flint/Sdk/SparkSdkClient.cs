@@ -1110,8 +1110,10 @@ public sealed class SparkSdkClient : ISparkSdkClient
             RecoverFundsResponse response;
             try
             {
+                // The signer is nullable in the binding, and null is its contract for "nothing to sign": a
+                // recovery with no funding step has no CPFP child for a key to pay for.
                 response = await _sdk
-                    .RecoverFunds(new RecoverFundsRequest(prepared, inputs), signer!)
+                    .RecoverFunds(new RecoverFundsRequest(prepared, inputs), signer)
                     .ConfigureAwait(false);
             }
             catch (Exception ex) when (SparkErrors.TranslateUnilateralExit(ex) is { } typed)
