@@ -493,9 +493,11 @@ public class StablecoinPaymentServiceTests
         // Tron), and a payer cannot change the price. They go to the log; the payer is told the bound and the fix.
         var setup = Create();
         Invoice(setup);
+        // SDK 0.28 added a trailing docsUrl to the cross-chain refusals; the plugin's message reads the bound,
+        // not the link.
         setup.Sdk.FailCrossChainReceiveWith = new SdkException.CrossChainAmountOutOfRange(
             "Amount is below the minimum for this route. Increase the input amount.", tooSmall,
-            boundAmount is null ? null : BigInteger.Parse(boundAmount), boundUsdCents);
+            boundAmount is null ? null : BigInteger.Parse(boundAmount), boundUsdCents, docsUrl: null);
 
         var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
 
@@ -512,7 +514,8 @@ public class StablecoinPaymentServiceTests
     {
         var setup = Create();
         Invoice(setup);
-        setup.Sdk.FailCrossChainReceiveWith = new SdkException.CrossChainRouteUnavailable("This route is not supported", temporary);
+        setup.Sdk.FailCrossChainReceiveWith =
+            new SdkException.CrossChainRouteUnavailable("This route is not supported", temporary, docsUrl: null);
 
         var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
 

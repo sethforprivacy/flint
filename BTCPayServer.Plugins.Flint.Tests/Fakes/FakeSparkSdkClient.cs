@@ -1422,7 +1422,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
         IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
-        byte[] fundingSecretKey,
+        byte[]? fundingSecretKey,
         Func<SparkExitQuote, string?> approveQuote,
         CancellationToken cancellationToken = default)
     {
@@ -1436,7 +1436,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
         IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
-        byte[] fundingSecretKey,
+        byte[]? fundingSecretKey,
         Func<SparkExitQuote, string?> approveQuote)
     {
         ThrowIfConfigured();
@@ -1470,8 +1470,10 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         // The funding check the real SDK makes, reproduced rather than stipulated: the shortfall is discovered at
         // build time and names the amount that would have worked — and it is judged on what the funding has
         // become, not on what was handed in, exactly as the SDK's resolve_funding does.
+        // Only when this quote needs funding: an all-cooperative recovery is built with no funding inputs and no
+        // signer, and judging it against the fan-out-sized requirement would fail a build the SDK would accept.
         var funded = FollowedFundingSat(fundingUtxos);
-        if (funded < ExitSingleUtxoFundingSat)
+        if (quote.RequiresFunding && funded < ExitSingleUtxoFundingSat)
             throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
 
         // Signed and inert. Nothing in this fake, and nothing in the real SDK, broadcasts any of it.
@@ -1486,7 +1488,13 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         // the case the caller refuses on.
         if (ExitBuildsNoTransactions)
             return Task.FromResult(new SparkExitResult(
-                quote.RecoverableValueSat, quote.TotalFeeSat, [], quote.Leaves));
+                quote.RecoverableValueSat,
+                quote.TotalFeeSat,
+                feeRateSatPerVbyte,
+                destinationAddress,
+                [],
+                quote.Leaves,
+                ExitRefusedLeaves.ToList()));
 
         var sweepDependsOn = quote.Leaves.Select(leaf => ExitTxid($"node:{leaf.LeafId}")).ToList();
         var transactions = new List<SparkExitTransaction>
@@ -1510,9 +1518,41 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             SparkExitTxKind.Sweep, null, ExitTxid("sweep"), ExitHex("sweep"), null, null, sweepDependsOn,
             ExitStatus()));
 
+        // One cooperative recovery per cooperative leaf, and it is not an exit step: the operators co-sign it
+        // against an output they already put on-chain, it pays its own fee, and it has no child, no timelock and
+        // no dependency. Added after the unilateral chain so the set keeps the SDK's shape — the cooperative
+        // ones are independent of it and can go out whenever the build returns.
+        transactions.AddRange(quote.Leaves.Where(leaf => leaf.IsCooperative).Select(leaf =>
+            new SparkExitTransaction(
+                SparkExitTxKind.Cooperative,
+                // The leaf id, as the SDK reports it for a cooperative recovery and a refund.
+                leaf.LeafId,
+                ExitTxid($"coop:{leaf.LeafId}"),
+                ExitHex($"coop:{leaf.LeafId}"),
+                null,
+                null,
+                [],
+                new SparkExitTxStatus(SparkExitTxReadiness.Ready))));
+
         return Task.FromResult(new SparkExitResult(
-            quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
+            quote.RecoverableValueSat,
+            quote.TotalFeeSat,
+            feeRateSatPerVbyte,
+            destinationAddress,
+            transactions,
+            quote.Leaves,
+            ExitRefusedLeaves.ToList()));
     }
+
+    /// <summary>
+    /// Leaves the operators refuse to co-sign, reported in the build's <c>failed</c> list.
+    /// </summary>
+    /// <remarks>
+    /// Empty by default: a refusal is the exception, not the shape. A build with one here still succeeds and
+    /// still returns everything else, which is the property a caller has to survive — the failed leaf needs an
+    /// attempt of its own and must not read as a failed exit.
+    /// </remarks>
+    public List<SparkExitFailedLeaf> ExitRefusedLeaves { get; } = [];
 
     /// <summary>
     /// The txid this fake gives the exit transaction it labels <paramref name="label"/>: 64 hex digits, stable.
@@ -1674,19 +1714,40 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             .Where(leaf => !ExitFinishedLeafIds.Contains(leaf.LeafId))
             .ToList();
 
+        // A recovery of nothing but cooperative leaves needs no funding at all, which is the SDK's absent
+        // funding requirement rather than a zero-sized one — see SparkExitQuote.RequiresFunding. The fake has to
+        // model it because the service has a separate path for it: no explorer, no selection, no signer.
+        var requiresFunding = selected.Any(leaf => !leaf.IsCooperative);
+
         return new SparkExitQuote(
             selected.Sum(leaf => leaf.ValueSat),
             selected.Count == 0 ? 0 : ExitTotalFeeSat,
-            selected.Count == 0 ? 0 : ExitSingleUtxoFundingSat,
+            requiresFunding ? ExitSingleUtxoFundingSat : 0,
             selected,
-            selected.Count == 0 ? 0 : ExitFanoutFeeSat,
-            selected
-                .Select(leaf => new SparkExitBranchFunding(leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
-                .ToList(),
+            requiresFunding ? ExitFanoutFeeSat : 0,
+            requiresFunding
+                ? selected
+                    .Where(leaf => !leaf.IsCooperative)
+                    .Select(leaf => new SparkExitBranchFunding(
+                        leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
+                    .ToList()
+                : [],
             feeRateSatPerVbyte,
             destinationAddress,
-            ExitFinishedLeafIds.ToList());
+            ExitFinishedLeafIds.ToList(),
+            RequiresFunding: requiresFunding,
+            Skipped: ExitSkippedLeaves.ToList());
     }
+
+    /// <summary>
+    /// Leaves the quote looks at and leaves out, as the SDK's <c>skipped</c> list does.
+    /// </summary>
+    /// <remarks>
+    /// Empty by default, because an ordinary quote skips nothing: every leaf in <see cref="ExitLeaves"/> either
+    /// clears the fee rate or would not be there. A test that wants the "why is this list shorter than my
+    /// balance" case adds one.
+    /// </remarks>
+    public List<SparkExitSkippedLeaf> ExitSkippedLeaves { get; } = [];
 
     /// <summary>
     /// Leaves the chain shows as finished — refund swept, or branch stopped — which every quote leaves out and

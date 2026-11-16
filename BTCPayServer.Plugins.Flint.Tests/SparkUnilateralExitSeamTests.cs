@@ -22,11 +22,19 @@ public class SparkUnilateralExitSeamTests
 {
     private const string Destination = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
+    /// <remarks>
+    /// <b>Automatic means every leaf, not only the ones that already left the balance.</b> SDK 0.28 replaced
+    /// <c>Auto</c> with two cases, and the difference between them is the whole feature: <c>RecoverableOnly</c>
+    /// covers funds the operators have already moved on-chain, while <c>All</c> covers those <em>and</em> the
+    /// balance still in Spark — which is what a merchant exiting an uncooperative operator needs. Selecting
+    /// <c>RecoverableOnly</c> here would report "nothing worth recovering" for exactly the funds the page exists
+    /// to rescue, so this is asserted rather than left to the type name.
+    /// </remarks>
     [Fact]
-    public void No_leaf_ids_selects_automatically()
+    public void No_leaf_ids_selects_every_leaf_rather_than_only_what_already_left_the_balance()
     {
-        Assert.IsType<ExitLeafSelection.Auto>(SparkSdkClient.ToSdkLeafSelection(null));
-        Assert.IsType<ExitLeafSelection.Auto>(SparkSdkClient.ToSdkLeafSelection([]));
+        Assert.IsType<ExitLeafSelection.All>(SparkSdkClient.ToSdkLeafSelection(null));
+        Assert.IsType<ExitLeafSelection.All>(SparkSdkClient.ToSdkLeafSelection([]));
     }
 
     [Fact]
@@ -48,13 +56,51 @@ public class SparkUnilateralExitSeamTests
         Assert.Throws<ArgumentException>(() => SparkSdkClient.ToSdkLeafSelection(["leaf-a", "  "]));
     }
 
+    /// <remarks>
+    /// Including the cooperative case, which is the one an SDK bump added rather than renamed: a set that can
+    /// hold a cooperative recovery is a set the page has to give different broadcast instructions for, and the
+    /// mapping is by name precisely so an added variant arrives as a failure here rather than as a cast.
+    /// </remarks>
     [Fact]
     public void Transaction_kinds_are_mapped_by_name()
     {
-        Assert.Equal(SparkExitTxKind.Fanout, SparkSdkClient.MapExitTxKind(UnilateralExitTxKind.FanOut));
-        Assert.Equal(SparkExitTxKind.TreeNode, SparkSdkClient.MapExitTxKind(UnilateralExitTxKind.Node));
-        Assert.Equal(SparkExitTxKind.Refund, SparkSdkClient.MapExitTxKind(UnilateralExitTxKind.Refund));
-        Assert.Equal(SparkExitTxKind.Sweep, SparkSdkClient.MapExitTxKind(UnilateralExitTxKind.Sweep));
+        Assert.Equal(SparkExitTxKind.Cooperative, SparkSdkClient.MapExitTxKind(RecoveryTxKind.Cooperative));
+        Assert.Equal(SparkExitTxKind.Fanout, SparkSdkClient.MapExitTxKind(RecoveryTxKind.FanOut));
+        Assert.Equal(SparkExitTxKind.TreeNode, SparkSdkClient.MapExitTxKind(RecoveryTxKind.Node));
+        Assert.Equal(SparkExitTxKind.Refund, SparkSdkClient.MapExitTxKind(RecoveryTxKind.Refund));
+        Assert.Equal(SparkExitTxKind.Sweep, SparkSdkClient.MapExitTxKind(RecoveryTxKind.Sweep));
+    }
+
+    /// <summary>
+    /// A cooperative recovery goes out alone, immediately, and needs no package.
+    /// </summary>
+    /// <remarks>
+    /// It is the one kind that is not an exit step: the operators co-sign it against an output they already put
+    /// on-chain, it pays its own fee out of the funds it recovers, and it has no child, no timelock and no
+    /// dependency. Asserted because the page reads <see cref="SparkExitTransaction.RequiresPackageBroadcast"/>
+    /// off the child rather than off the kind — so this proves the no-child shape really does read as "broadcast
+    /// alone" for the new kind, and not as a tree node whose child went missing.
+    /// </remarks>
+    [Fact]
+    public void A_cooperative_recovery_is_standalone_and_ready_when_it_is_returned()
+    {
+        var mapped = SparkSdkClient.MapExitTransaction(new RecoveryTransaction(
+            RecoveryTxKind.Cooperative,
+            nodeId: "leaf-a",
+            txid: "cc",
+            txHex: "0200cc",
+            cpfpTxHex: null,
+            csvTimelockBlocks: null,
+            dependsOn: [],
+            status: new ExitTransactionStatus.Ready()));
+
+        Assert.Equal(SparkExitTxKind.Cooperative, mapped.Kind);
+        Assert.Equal("leaf-a", mapped.NodeId);
+        Assert.Null(mapped.CpfpTxHex);
+        Assert.Null(mapped.CsvTimelockBlocks);
+        Assert.Empty(mapped.DependsOn);
+        Assert.False(mapped.RequiresPackageBroadcast);
+        Assert.True(mapped.Status.CanBroadcast);
     }
 
     /// <summary>
@@ -137,15 +183,28 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void A_quote_carries_every_figure_the_binding_reports()
     {
-        var quote = SparkSdkClient.MapExitQuote(new PrepareUnilateralExitResponse(
-            leaves: [new UnilateralExitLeaf("leaf-a", 40_000), new UnilateralExitLeaf("leaf-b", 10_000)],
-            recoverableValueSat: 50_000,
-            totalFeeSat: 3_000,
-            cpfpFeeSat: 0,
-            fanoutFeeSat: 500,
-            sweepFeeSat: 0,
-            singleUtxoFundingSat: 4_200,
-            perBranchFunding: [new PerBranchFunding("leaf-a", 3_000), new PerBranchFunding("leaf-b", 1_200)],
+        var quote = SparkSdkClient.MapExitQuote(new PrepareRecoverFundsResponse(
+            leaves:
+            [
+                new RecoverFundsLeaf("leaf-a", 40_000, RecoveryMethod.Unilateral),
+                new RecoverFundsLeaf("leaf-b", 10_000, RecoveryMethod.Cooperative)
+            ],
+            skipped: [],
+            recoverableValueSats: 50_000,
+            totalFeeSats: 3_000,
+            cooperativeFeeSats: 0,
+            cpfpFeeSats: 0,
+            fanoutFeeSats: 500,
+            refundFeeSats: 0,
+            sweepFeeSats: 0,
+            funding: new RecoveryFunding(
+                singleUtxoSats: 4_200,
+                perBranch:
+                [
+                    new PerBranchFunding("leaf-a", 3_000),
+                    new PerBranchFunding("leaf-b", 1_200)
+                ],
+                strategy: CpfpFundingStrategy.PerBranch),
             feeRateSatPerVbyte: 7,
             destination: Destination,
             exitChainState: new ExitChainState([], [], [], [], [])));
@@ -154,13 +213,134 @@ public class SparkUnilateralExitSeamTests
         Assert.Equal(3_000, quote.TotalFeeSat);
         Assert.Equal(500, quote.FanoutFeeSat);
         Assert.Equal(4_200, quote.SingleUtxoFundingSat);
+        Assert.True(quote.RequiresFunding);
         Assert.Equal(7UL, quote.FeeRateSatPerVbyte);
         Assert.Equal(Destination, quote.Destination);
         Assert.Equal(["leaf-a", "leaf-b"], quote.Leaves.Select(leaf => leaf.LeafId));
         Assert.Equal(40_000, quote.Leaves[0].ValueSat);
+        // The per-leaf method reaches the page, because it is what explains why the quote wants funding at all.
+        Assert.Equal(SparkExitRecoveryMethod.Unilateral, quote.Leaves[0].Method);
+        Assert.False(quote.Leaves[0].IsCooperative);
+        Assert.True(quote.Leaves[1].IsCooperative);
         Assert.Equal(["leaf-a", "leaf-b"], quote.PerBranchFunding.Select(branch => branch.LeafId));
         Assert.Equal(1_200, quote.PerBranchFunding[1].FundingSat);
         Assert.False(quote.IsEmpty);
+    }
+
+    /// <summary>
+    /// A quote whose leaves are all cooperative needs no Bitcoin from the operator, and says so.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK reports this by <em>omitting</em> the funding requirement, so the plugin's job is to translate an
+    /// absence into a positive statement rather than into a zero an operator is asked to fund. The failure this
+    /// prevents is concrete: a page that rendered "send 0 sat" and waited would leave a merchant with a
+    /// recoverable balance and no button that would build it.
+    /// </para>
+    /// <para>
+    /// The single-UTXO figure is asserted at zero as well, because that is the number the funding address is
+    /// sized for and the one a rebuild's veto compares against; a null read as one sat, or a missing field read
+    /// as the last quote's figure, would both be wrong in the same direction.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_recovery_with_nothing_to_fund_says_so_rather_than_asking_for_zero_sat()
+    {
+        var quote = SparkSdkClient.MapExitQuote(Response(Destination, 7, requiresFunding: false));
+
+        Assert.False(quote.RequiresFunding);
+        Assert.Equal(0, quote.SingleUtxoFundingSat);
+        Assert.Empty(quote.PerBranchFunding);
+        Assert.All(quote.Leaves, leaf => Assert.True(leaf.IsCooperative));
+
+        // And the other half of the translation: a quote that does need funding still says it does.
+        Assert.True(SparkSdkClient.MapExitQuote(Response(Destination, 7)).RequiresFunding);
+    }
+
+    /// <summary>
+    /// The leaves a selection covered and left out arrive with a reason a merchant can act on.
+    /// </summary>
+    /// <remarks>
+    /// Before SDK 0.28 a skipped leaf was simply absent, and "nothing worth exiting right now" had to cover
+    /// every case. Several of the new reasons are actionable — cheaper fees would include the leaf, or the
+    /// operators were unreachable — and conflating them would tell an operator to wait for the fee market when
+    /// the real answer was to try again in a minute.
+    /// </remarks>
+    [Fact]
+    public void A_skipped_leaf_carries_the_reason_that_decides_what_happens_next()
+    {
+        var quote = SparkSdkClient.MapExitQuote(Response(
+            Destination,
+            7,
+            skipped:
+            [
+                new SkippedLeaf("leaf-small", 900, new SkippedLeafReason.FeeExceedsValue()),
+                new SkippedLeaf("leaf-swept-out", 0, new SkippedLeafReason.NotRecoverable("no exit data"))
+            ]));
+
+        Assert.Equal(["leaf-small", "leaf-swept-out"], quote.Skipped!.Select(leaf => leaf.LeafId));
+        Assert.Equal(900, quote.Skipped[0].ValueSat);
+        Assert.Contains("cost more than it is worth", quote.Skipped[0].Reason);
+        // The SDK's own message is carried, because it is the part that says what is wrong with the leaf.
+        Assert.Contains("no exit data", quote.Skipped[1].Reason);
+    }
+
+    /// <remarks>
+    /// <para>
+    /// Unlike every other mapping on this seam, an unrecognised <em>reason</em> does not refuse the quote. The
+    /// information is a label on a leaf that is not being recovered, so failing here would take a recoverable
+    /// balance away from an operator over a description — the exact failure this feature exists to prevent.
+    /// </para>
+    /// <para>
+    /// The unrecognised case is exercised with a local subclass rather than left to inspection, because the
+    /// fallback only ever runs when the SDK adds a variant: a binding update would otherwise turn this into the
+    /// quote-refusing failure the fallback exists to avoid, and nothing would have caught it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void An_unrecognised_skipping_reason_is_described_rather_than_refused()
+    {
+        Assert.Equal("Spark did not say why", SparkSdkClient.DescribeSkippedReason(null));
+
+        var unknown = SparkSdkClient.DescribeSkippedReason(new UnknownSkippedReason());
+        Assert.Contains("does not recognise", unknown);
+        Assert.Contains(nameof(UnknownSkippedReason), unknown);
+
+        // A known reason says what it means, and is not described as unknown.
+        var known = SparkSdkClient.DescribeSkippedReason(new SkippedLeafReason.FeeExceedsValue());
+        Assert.Contains("cost more than it is worth", known);
+        Assert.DoesNotContain("does not recognise", known);
+    }
+
+    /// <summary>
+    /// A skipping reason from an SDK newer than this plugin, which is the only way the fallback is reached.
+    /// </summary>
+    private sealed record UnknownSkippedReason : SkippedLeafReason;
+
+    /// <summary>
+    /// A cooperative leaf the operators refused is reported as a leaf needing its own attempt, not as a failed
+    /// build.
+    /// </summary>
+    /// <remarks>
+    /// The build is not atomic across leaves: the SDK co-signs them one at a time, and one refusal leaves the
+    /// rest built. Silently dropping the refused leaf would present a partial recovery as a complete one, which
+    /// is why the reason — including the fee rate a replacement would need — reaches the operator.
+    /// </remarks>
+    [Fact]
+    public void A_refused_cooperative_leaf_reports_the_reason_and_the_rate_a_retry_needs()
+    {
+        Assert.Contains(
+            "could not co-sign",
+            SparkSdkClient.DescribeCooperativeFailure(
+                new CooperativeRecoveryError.OperatorsUnavailable("busy")));
+        Assert.Contains("busy", SparkSdkClient.DescribeCooperativeFailure(
+            new CooperativeRecoveryError.OperatorsUnavailable("busy")));
+
+        var tooLow = SparkSdkClient.DescribeCooperativeFailure(
+            new CooperativeRecoveryError.ReplacementFeeTooLow(
+                requiredFeeSats: 1_250, requiredFeeRateSatPerVbyte: 12));
+        Assert.Contains("12 sat/vB", tooLow);
+        Assert.Contains("1,250", tooLow);
     }
 
     /// <remarks>
@@ -172,15 +352,18 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void A_quote_reports_which_leaves_the_chain_shows_as_finished()
     {
-        var quote = SparkSdkClient.MapExitQuote(new PrepareUnilateralExitResponse(
-            leaves: [new UnilateralExitLeaf("leaf-live", 40_000)],
-            recoverableValueSat: 40_000,
-            totalFeeSat: 3_000,
-            cpfpFeeSat: 0,
-            fanoutFeeSat: 0,
-            sweepFeeSat: 0,
-            singleUtxoFundingSat: 4_200,
-            perBranchFunding: [],
+        var quote = SparkSdkClient.MapExitQuote(new PrepareRecoverFundsResponse(
+            leaves: [new RecoverFundsLeaf("leaf-live", 40_000, RecoveryMethod.Unilateral)],
+            skipped: [],
+            recoverableValueSats: 40_000,
+            totalFeeSats: 3_000,
+            cooperativeFeeSats: 0,
+            cpfpFeeSats: 0,
+            fanoutFeeSats: 0,
+            refundFeeSats: 0,
+            sweepFeeSats: 0,
+            funding: new RecoveryFunding(
+                singleUtxoSats: 4_200, perBranch: [], strategy: CpfpFundingStrategy.PerBranch),
             feeRateSatPerVbyte: 7,
             destination: Destination,
             exitChainState: new ExitChainState(
@@ -216,18 +399,7 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void An_empty_selection_is_a_quote_rather_than_a_fault()
     {
-        var quote = SparkSdkClient.MapExitQuote(new PrepareUnilateralExitResponse(
-            leaves: [],
-            recoverableValueSat: 0,
-            totalFeeSat: 0,
-            cpfpFeeSat: 0,
-            fanoutFeeSat: 0,
-            sweepFeeSat: 0,
-            singleUtxoFundingSat: 0,
-            perBranchFunding: [],
-            feeRateSatPerVbyte: 1,
-            destination: Destination,
-            exitChainState: new ExitChainState([], [], [], [], [])));
+        var quote = SparkSdkClient.MapExitQuote(Response(Destination, 1));
 
         Assert.True(quote.IsEmpty);
         Assert.Empty(quote.Leaves);
@@ -241,15 +413,18 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void Amounts_beyond_long_range_are_clamped_rather_than_wrapped()
     {
-        var quote = SparkSdkClient.MapExitQuote(new PrepareUnilateralExitResponse(
-            leaves: [new UnilateralExitLeaf("leaf-a", ulong.MaxValue)],
-            recoverableValueSat: ulong.MaxValue,
-            totalFeeSat: ulong.MaxValue,
-            cpfpFeeSat: 0,
-            fanoutFeeSat: ulong.MaxValue,
-            sweepFeeSat: 0,
-            singleUtxoFundingSat: ulong.MaxValue,
-            perBranchFunding: [],
+        var quote = SparkSdkClient.MapExitQuote(new PrepareRecoverFundsResponse(
+            leaves: [new RecoverFundsLeaf("leaf-a", ulong.MaxValue, RecoveryMethod.Unilateral)],
+            skipped: [],
+            recoverableValueSats: ulong.MaxValue,
+            totalFeeSats: ulong.MaxValue,
+            cooperativeFeeSats: 0,
+            cpfpFeeSats: 0,
+            fanoutFeeSats: ulong.MaxValue,
+            refundFeeSats: 0,
+            sweepFeeSats: 0,
+            funding: new RecoveryFunding(
+                singleUtxoSats: ulong.MaxValue, perBranch: [], strategy: CpfpFundingStrategy.PerBranch),
             feeRateSatPerVbyte: 1,
             destination: Destination,
             exitChainState: new ExitChainState([], [], [], [], [])));
@@ -262,8 +437,8 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void A_tree_node_keeps_its_child_its_timelock_and_its_dependencies()
     {
-        var mapped = SparkSdkClient.MapExitTransaction(new UnilateralExitTransaction(
-            UnilateralExitTxKind.Node,
+        var mapped = SparkSdkClient.MapExitTransaction(new RecoveryTransaction(
+            RecoveryTxKind.Node,
             nodeId: "node-1",
             txid: "aa",
             txHex: "0200aa",
@@ -289,8 +464,8 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void A_standalone_transaction_needs_no_package()
     {
-        var mapped = SparkSdkClient.MapExitTransaction(new UnilateralExitTransaction(
-            UnilateralExitTxKind.Sweep,
+        var mapped = SparkSdkClient.MapExitTransaction(new RecoveryTransaction(
+            RecoveryTxKind.Sweep,
             nodeId: null,
             txid: "bb",
             txHex: "0200bb",
@@ -316,7 +491,7 @@ public class SparkUnilateralExitSeamTests
 
         Assert.Equal("cc", input.txid);
         Assert.Equal(3u, input.vout);
-        Assert.Equal(5_000UL, input.value);
+        Assert.Equal(5_000UL, input.valueSats);
         Assert.Equal("02aabb", input.pubkey);
     }
 
@@ -364,7 +539,7 @@ public class SparkUnilateralExitSeamTests
     public void A_CPFP_shortfall_becomes_a_typed_error_carrying_the_amount_that_would_work()
     {
         var translated = Assert.IsType<SparkExitFundingShortfallException>(
-            SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientCpfpFunds(9_500)));
+            SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientCpfpFunds(9_500, docsUrl: null)));
 
         Assert.Equal(9_500, translated.RequiredSat);
         Assert.Contains("9,500", translated.Message);
@@ -448,22 +623,33 @@ public class SparkUnilateralExitSeamTests
         var exit = new SparkExitResult(
             350_000,
             4_100,
+            7,
+            Destination,
             [fanout, node, refund, sweep],
-            [new SparkExitLeaf("leaf-a", 300_000), new SparkExitLeaf("leaf-b", 50_000)]);
+            [
+                new SparkExitLeaf("leaf-a", 300_000, SparkExitRecoveryMethod.Unilateral),
+                new SparkExitLeaf("leaf-b", 50_000, SparkExitRecoveryMethod.Cooperative)
+            ]);
 
         var rebuilt = SparkSdkClient.ToSdkExit(exit);
 
         // The totals and the leaves the check echoes back for a caller to store over what it had.
-        Assert.Equal(350_000UL, rebuilt.recoverableValueSat);
-        Assert.Equal(4_100UL, rebuilt.totalFeeSat);
+        Assert.Equal(350_000UL, rebuilt.recoverableValueSats);
+        Assert.Equal(4_100UL, rebuilt.totalFeeSats);
+        // The rate and the destination travel with the set: the check takes a whole response, and a zero here
+        // would be a different document from the one the build returned.
+        Assert.Equal(7UL, rebuilt.feeRateSatPerVbyte);
+        Assert.Equal(Destination, rebuilt.destination);
         Assert.Equal(["leaf-a", "leaf-b"], rebuilt.leaves.Select(leaf => leaf.leafId));
-        Assert.Equal(300_000UL, rebuilt.leaves[0].value);
+        Assert.Equal(300_000UL, rebuilt.leaves[0].valueSats);
+        Assert.Equal(RecoveryMethod.Unilateral, rebuilt.leaves[0].method);
+        Assert.Equal(RecoveryMethod.Cooperative, rebuilt.leaves[1].method);
 
         // Order preserved: the SDK's topological order is the operator's broadcast schedule and nothing
         // downstream re-derives it.
         Assert.Equal(4, rebuilt.transactions.Length);
 
-        Assert.Equal(UnilateralExitTxKind.FanOut, rebuilt.transactions[0].kind);
+        Assert.Equal(RecoveryTxKind.FanOut, rebuilt.transactions[0].kind);
         Assert.Equal("txid:fanout", rebuilt.transactions[0].txid);
         Assert.Equal("0200fanout", rebuilt.transactions[0].txHex);
         Assert.Empty(rebuilt.transactions[0].dependsOn);
@@ -471,7 +657,7 @@ public class SparkUnilateralExitSeamTests
         // The node: the CPFP child, the timelock and the dependency edge all have to survive, because these are
         // the three fields that decide how and when it may be broadcast.
         var rebuiltNode = rebuilt.transactions[1];
-        Assert.Equal(UnilateralExitTxKind.Node, rebuiltNode.kind);
+        Assert.Equal(RecoveryTxKind.Node, rebuiltNode.kind);
         Assert.Equal("node:leaf-a", rebuiltNode.nodeId);
         Assert.Equal("0200nodeleaf-a", rebuiltNode.txHex);
         Assert.Equal("0200cpfpleaf-a", rebuiltNode.cpfpTxHex);
@@ -479,10 +665,10 @@ public class SparkUnilateralExitSeamTests
         Assert.Equal(["txid:fanout"], rebuiltNode.dependsOn);
 
         // A refund and a node with more than one parent, so the rebuild is not merely preserving a single edge.
-        Assert.Equal(UnilateralExitTxKind.Refund, rebuilt.transactions[2].kind);
+        Assert.Equal(RecoveryTxKind.Refund, rebuilt.transactions[2].kind);
         Assert.Equal(["txid:fanout", "txid:node:leaf-b"], rebuilt.transactions[2].dependsOn);
 
-        Assert.Equal(UnilateralExitTxKind.Sweep, rebuilt.transactions[3].kind);
+        Assert.Equal(RecoveryTxKind.Sweep, rebuilt.transactions[3].kind);
         Assert.Null(rebuilt.transactions[3].cpfpTxHex);
         Assert.Equal(["txid:node:leaf-a", "txid:refund:leaf-b"], rebuilt.transactions[3].dependsOn);
 
@@ -505,23 +691,44 @@ public class SparkUnilateralExitSeamTests
     [Fact]
     public void A_rebuilt_exit_carries_no_funding_inputs()
     {
-        var rebuilt = SparkSdkClient.ToSdkExit(new SparkExitResult(0, 0, [], []));
+        var rebuilt = SparkSdkClient.ToSdkExit(new SparkExitResult(0, 0, 0, Destination, [], []));
 
         Assert.Empty(rebuilt.transactions);
         Assert.Empty(rebuilt.leaves);
         Assert.Empty(rebuilt.fundingInputs);
     }
 
-    private static PrepareUnilateralExitResponse Response(string destination, ulong feeRate) =>
+    /// <summary>
+    /// A quote shaped like the binding's, with everything a caller does not care about left at its empty value.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="requiresFunding"/> defaults to true because that is the ordinary shape — a unilateral
+    /// leaf pays no fee of its own, so it always needs a UTXO of the operator's. The false case is the SDK's
+    /// absent funding requirement, spelled as a flag so a caller says what it means rather than passing a null
+    /// that a helper could plausibly have treated as "use the default".
+    /// </remarks>
+    private static PrepareRecoverFundsResponse Response(
+        string destination,
+        ulong feeRate,
+        bool requiresFunding = true,
+        SkippedLeaf[]? skipped = null,
+        RecoverFundsLeaf[]? leaves = null) =>
         new(
-            leaves: [],
-            recoverableValueSat: 0,
-            totalFeeSat: 0,
-            cpfpFeeSat: 0,
-            fanoutFeeSat: 0,
-            sweepFeeSat: 0,
-            singleUtxoFundingSat: 0,
-            perBranchFunding: [],
+            leaves: leaves ?? (requiresFunding
+                ? []
+                : [new RecoverFundsLeaf("leaf-a", 40_000, RecoveryMethod.Cooperative)]),
+            skipped: skipped ?? [],
+            recoverableValueSats: 0,
+            totalFeeSats: 0,
+            cooperativeFeeSats: 0,
+            cpfpFeeSats: 0,
+            fanoutFeeSats: 0,
+            refundFeeSats: 0,
+            sweepFeeSats: 0,
+            funding: requiresFunding
+                ? new RecoveryFunding(
+                    singleUtxoSats: 0, perBranch: [], strategy: CpfpFundingStrategy.PerBranch)
+                : null,
             feeRateSatPerVbyte: feeRate,
             destination: destination,
             exitChainState: new ExitChainState([], [], [], [], []));

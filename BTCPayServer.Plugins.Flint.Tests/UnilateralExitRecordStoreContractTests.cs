@@ -71,7 +71,12 @@ public abstract class UnilateralExitRecordStoreContractTests
     [Fact]
     public async Task A_record_round_trips_with_every_field()
     {
-        var properties = EveryProperty.Of<UnilateralExitRecord>(nameof(UnilateralExitRecord.IsActive));
+        // RequiresFunding is derived from SingleUtxoFundingSat rather than mapped: since SDK 0.28 a recovery can
+        // be entirely cooperative, so zero funding sats is a real answer and the flag must never disagree with
+        // the stored column.
+        var properties = EveryProperty.Of<UnilateralExitRecord>(
+            nameof(UnilateralExitRecord.IsActive),
+            nameof(UnilateralExitRecord.RequiresFunding));
         var record = EveryProperty.Filled<UnilateralExitRecord>(properties);
         // Still a distinct, non-default value — just this test's own, as the class remarks ask.
         record.StoreId = _storeId;

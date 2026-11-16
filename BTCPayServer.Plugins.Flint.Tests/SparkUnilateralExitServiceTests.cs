@@ -642,6 +642,88 @@ public class SparkUnilateralExitServiceTests
     }
 
     /// <summary>
+    /// A recovery of nothing but already-on-chain leaves builds with no funding, no signing key and no explorer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is SDK 0.28's cooperative half: a leaf the operators took on-chain is paid out by one transaction they
+    /// co-sign, and that transaction pays its own fee out of the value it recovers. So there is nothing to fund —
+    /// and, the part that would break quietly, nothing to look up: the build must not consult the esplora API for
+    /// a funding address nothing will spend, because then a store with no explorer configured could not recover
+    /// funds that need no explorer.
+    /// </para>
+    /// <para>
+    /// The signing key is asserted at zero length rather than merely "not used": the client materialises the
+    /// key only when the quote asks for funding, and handing the SDK a signer alongside no funding inputs is
+    /// exactly the combination its contract rejects.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_recovery_of_only_cooperative_leaves_builds_without_funding_or_an_explorer()
+    {
+        var harness = Harness.Create();
+        harness.Configure(acknowledged: true, esploraApiUrl: null);
+        harness.WithCooperativeLeaves(("leaf-onchain", 40_000));
+        var record = harness.Seed(leafIds: ["leaf-onchain"], singleUtxoFundingSat: 0);
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(result.Success, result.Error);
+
+        var call = Assert.Single(harness.Sdk.ExitBuildCalls);
+        Assert.Empty(call.FundingUtxos);
+        Assert.Equal(0, call.FundingSecretKeyLength);
+        Assert.Null(call.Rejection);
+
+        // Nothing was asked of the chain: the whole build came out of the SDK's local state.
+        Assert.Equal(0, harness.ExplorerRequests);
+
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, stored.Status);
+        Assert.False(stored.RequiresFunding);
+
+        var transactions = StoredSet(stored.TransactionsJson);
+        var cooperative = Assert.Single(transactions, tx => tx.Kind is SparkExitTxKind.Cooperative);
+        // It pays its own fee, so it carries no child to package with and waits for nothing.
+        Assert.False(cooperative.RequiresPackageBroadcast);
+        Assert.Null(cooperative.CsvTimelockBlocks);
+        Assert.Empty(cooperative.DependsOn);
+    }
+
+    /// <summary>
+    /// A cooperative leaf the operators refused is kept beside the set it could not recover, with the reason.
+    /// </summary>
+    /// <remarks>
+    /// The build is not atomic across leaves, so a refusal leaves everything else signed and stored while one
+    /// leaf still needs an attempt of its own. Dropping that fact would turn a partial recovery into a
+    /// complete-looking one — and it has to survive a page reload, because the operator who reads it may come
+    /// back days later, long after the press that produced it.
+    /// </remarks>
+    [Fact]
+    public async Task A_refused_cooperative_leaf_is_persisted_with_its_reason()
+    {
+        var harness = Harness.Create();
+        harness.Configure(acknowledged: true, esploraApiUrl: null);
+        harness.WithCooperativeLeaves(("leaf-a", 40_000), ("leaf-b", 25_000));
+        harness.Sdk.ExitRefusedLeaves.Add(new SparkExitFailedLeaf(
+            "leaf-b", "the operators could not co-sign it"));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 0);
+
+        var built = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+        Assert.True(built.Success, built.Error);
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        var refused = Assert.Single(page.FailedLeaves!);
+        Assert.Equal("leaf-b", refused.LeafId);
+        Assert.Contains("co-sign", refused.Reason);
+
+        // The rest of the recovery is still a recovery: the transactions the operator has to broadcast are on
+        // the row, and the refused leaf did not take them with it.
+        Assert.NotEmpty(page.Transactions!);
+    }
+
+    /// <summary>
     /// The build re-quotes the leaves the record was pinned to, not whatever the SDK would pick now.
     /// </summary>
     /// <remarks>
@@ -3025,6 +3107,24 @@ public class SparkUnilateralExitServiceTests
             Sdk.ExitLeaves.Clear();
             foreach (var (leafId, valueSat) in leaves)
                 Sdk.ExitLeaves.Add(new SparkExitLeaf(leafId, valueSat));
+        }
+
+        /// <summary>
+        /// Leaves the Spark operators have already moved on-chain, so the SDK recovers them cooperatively.
+        /// </summary>
+        /// <remarks>
+        /// A separate helper rather than a third tuple member on <see cref="WithLeaves"/>, because the method is
+        /// the thing that decides whether the recovery needs funding at all — a caller that is not asking about
+        /// that case should not have to name a method, and one that is should have it visible at the call site.
+        /// </remarks>
+        public void WithCooperativeLeaves(params (string LeafId, long ValueSat)[] leaves)
+        {
+            Sdk.ExitLeaves.Clear();
+            foreach (var (leafId, valueSat) in leaves)
+            {
+                Sdk.ExitLeaves.Add(new SparkExitLeaf(
+                    leafId, valueSat, SparkExitRecoveryMethod.Cooperative));
+            }
         }
 
         /// <summary>Answers explorer lookups with these outputs.</summary>

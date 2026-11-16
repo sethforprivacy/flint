@@ -62,7 +62,7 @@
   <PropertyGroup>
     <Product>Flint</Product>
     <Description>Accept Lightning payments without running a node. Each store gets its own Spark wallet, wired into Lightning and LNURL automatically, with optional automatic sweeps to on-chain Bitcoin or to a stablecoin on an EVM address. Funds sit on Spark, a non-custodial Bitcoin layer two network, until they are swept.</Description>
-    <Version>1.3.1</Version>
+    <Version>1.4.0</Version>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
@@ -126,7 +126,7 @@
       The package carries ~200 MB of native libraries for linux-x64/arm64, osx-x64/arm64,
       win-x64/x86. There is no linux-musl (Alpine) or win-arm64 payload.
     -->
-    <PackageReference Include="Breez.Sdk.Spark" Version="[0.26.1]" />
+    <PackageReference Include="Breez.Sdk.Spark" Version="[0.28.4]" />
     <!--
       Transitive-vulnerability pin: SSH.NET 2025.1.0 flows in from BTCPayServer.csproj, and 2025.1.0 is
       the last version affected by CVE-2026-48798 (GHSA-q939-rpr3-3284, high: ScpClient recursive
@@ -137,7 +137,7 @@
       are kept out. Drop the reference once the pinned btcpayserver submodule carries a fixed
       SSH.NET on its own.
     -->
-    <PackageReference Include="SSH.NET" Version="2026.0.0" ExcludeAssets="runtime;compile" />
+    <PackageReference Include="SSH.NET" Version="2026.0.1" ExcludeAssets="runtime;compile" />
   </ItemGroup>
 
   <!--

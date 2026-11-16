@@ -331,8 +331,17 @@ public class SparkLocalRegtestExitTests
         {
             var progress = await _stack.Sdk.CheckUnilateralExitAsync(current, Ct).ConfigureAwait(false);
 
+            // The rate and the destination travel with the set through every round: the check takes a whole
+            // recovery, and a rebuild that dropped them would hand the SDK a different document from the one the
+            // build returned.
             current = new SparkExitResult(
-                progress.RecoverableValueSat, progress.TotalFeeSat, progress.Transactions, current.Leaves);
+                progress.RecoverableValueSat,
+                progress.TotalFeeSat,
+                current.FeeRateSatPerVbyte,
+                current.Destination,
+                progress.Transactions,
+                current.Leaves,
+                current.Failed);
 
             trace.AppendLine(
                 $"round {round}: verdict={progress.Verdict} "

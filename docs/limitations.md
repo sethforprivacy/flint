@@ -159,10 +159,16 @@
   and is not something to ship without mainnet evidence behind it.
 - **The unilateral exit is manual, and narrower than the name suggests.** It is linked from every store's
   Advanced page, refuses to quote or build until an operator has accepted its disclosure, and carries four
-  limits that do not show from the name alone. The plugin **never broadcasts**: it quotes, funds and signs, and the
+  limits that do not show from the name alone. It is also not only unilateral: since SDK 0.28 one quote recovers
+  a leaf either by unrolling its tree — the unilateral path, which needs nothing from the operators — or
+  *cooperatively*, when the operators have already moved that leaf on-chain and can co-sign one transaction
+  paying it out. A cooperative leaf pays its own fee out of its own value, needs no funding UTXO, and its
+  transaction goes out alone as soon as it is built; but the operators have to be reachable to co-sign it, so the
+  half of a recovery that needs nothing from them is the half that cannot rescue a leaf they already took. A
+  quote made entirely of cooperative leaves asks the operator to fund nothing and builds straight away. The plugin **never broadcasts**: it quotes, funds and signs, and the
   operator pushes every transaction out by hand, package by package, through a node that supports package
   relay — a plain `sendrawtransaction` rejects the zero-fee tree transactions. An exit is quoted and built
-  from data the SDK holds **locally**, so on the pinned SDK (0.26.0) it does not need the Spark operators to
+  from data the SDK holds **locally**, so on the pinned SDK (0.28.4) it does not need the Spark operators to
   be reachable — but only for leaves whose data was collected while they still were. That is why the
   exit-state backup on the Advanced page matters: it is the copy that survives the wallet's own storage. An
   imported out-of-date backup can make leaves spent since spendable again until the next sync, which is why Flint

@@ -268,6 +268,11 @@ public sealed record UnilateralExitOpResult(
 /// them or by the last check. Nothing refreshes them between presses, so the page states this beside them. Null for
 /// a set stored before the time was recorded, and when there is no readable set.
 /// </param>
+/// <param name="FailedLeaves">
+/// Leaves the last build could not recover because the operators refused to co-sign them, with the SDK's
+/// reason, or null when none were reported. Part of the built set rather than of the exit: the transactions
+/// beside them are a complete recovery of everything else, and each of these needs an attempt of its own.
+/// </param>
 /// <param name="LoadError">
 /// Set when the read itself failed — the exit records could not be loaded — and every other member is then the
 /// empty page. The view renders this instead of any form: an empty page with a quote form beside it would read
@@ -288,4 +293,5 @@ public sealed record UnilateralExitPageData(
     bool TransactionsUnreadable,
     IReadOnlyList<SparkExitTransaction>? PendingBroadcast,
     string? LoadError = null,
-    DateTimeOffset? StatusesReadUtc = null);
+    DateTimeOffset? StatusesReadUtc = null,
+    IReadOnlyList<SparkExitFailedLeaf>? FailedLeaves = null);

@@ -588,12 +588,15 @@ public class SparkExitPageTests
         // The SDK's own arithmetic: the fan-out and CPFP fees come from the funding, only the sweep's fee comes
         // out of the recovered value, unspent funding is swept to the destination, and funding for an exit that
         // is never broadcast is not spent at all. The page used to say the opposite of each.
+        // Matched with the template's own line wrapping flattened, because these are sentences rather than
+        // fragments: the page wraps them to the column and a one-word reflow must not fail a test about meaning.
         var view = ExitTemplate();
+        var flat = string.Join(" ", view.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
         Assert.DoesNotContain("Gross, before the fees below come out of it", view);
         Assert.DoesNotContain("spent whether or not the exit completes", view);
-        Assert.Contains("only the final", view);
-        Assert.Contains("Funding for an exit you never broadcast is not spent", view);
+        Assert.Contains("only the final sweep's own fee comes out of it", flat);
+        Assert.Contains("Funding for an exit you never broadcast is not spent", flat);
     }
 
     [Fact]
