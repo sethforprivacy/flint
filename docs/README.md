@@ -27,6 +27,13 @@ Everything about the plugin beyond "what is it and how do I install it". Start a
 - **[Greenfield API](greenfield-api.md)** — the twelve endpoints that do everything the pages do, their
   API-key permissions, and a worked `curl` script for provisioning a store headlessly.
 
+## Operations
+
+- **[SDK backfill runbook](ops-backfill.md)** — step-by-step deployment checklist for the
+  v1.3.1.3 SDK-primary backfill: backup, delete backfill rows, copy rollback, deploy, verify
+  migrations, dry-run and real backfill, reconciliation query. Includes notes on correct SQL
+  patterns for Postgres schemas with dots in the name and EF history table naming.
+
 ## Working on it
 
 - **[Building](building.md)** — prerequisites, the submodule pin, packaging a `.btcpay`, and why the
