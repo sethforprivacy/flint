@@ -7,6 +7,29 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1.4] - 2026-11-21
+
+### Fixed
+
+- **Sweep fee double-counting** (`BackfillSweepsAsync`, `SparkSweepEngine`): when `FeesIncluded=true`
+  the SDK deducts `AmountSats` (gross = net + fee) from the wallet balance. Both the backfill path and
+  the live sweep path were writing `AmountMsat = AmountSats * 1000` (gross), causing
+  `debit = gross + fee = net + 2 * fee`. Corrected to `AmountMsat = RecipientAmountSats * 1000`
+  (net). The `FeeMsat` field was already correct. Convention enforced by extracted `MapSweepRecord`.
+- **Backfill API response** (`GreenfieldSparkController`): `sdkPayments` field was included in
+  `total` but not exposed separately; `total != sum(categories)` for stores with SDK-primary backfill
+  entries. Now exposed as a sibling field.
+
+### Security
+
+- **Reconciliation integrity** (`SparkLedgerBackfillService`, `SparkSweepEngine`): the
+  double-fee-counting bug caused `SUM(debit) > SDK balance` by `2 * SUM(sweep_fees)` for every
+  store with `FeesIncluded=true` sweeps. Confirmed against production data: BTCfactura showed
+  -2,940 sats discrepancy (2 sweeps x 1,470 sats fee each). Fix verified with 2 unit tests
+  (`MapSweepRecord_uses_net_AmountMsat_when_FeesIncluded`,
+  `MapSweepRecord_uses_full_AmountMsat_when_fees_excluded`); full suite: 20/20.
+  Data correction required after deploy: delete backfill rows for affected sweeps, re-run backfill.
+
 ## [1.3.1.3] - 2026-11-21
 
 ### Added
