@@ -451,7 +451,7 @@ public sealed class SparkLedgerBackfillService(
     /// is needed to track this correctly; that is tracked as a future work item.
     /// </para>
     /// </summary>
-    private async Task<BackfillCount> BackfillFromSdkAsync(
+    internal async Task<BackfillCount> BackfillFromSdkAsync(
         string storeId, bool dryRun, CancellationToken cancellationToken)
     {
         var sdk = await runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
@@ -483,8 +483,9 @@ public sealed class SparkLedgerBackfillService(
         if (allPayments.Count == 0)
             return BackfillCount.Zero;
 
-        // Bulk load enrichment from DB in one pass.
-        await using var context = dbFactory.CreateContext();
+        // Bulk load enrichment from DB in one pass. dbFactory is null only in unit tests
+        // that seed the SDK client but exercise idempotency without needing DB enrichment.
+        await using var context = dbFactory?.CreateContext();
 
         var lnHashes = allPayments
             .Where(p => p.Direction == SparkPaymentDirection.Receive
@@ -493,7 +494,7 @@ public sealed class SparkLedgerBackfillService(
             .Select(p => p.PaymentHash!)
             .ToHashSet();
 
-        var invoiceIdByHash = lnHashes.Count > 0
+        var invoiceIdByHash = (context is not null && lnHashes.Count > 0)
             ? await context.InvoicePaymentHashes
                 .AsNoTracking()
                 .Where(h => lnHashes.Contains(h.PaymentHash))
@@ -507,7 +508,7 @@ public sealed class SparkLedgerBackfillService(
             .Select(p => p.SdkPaymentId)
             .ToHashSet();
 
-        var quoteBySdkId = stablecoinSdkIds.Count > 0
+        var quoteBySdkId = (context is not null && stablecoinSdkIds.Count > 0)
             ? await context.StablecoinQuotes
                 .AsNoTracking()
                 .Where(q => q.SdkPaymentId != null && stablecoinSdkIds.Contains(q.SdkPaymentId))

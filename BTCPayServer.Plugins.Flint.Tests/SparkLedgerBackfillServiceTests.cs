@@ -6,6 +6,7 @@ using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -264,6 +265,45 @@ public class SparkLedgerBackfillServiceTests
         var existsBySdk = await ledger.ExistsForSdkPaymentAsync(StoreId, payment.SdkPaymentId);
 
         Assert.True(existsBySdk);
+        Assert.Equal(1, await ledger.CountAsync(StoreId));
+    }
+
+    // -- Live row + same SDK payment: BackfillFromSdkAsync skips ----------------
+
+    [Fact]
+    public async Task BackfillFromSdkAsync_skips_payment_already_recorded_as_live_row()
+    {
+        var ledger = new InMemorySparkLedgerStore();
+        var sdk = new FakeSparkSdkClient();
+
+        var payment = LnSend("live-pay-1", 5_000, 50, "hash-live");
+        sdk.Seed(payment);
+
+        // Record it as a LIVE (non-backfill) row - exactly what the live write path produces.
+        await ledger.AppendAsync(new SparkLedgerEntry
+        {
+            Id = Guid.NewGuid().ToString(),
+            StoreId = StoreId,
+            EntryType = SparkLedgerEntryType.Send,
+            AmountMsat = 5_000_000L,
+            FeeMsat = 50_000L,
+            OccurredAt = Now,
+            RecordedAt = Now,
+            SdkPaymentId = payment.SdkPaymentId,
+            IsBackfill = false,  // live row, NOT a backfill
+        });
+
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients[StoreId] = sdk;
+
+        var svc = new SparkLedgerBackfillService(
+            null!, ledger, runtime,
+            NullLogger<SparkLedgerBackfillService>.Instance);
+
+        var result = await svc.BackfillFromSdkAsync(StoreId, dryRun: false, CancellationToken.None);
+
+        Assert.Equal(0, result.Created);
+        Assert.Equal(1, result.Skipped);
         Assert.Equal(1, await ledger.CountAsync(StoreId));
     }
 }
