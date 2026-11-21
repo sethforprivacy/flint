@@ -800,6 +800,7 @@ public class GreenfieldSparkController : ControllerBase
             sends = new { report.Sends.Skipped, report.Sends.Created, report.Sends.Failed },
             sweeps = new { report.Sweeps.Skipped, report.Sweeps.Created, report.Sweeps.Failed },
             unilateralExits = new { report.UnilateralExits.Skipped, report.UnilateralExits.Created, report.UnilateralExits.Failed },
+            sdkPayments = new { report.SdkPayments.Skipped, report.SdkPayments.Created, report.SdkPayments.Failed },
             total = new { report.Total.Skipped, report.Total.Created, report.Total.Failed },
         });
     }

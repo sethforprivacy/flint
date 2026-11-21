@@ -312,4 +312,55 @@ public class SparkLedgerBackfillServiceTests
         Assert.Equal(1, result.Skipped);
         Assert.Equal(1, await ledger.CountAsync(StoreId));
     }
+
+    // ── MapSweepRecord: FeesIncluded nets fee out of AmountMsat ──────────────
+
+    [Fact]
+    public void MapSweepRecord_uses_net_AmountMsat_when_FeesIncluded()
+    {
+        // AmountSats = 617_314 (gross: what SDK deducts from balance, fee included).
+        // FeeSats = 1_470 -> RecipientAmountSats = 615_844.
+        // Convention: AmountMsat = net; FeeMsat = fee; debit = Amount + Fee = gross.
+        var record = new SweepRecord
+        {
+            IdempotencyKey = "sweep-fees-included",
+            StoreId = StoreId,
+            AmountSats = 617_314,
+            FeeSats = 1_470,
+            FeesIncluded = true,
+            QuotedFeeSats = 1_470,
+            CreatedAt = Now,
+            CompletedAt = Now,
+        };
+
+        var entry = SparkLedgerBackfillService.MapSweepRecord(StoreId, record);
+
+        Assert.Equal(SparkLedgerEntryType.Sweep, entry.EntryType);
+        Assert.Equal(615_844_000L, entry.AmountMsat);  // net = gross - fee
+        Assert.Equal(1_470_000L, entry.FeeMsat);
+        Assert.Equal(617_314_000L, entry.AmountMsat + entry.FeeMsat);  // debit = gross
+        Assert.True(entry.IsBackfill);
+    }
+
+    [Fact]
+    public void MapSweepRecord_uses_full_AmountMsat_when_fees_excluded()
+    {
+        // FeesIncluded=false: SDK sends recipient exactly AmountSats, charges fee separately.
+        var record = new SweepRecord
+        {
+            IdempotencyKey = "sweep-fees-excluded",
+            StoreId = StoreId,
+            AmountSats = 490_000,
+            FeeSats = 2_000,
+            FeesIncluded = false,
+            QuotedFeeSats = 2_000,
+            CreatedAt = Now,
+            CompletedAt = Now,
+        };
+
+        var entry = SparkLedgerBackfillService.MapSweepRecord(StoreId, record);
+
+        Assert.Equal(490_000_000L, entry.AmountMsat);
+        Assert.Equal(2_000_000L, entry.FeeMsat);
+    }
 }

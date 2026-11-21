@@ -253,18 +253,7 @@ public sealed class SparkLedgerBackfillService(
 
                 if (!dryRun)
                 {
-                    await ledger.AppendAsync(new SparkLedgerEntry
-                    {
-                        Id = Guid.NewGuid().ToString(),
-                        StoreId = storeId,
-                        EntryType = SparkLedgerEntryType.Sweep,
-                        AmountMsat = record.AmountSats * 1000L,
-                        FeeMsat = (record.FeeSats ?? 0) * 1000L,
-                        OccurredAt = record.CompletedAt ?? record.CreatedAt,
-                        RecordedAt = record.CompletedAt ?? record.CreatedAt,
-                        SdkPaymentId = record.IdempotencyKey,
-                        IsBackfill = true,
-                    }, cancellationToken).ConfigureAwait(false);
+                    await ledger.AppendAsync(MapSweepRecord(storeId, record), cancellationToken).ConfigureAwait(false);
                 }
                 created++;
             }
@@ -360,6 +349,25 @@ public sealed class SparkLedgerBackfillService(
             // Cooperative exit (auto-sweep) to an on-chain address.
             (SparkPaymentDirection.Send,    SparkPaymentMethod.Withdraw)  => SparkLedgerEntryType.Sweep,
             _ => null,
+        };
+
+    /// <summary>
+    /// Maps one completed <see cref="SweepRecord"/> to a <see cref="SparkLedgerEntry"/>.
+    /// AmountMsat = RecipientAmountSats (net) so that debit = Amount + Fee = gross.
+    /// Extracted for unit testability; called by <see cref="BackfillSweepsAsync"/>.
+    /// </summary>
+    internal static SparkLedgerEntry MapSweepRecord(string storeId, SweepRecord record) =>
+        new()
+        {
+            Id = Guid.NewGuid().ToString(),
+            StoreId = storeId,
+            EntryType = SparkLedgerEntryType.Sweep,
+            AmountMsat = record.RecipientAmountSats * 1000L,
+            FeeMsat = (record.FeeSats ?? 0) * 1000L,
+            OccurredAt = record.CompletedAt ?? record.CreatedAt,
+            RecordedAt = record.CompletedAt ?? record.CreatedAt,
+            SdkPaymentId = record.IdempotencyKey,
+            IsBackfill = true,
         };
 
     /// <summary>

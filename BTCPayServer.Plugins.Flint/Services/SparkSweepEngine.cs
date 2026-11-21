@@ -2151,7 +2151,9 @@ public sealed class SparkSweepEngine
                         Id = Guid.NewGuid().ToString(),
                         StoreId = storeId,
                         EntryType = SparkLedgerEntryType.Sweep,
-                        AmountMsat = record.AmountSats * 1000L,
+                        // RecipientAmountSats = net (AmountSats - FeeSats when FeesIncluded=true).
+                        // debit = Amount + Fee = gross.
+                        AmountMsat = record.RecipientAmountSats * 1000L,
                         FeeMsat = payment.FeeSats * 1000L,
                         OccurredAt = payment.Timestamp,
                         RecordedAt = now,
