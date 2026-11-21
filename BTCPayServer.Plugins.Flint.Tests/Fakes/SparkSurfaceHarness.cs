@@ -301,7 +301,7 @@ public sealed class SparkSurfaceHarness
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
             depositService, stableBalanceService, stablecoins.Service,
-            new SparkLedgerBackfillService(null!, new InMemorySparkLedgerStore(), NullLogger<SparkLedgerBackfillService>.Instance),
+            new SparkLedgerBackfillService(null!, new InMemorySparkLedgerStore(), new FakeSparkStoreRuntime(), NullLogger<SparkLedgerBackfillService>.Instance),
             NullLogger<GreenfieldSparkController>.Instance);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };

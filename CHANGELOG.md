@@ -7,6 +7,37 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1.3] - 2026-11-21
+
+### Added
+
+- **SDK-primary backfill**: `BackfillFromSdkAsync` pages through `ListPaymentsAsync` for all stores and
+  writes one ledger row per completed payment. All seven SDK directions are covered: LightningReceive,
+  StablecoinReceive (BTC-landing), StablecoinReceive (Token/USDB, AmountMsat=0 pending token column),
+  OnchainDeposit (auto-claimed static-address deposit; txid:vout in Description; claim fee in FeeMsat),
+  Send (Lightning and Spark), and Sweep (cooperative exit). Pre-existing DB-sourced backfill paths
+  (lightning, stablecoin, sweeps, unilateral exits) are unchanged.
+- **OnchainDeposit entry type** (`SparkLedgerEntryType.OnchainDeposit = 5`): records auto-claimed
+  on-chain Bitcoin deposits as credits. No DB migration required (enum stored as int; appending to tail
+  is backward-compatible). Identifier: `SdkPaymentId` + `Description` (`txid:vout`); no PaymentHash.
+- **SDK Description preserved**: every ledger row stores the SDK payment description
+  (e.g. "Bitrefill <id>") for future per-order margin calculation against WooCommerce orders.
+- **EF migration** `20261121000000_SparkLedgerDescription`: adds `Description text nullable` column
+  to `SparkLedger`.
+
+### Note
+
+- With Stable Balance ON (USDB destination) `AmountMsat` for Token receives is set to 0.
+  A separate token-amount column is required to represent USDB balances; not implemented in this
+  release.
+
+### Security
+
+- Live `Send` path (`SparkSendPaymentService`, lines 121-133): amounts and fees come from the SDK
+  `SparkPayment` record, not from internal estimates. Confirmed correct; no changes.
+- Live `Sweep` path (`SparkSweepEngine`, lines 2149-2161): same - SDK-authoritative amounts.
+  Confirmed correct; no changes.
+
 ## [1.3.1.2] - 2026-11-13
 
 ### Added

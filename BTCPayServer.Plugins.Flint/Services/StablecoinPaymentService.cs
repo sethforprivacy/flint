@@ -1107,7 +1107,12 @@ public sealed class StablecoinPaymentService
                         Id = Guid.NewGuid().ToString(),
                         StoreId = quote.StoreId,
                         EntryType = SparkLedgerEntryType.StablecoinReceive,
-                        AmountMsat = sdkAmountMsat ?? 0,
+                        // SDK amount when available (live event path); fall back to DeliveredBaseUnits (sats)
+                        // for the reconciler retry path (RetryCreditsAsync) where no SDK payment is in scope.
+                        AmountMsat = sdkAmountMsat
+                            ?? (quote.DestinationAsset == "BTC" && quote.DeliveredBaseUnits is not null
+                                ? (long)StablecoinQuote.ParseBaseUnits(quote.DeliveredBaseUnits) * 1000L
+                                : 0),
                         FeeMsat = 0,
                         OccurredAt = quote.SettledAt ?? creditedAt,
                         RecordedAt = creditedAt,

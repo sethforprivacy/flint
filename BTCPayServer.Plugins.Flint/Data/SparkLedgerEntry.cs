@@ -13,8 +13,9 @@ namespace BTCPayServer.Plugins.Flint.Data;
 /// <para>
 /// Every financial event that changes the wallet's sats balance writes one row here.
 /// The invariant is: <c>opening_balance + SUM(credits) - SUM(debits) = current_SDK_balance</c>,
-/// where <see cref="SparkLedgerEntryType.LightningReceive"/> and
-/// <see cref="SparkLedgerEntryType.StablecoinReceive"/> are credits, and
+/// where <see cref="SparkLedgerEntryType.LightningReceive"/>,
+/// <see cref="SparkLedgerEntryType.StablecoinReceive"/>, and
+/// <see cref="SparkLedgerEntryType.OnchainDeposit"/> are credits, and
 /// <see cref="SparkLedgerEntryType.Send"/>, <see cref="SparkLedgerEntryType.Sweep"/>, and
 /// <see cref="SparkLedgerEntryType.UnilateralExit"/> are debits.
 /// </para>
@@ -62,6 +63,12 @@ public class SparkLedgerEntry
     /// and <see cref="SparkLedgerEntryType.Send"/>; foreign-key-equivalent to <c>InvoiceRecord.PaymentHash</c>.
     /// </summary>
     public string? PaymentHash { get; set; }
+
+    /// <summary>
+    /// SDK payment description (e.g. "Bitrefill &lt;order-id&gt;").
+    /// Preserved for downstream WooCommerce order correlation.
+    /// </summary>
+    public string? Description { get; set; }
 
     /// <summary>
     /// BTCPay invoice id. Set for <see cref="SparkLedgerEntryType.LightningReceive"/> and
@@ -139,6 +146,13 @@ public enum SparkLedgerEntryType
 
     /// <summary>A unilateral exit transaction was broadcast.</summary>
     UnilateralExit = 4,
+
+    /// <summary>
+    /// An on-chain deposit to the wallet's static Bitcoin address was claimed.
+    /// AmountSats = net credited after claim fee (FeeSats = on-chain claim fee).
+    /// Identifier: SdkPaymentId + Description carries txid:vout (no payment hash exists).
+    /// </summary>
+    OnchainDeposit = 5,
 }
 
 /// <summary>

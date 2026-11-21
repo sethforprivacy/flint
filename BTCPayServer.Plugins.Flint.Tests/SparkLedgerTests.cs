@@ -215,7 +215,8 @@ public class SparkLedgerTests
             StablecoinReceives: new BackfillCount(0, 1, 0),
             Sends: BackfillCount.Zero,
             Sweeps: new BackfillCount(0, 3, 1),
-            UnilateralExits: new BackfillCount(2, 0, 0));
+            UnilateralExits: new BackfillCount(2, 0, 0),
+            SdkPayments: BackfillCount.Zero);
 
         var total = report.Total;
 
