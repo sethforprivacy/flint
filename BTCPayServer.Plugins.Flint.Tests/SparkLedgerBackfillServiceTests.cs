@@ -61,6 +61,7 @@ public class SparkLedgerBackfillServiceTests
     [InlineData(SparkPaymentDirection.Receive, SparkPaymentMethod.Lightning, SparkLedgerEntryType.LightningReceive)]
     [InlineData(SparkPaymentDirection.Receive, SparkPaymentMethod.Spark,     SparkLedgerEntryType.StablecoinReceive)]
     [InlineData(SparkPaymentDirection.Receive, SparkPaymentMethod.Token,     SparkLedgerEntryType.StablecoinReceive)]
+    [InlineData(SparkPaymentDirection.Receive, SparkPaymentMethod.Deposit,   SparkLedgerEntryType.OnchainDeposit)]
     [InlineData(SparkPaymentDirection.Send,    SparkPaymentMethod.Lightning, SparkLedgerEntryType.Send)]
     [InlineData(SparkPaymentDirection.Send,    SparkPaymentMethod.Spark,     SparkLedgerEntryType.Send)]
     [InlineData(SparkPaymentDirection.Send,    SparkPaymentMethod.Withdraw,  SparkLedgerEntryType.Sweep)]
@@ -79,7 +80,6 @@ public class SparkLedgerBackfillServiceTests
     }
 
     [Theory]
-    [InlineData(SparkPaymentDirection.Receive, SparkPaymentMethod.Deposit)]
     [InlineData(SparkPaymentDirection.Send,    SparkPaymentMethod.Token)]
     [InlineData(SparkPaymentDirection.Send,    SparkPaymentMethod.Deposit)]
     public void EntryTypeFor_returns_null_for_unmodelled_methods(
@@ -95,20 +95,23 @@ public class SparkLedgerBackfillServiceTests
     // ── Reconciliation test ──────────────────────────────────────────────────
 
     /// <summary>
-    /// SDK ledger invariant: sum(credits) − sum(debits) − sum(fees) = wallet balance.
+    /// SDK ledger invariant: sum(credits) - sum(debits) - sum(fees) = wallet balance.
     /// Uses synthetic payments matching a realistic history: 3 LN receives, 2 sends (including
     /// one Bitrefill supplier payment), 1 on-chain sweep, 1 stablecoin BTC-landing receive,
-    /// 1 stablecoin Token receive (USDB, AmountMsat=0), 1 on-chain deposit (skipped).
+    /// 1 stablecoin Token receive (USDB, AmountMsat=0), 1 on-chain deposit (claimed, credit).
     ///
-    /// Expected balance: (10_000 + 20_000 + 15_000 + 12_000) − (8_000 + 100) − (5_000 + 200) = 43_700 sats
+    /// Expected balance:
+    ///   credits: (10_000 + 20_000 + 15_000 + 12_000 + 50_000)
+    ///   debits:  (8_000 + 100) + (5_000 + 200) = 13_300
+    ///   balance: 107_000 - 13_300 = 93_700 sats
     /// </summary>
     [Fact]
     public void MapSdkPayments_entries_reconcile_to_SDK_balance()
     {
         const long expectedBalanceSats =
-            (10_000 + 20_000 + 15_000 + 12_000) // credits: 3 LN receives + 1 stablecoin spark
-            - (8_000 + 100)                       // debit: 1 LN send + fee
-            - (5_000 + 200);                      // debit: 1 sweep + fee
+            (10_000 + 20_000 + 15_000 + 12_000 + 50_000) // credits: 3 LN + 1 stablecoin spark + 1 onchain deposit
+            - (8_000 + 100)                                // debit: 1 LN send + fee
+            - (5_000 + 200);                               // debit: 1 sweep + fee
 
         var payments = new List<SparkPayment>
         {
@@ -119,17 +122,18 @@ public class SparkLedgerBackfillServiceTests
             StablecoinTokenReceive("stbl-token-1"),        // USDB - AmountMsat = 0
             LnSend("snd-1", 8_000, 100, "hash-snd-1", "Bitrefill order-123"),
             OnchainSweep("sweep-1", 5_000, 200),
-            OnchainDeposit("dep-1", 50_000),               // skipped - Deposit not modelled
+            OnchainDeposit("dep-1", 50_000),               // claimed on-chain deposit = credit
         };
 
         var entries = Map(payments);
 
-        // 7 payments match a known type (Deposit is skipped).
-        Assert.Equal(7, entries.Count);
+        // All 8 payments have a mapped entry type (Send+Deposit is unmodelled, Receive+Deposit is now OnchainDeposit).
+        Assert.Equal(8, entries.Count);
 
         var credits = entries
             .Where(e => e.EntryType is SparkLedgerEntryType.LightningReceive
-                                    or SparkLedgerEntryType.StablecoinReceive)
+                                    or SparkLedgerEntryType.StablecoinReceive
+                                    or SparkLedgerEntryType.OnchainDeposit)
             .Sum(e => e.AmountMsat);
 
         var debits = entries
@@ -204,10 +208,10 @@ public class SparkLedgerBackfillServiceTests
         Assert.Equal(250_000L, e.FeeMsat);
     }
 
-    // ── Deposit is skipped ──────────────────────────────────────────────────
+    // ── Deposit is recorded as OnchainDeposit credit ────────────────────────
 
     [Fact]
-    public void MapSdkPayments_skips_on_chain_deposit_payments()
+    public void MapSdkPayments_records_on_chain_deposit_as_OnchainDeposit()
     {
         var payments = new List<SparkPayment>
         {
@@ -216,7 +220,9 @@ public class SparkLedgerBackfillServiceTests
 
         var entries = Map(payments);
 
-        Assert.Empty(entries);
+        Assert.Single(entries);
+        Assert.Equal(SparkLedgerEntryType.OnchainDeposit, entries[0].EntryType);
+        Assert.Equal(100_000_000L, entries[0].AmountMsat);  // 100_000 sats * 1000
     }
 
     // ── IsBackfill flag ────────────────────────────────────────────────────

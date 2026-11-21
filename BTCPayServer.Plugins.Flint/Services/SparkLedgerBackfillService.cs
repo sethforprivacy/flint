@@ -343,7 +343,7 @@ public sealed class SparkLedgerBackfillService(
     }
 
     // Maps SDK payment to ledger entry type. Returns null for payment methods not yet modelled
-    // (Deposit = on-chain static-address receive; Token send = stablecoin send via token balance).
+    // (Token send = stablecoin send via token balance).
     internal static SparkLedgerEntryType? EntryTypeFor(SparkPayment payment) =>
         (payment.Direction, payment.Method) switch
         {
@@ -351,6 +351,9 @@ public sealed class SparkLedgerBackfillService(
             // Stablecoin cross-chain receive that landed as BTC (Method=Spark) or as token/USDB (Method=Token).
             (SparkPaymentDirection.Receive, SparkPaymentMethod.Spark)     => SparkLedgerEntryType.StablecoinReceive,
             (SparkPaymentDirection.Receive, SparkPaymentMethod.Token)     => SparkLedgerEntryType.StablecoinReceive,
+            // Auto-claimed on-chain deposit to the wallet's static Bitcoin address.
+            // FeeSats = on-chain claim fee; no payment hash; identifier is SdkPaymentId + txid:vout in Description.
+            (SparkPaymentDirection.Receive, SparkPaymentMethod.Deposit)   => SparkLedgerEntryType.OnchainDeposit,
             (SparkPaymentDirection.Send,    SparkPaymentMethod.Lightning) => SparkLedgerEntryType.Send,
             // Spark transfer to another Spark address, or cross-chain send funded from BTC balance.
             (SparkPaymentDirection.Send,    SparkPaymentMethod.Spark)     => SparkLedgerEntryType.Send,
