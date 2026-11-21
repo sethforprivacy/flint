@@ -1119,6 +1119,32 @@ public class StablecoinPaymentServiceTests
         Assert.Empty(setup.Sdk.ListQueries);
     }
 
+    [Fact]
+    public async Task A_stablecoin_credit_via_the_reconciler_records_the_delivered_sats_in_the_ledger()
+    {
+        // The reconciler retry path calls CreditAsync(quote, null) — no live SDK amount in scope.
+        // The fix falls back to DeliveredBaseUnits so the ledger entry carries the real sats received,
+        // not 0. This test drives a credit through that path and verifies the ledger row.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+        const long deliveredSats = 11_457L;
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
+            sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount, delivered: new BigInteger(deliveredSats));
+
+        setup.Invoices.FailPaymentsWith = new InvalidOperationException("database unavailable");
+        Assert.Equal(StablecoinReceiveOutcome.CreditFailed, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+
+        setup.Invoices.FailPaymentsWith = null;
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        var entry = Assert.Single(setup.Harness.Ledger.All);
+        Assert.Equal(SparkLedgerEntryType.StablecoinReceive, entry.EntryType);
+        Assert.Equal(deliveredSats * 1000L, entry.AmountMsat);
+        Assert.NotNull(entry.BtcPayInvoiceId);
+    }
+
     #endregion
 
     #region The store's switch

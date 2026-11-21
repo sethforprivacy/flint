@@ -455,6 +455,9 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.Property<string>("BtcPayInvoiceId")
                         .HasColumnType("text");
 
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
                     b.Property<int>("EntryType")
                         .HasColumnType("integer");
 

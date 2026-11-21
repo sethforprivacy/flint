@@ -64,6 +64,12 @@ public class SparkLedgerEntry
     public string? PaymentHash { get; set; }
 
     /// <summary>
+    /// SDK payment description (e.g. "Bitrefill &lt;order-id&gt;").
+    /// Preserved for downstream WooCommerce order correlation.
+    /// </summary>
+    public string? Description { get; set; }
+
+    /// <summary>
     /// BTCPay invoice id. Set for <see cref="SparkLedgerEntryType.LightningReceive"/> and
     /// <see cref="SparkLedgerEntryType.StablecoinReceive"/>.
     /// </summary>

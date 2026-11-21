@@ -367,11 +367,13 @@ public sealed class StablecoinHarness
         StoreConfig = new FakeStablecoinStoreConfig();
         Log = new CapturingLogger<StablecoinPaymentService>();
         Routes = new StablecoinRouteCache(Time, NullLogger<StablecoinRouteCache>.Instance);
+        Ledger = new InMemorySparkLedgerStore();
         Service = new StablecoinPaymentService(
-            Quotes, Invoices, StoreConfig, runtime, Routes, Oracle, new InMemorySparkLedgerStore(), Time, available, Log);
+            Quotes, Invoices, StoreConfig, runtime, Routes, Oracle, Ledger, Time, available, Log);
     }
 
     public TimeProvider Time { get; }
+    public InMemorySparkLedgerStore Ledger { get; }
     public InMemoryStablecoinQuoteStore Quotes { get; }
     public FakeStablecoinInvoiceGateway Invoices { get; }
     public FakeStablecoinStoreConfig StoreConfig { get; }
