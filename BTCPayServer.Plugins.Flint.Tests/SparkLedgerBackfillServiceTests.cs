@@ -345,7 +345,8 @@ public class SparkLedgerBackfillServiceTests
     [Fact]
     public void MapSweepRecord_uses_full_AmountMsat_when_fees_excluded()
     {
-        // FeesIncluded=false: SDK sends recipient exactly AmountSats, charges fee separately.
+        // FeesIncluded=false: SDK sends recipient exactly AmountSats and charges fee on top.
+        // RecipientAmountSats = AmountSats = 490_000; debit = Amount + Fee = 492_000.
         var record = new SweepRecord
         {
             IdempotencyKey = "sweep-fees-excluded",
@@ -360,7 +361,8 @@ public class SparkLedgerBackfillServiceTests
 
         var entry = SparkLedgerBackfillService.MapSweepRecord(StoreId, record);
 
-        Assert.Equal(490_000_000L, entry.AmountMsat);
+        Assert.Equal(490_000_000L, entry.AmountMsat);     // net = AmountSats (no netting needed)
         Assert.Equal(2_000_000L, entry.FeeMsat);
+        Assert.Equal(492_000_000L, entry.AmountMsat + entry.FeeMsat);  // debit = net + fee
     }
 }
