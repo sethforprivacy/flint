@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using BTCPayServer.Plugins.Flint.Services;
 using Xunit;
@@ -21,7 +22,7 @@ public class StablecoinAmountsTests
     [InlineData("12.34", 8, "1234000000")]
     public void A_due_converts_exactly_into_base_units(string amount, int decimals, string expected)
     {
-        Assert.Equal(BigInteger.Parse(expected), StablecoinAmounts.ToBaseUnits(decimal.Parse(amount), decimals));
+        Assert.Equal(BigInteger.Parse(expected), StablecoinAmounts.ToBaseUnits(decimal.Parse(amount, CultureInfo.InvariantCulture), decimals));
     }
 
     [Fact]
@@ -39,7 +40,7 @@ public class StablecoinAmountsTests
     public void A_payment_converts_out_of_base_units_rounding_down(string baseUnits, int decimals, string expected)
     {
         Assert.Equal(
-            decimal.Parse(expected),
+            decimal.Parse(expected, CultureInfo.InvariantCulture),
             StablecoinAmounts.FromBaseUnits(BigInteger.Parse(baseUnits), decimals, StablecoinPayments.Divisibility));
     }
 

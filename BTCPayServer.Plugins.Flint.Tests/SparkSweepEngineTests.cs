@@ -1,3 +1,4 @@
+using System.Globalization;
 using Breez.Sdk.Spark;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
@@ -314,12 +315,12 @@ public class SparkSweepEngineTests
         var record = h.Records.Single()!;
         Assert.Equal(expectedRecipientSats, record.RecipientAmountSats);
         Assert.Equal(
-            $"Sweep of {expectedRecipientSats:N0} sat accepted for a 2,190 sat fee. It confirms on-chain shortly.",
+            string.Create(CultureInfo.InvariantCulture, $"Sweep of {expectedRecipientSats:N0} sat accepted for a 2,190 sat fee. It confirms on-chain shortly."),
             result.Reason);
 
         // The sentence and the row must never disagree: they are the same fact shown in two places, and the
         // merchant has no way to tell which one is lying.
-        Assert.Contains($"{record.RecipientAmountSats:N0} sat", result.Reason);
+        Assert.Contains(string.Create(CultureInfo.InvariantCulture, $"{record.RecipientAmountSats:N0} sat"), result.Reason);
     }
 
     /// <summary>
